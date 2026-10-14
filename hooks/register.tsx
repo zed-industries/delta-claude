@@ -404,6 +404,7 @@ async function consumeConversation(
       if (!ownsObserver()) return
       stream = $.process.spawn({
         argv,
+        env: { DELTA_CLI_INTEGRATION: 'claude_code' },
       })
       const running = stream
       feed.stopProcess = () => running.return({ code: null, signal: 'SIGTERM' })
@@ -985,7 +986,9 @@ async function readThreadStatus($: Runtime, thread: string, session: string, sig
 }
 
 async function resolveCli($: Runtime, allowInstall = false) {
-  return cli.resolve((argv, init) => $.process.run(argv, init), allowInstall,
+  return cli.resolve((argv, init) => $.process.run(argv, {
+    ...init, env: { ...init?.env, DELTA_CLI_INTEGRATION: 'claude_code' },
+  }), allowInstall,
     (text) => setProgress($, text, 'active'), await $.env.get('OS') === 'Windows_NT')
 }
 
@@ -995,7 +998,10 @@ async function readCommand($: Runtime, args: string[], name: string, signal: Abo
   try {
     const executable = await resolveCli($)
     if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
-    stream = $.process.spawn({ argv: [executable, '--json', ...args] })
+    stream = $.process.spawn({
+      argv: [executable, '--json', ...args],
+      env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+    })
   }
   catch (error) { throw new DeltaCommandError('process_failed', `${name}: cannot run Delta CLI (${String(error)})`) }
   return readCommandStream(stream, name, signal,
@@ -1024,7 +1030,9 @@ async function readThreadContract($: Runtime): Promise<ThreadContract | undefine
   let result: Awaited<ReturnType<Runtime['process']['run']>>
   try {
     const executable = await resolveCli($)
-    result = await $.process.run([executable, '--json', 'thread', 'contract'], { timeoutMs: CONTRACT_TIMEOUT_MS })
+    result = await $.process.run([executable, '--json', 'thread', 'contract'], {
+      timeoutMs: CONTRACT_TIMEOUT_MS, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+    })
   } catch (error) {
     // The same failure a share or a status read reports when the CLI is missing or cannot start.
     throw new Error(`thread contract: cannot run Delta CLI (${String(error)}). Repair the selected Delta CLI and retry.`)
@@ -1234,7 +1242,9 @@ async function command($: Runtime, args: string[], name: string, check?: () => P
   try {
     const executable = await resolveCli($)
     if (check) await check()
-    result = await $.process.run([executable, '--json', ...args], { timeoutMs: 120_000 })
+    result = await $.process.run([executable, '--json', ...args], {
+      timeoutMs: 120_000, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+    })
   } catch (error) {
     throw new Error(`${name}: cannot run Delta CLI (${String(error)}). Install the matching new Delta CLI and app, and put delta on PATH.`)
   }
@@ -1314,7 +1324,9 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
         '--source', 'claude-code', '--external-id', session]
       let result: Awaited<ReturnType<Runtime['process']['run']>>
       try {
-        result = await $.process.run(argv, { stdin: collected.input, timeoutMs: 120_000 })
+        result = await $.process.run(argv, {
+          stdin: collected.input, timeoutMs: 120_000, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+        })
       } catch (error) { throw new DeltaCommandError('process_failed', `append did not finish (${String(error)})`) }
       if (result.isStdoutTruncated || result.isStderrTruncated)
         throw new DeltaCommandError('command_failed', 'append output was truncated, so no acknowledgment is assumed')
@@ -1344,6 +1356,19 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
 
 async function beginExecution($: Runtime, session: string, turnId: string) {
   await serial(async () => {
+    let producerVersion: string | undefined
+    let executionLocation: 'local' | 'remote' | undefined
+    try {
+      const manifest = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
+      if (typeof manifest.version === 'string' && manifest.version.length <= 32 &&
+          /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(manifest.version))
+        producerVersion = manifest.version
+    } catch (error) { await report($, error) }
+    try {
+      const remote = await $.env.get('CLAUDE_CODE_REMOTE')
+      if (remote === 'true') executionLocation = 'remote'
+      else if (remote === 'false') executionLocation = 'local'
+    } catch (error) { await report($, error) }
     let binding = await load($, session)
     // A delayed completion must not close this new turn. Finish only the stored
     // predecessor, then persist the new start and local identity in one manifest.
@@ -1354,7 +1379,13 @@ async function beginExecution($: Runtime, session: string, turnId: string) {
     }
     const sequence = binding.next
     binding = await stageRecord($, binding, {
-      turnSequence: sequence, update: { sessionUpdate: 'state_update', state: 'running' },
+      turnSequence: sequence, update: {
+        sessionUpdate: 'state_update', state: 'running',
+        ...producerVersion || executionLocation ? { _meta: { delta: {
+          ...producerVersion ? { producer_version: producerVersion } : {},
+          ...executionLocation ? { execution_location: executionLocation } : {},
+        } } } : {},
+      },
     })
     binding.execution = { sequence, turnId }
     binding.lastTurnSequence = sequence
@@ -1401,6 +1432,7 @@ async function endExecution(
   sequence: number,
   isCurrent = () => true,
   delivery: 'await' | 'bounded' | 'background' = 'await',
+  stopReason?: 'end_turn' | 'cancelled' | 'refusal' | 'error',
 ) {
   await serial(async () => {
     if (!isCurrent()) return
@@ -1409,7 +1441,11 @@ async function endExecution(
     if (!isCurrent() || !execution || execution.sequence !== sequence) return
     if (!execution.endSequence) {
       binding = await stageRecord($, binding, {
-        turnSequence: sequence, update: { sessionUpdate: 'state_update', state: 'idle' },
+        turnSequence: sequence, update: {
+          sessionUpdate: 'state_update', state: 'idle',
+          ...stopReason ? { stopReason } : {},
+          ...stopReason === 'error' ? { error: { code: -32603, message: 'External producer reported an error' } } : {},
+        },
       })
     }
     delete binding.execution
@@ -2134,7 +2170,9 @@ async function releaseMounts($: Runtime, session: string) {
   if (!binding?.joined || binding.session !== session || !binding.thread) return
   try {
     const argv = [await resolveCli($), '--json', 'thread', 'unmount', binding.locator ?? binding.thread, '--owner', binding.owner ?? session]
-    const result = await $.process.run(argv, { timeoutMs: RELEASE_TIMEOUT_MS })
+    const result = await $.process.run(argv, {
+      timeoutMs: RELEASE_TIMEOUT_MS, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+    })
     if (result.exitCode !== 0) await $.ui.log(`Delta thread unmount failed: ${result.stderr.trim() || result.stdout.trim()}`, { to: 'debug' })
   } catch (error) { await $.ui.log(`Delta thread unmount did not run: ${String(error)}`, { to: 'debug' }) }
 }
@@ -2393,7 +2431,11 @@ export function register(on: On) {
     const result = await next(e)
     if (sequence !== undefined) runtime.tools.forgetUnpaired(sequence)
     if (sequence !== undefined) {
-      try { await endExecution($, session, sequence, () => true, 'bounded') }
+      const stopReason = e.isAborted || e.reason === 'aborted' ? 'cancelled'
+        : e.reason === 'answer' ? 'end_turn'
+        : e.reason === 'refusal' ? 'refusal'
+        : e.reason === 'error' ? 'error' : undefined
+      try { await endExecution($, session, sequence, () => true, 'bounded', stopReason) }
       catch (error) { await report($, error) }
     }
     // Release the remote rows held back while this turn ran now that its finish is staged: delivered

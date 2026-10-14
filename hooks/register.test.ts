@@ -1991,6 +1991,72 @@ describe('native turns', () => {
     fake.expectClean()
   })
 
+  test('live turns report the installed plugin version and only confirmed finish reasons', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.pluginVersion = '0.2.3'
+    await $.session.start(sessionStart)
+    await fake.share($)
+    for (const [reason, expected] of [
+      ['answer', 'end_turn'], ['aborted', 'cancelled'], ['refusal', 'refusal'], ['error', 'error'],
+    ] as const) {
+      await $.turn.start(turnStart(reason))
+      await fake.clock.settle()
+      await $.turn.complete({ ...turnComplete(reason), reason, isAborted: reason === 'aborted' })
+      await fake.clock.settle()
+      const start = fake.records().find((record) => record.sequence === fake.starts().at(-1))
+      expect(start?.update).toEqual({
+        sessionUpdate: 'state_update', state: 'running',
+        _meta: { delta: { producer_version: '0.2.3' } },
+      })
+      const finish = fake.records().find((record) =>
+        record.update?.sessionUpdate === 'state_update' && record.update.state === 'idle' &&
+        record.turnSequence === start?.sequence)
+      expect(finish?.update).toEqual({
+        sessionUpdate: 'state_update', state: 'idle', stopReason: expected,
+        ...reason === 'error' ? { error: { code: -32603, message: 'External producer reported an error' } } : {},
+      })
+    }
+    await $.turn.start(turnStart('interrupted'))
+    await fake.clock.settle()
+    await $.turn.start(turnStart('replacement'))
+    await fake.clock.settle()
+    const recovered = fake.records().find((record) =>
+      record.update?.sessionUpdate === 'state_update' && record.update.state === 'idle' &&
+      record.turnSequence === fake.starts().at(-2))
+    expect(recovered?.update).toEqual({ sessionUpdate: 'state_update', state: 'idle' })
+    fake.pluginVersion = '/private-version'
+    await $.turn.start(turnStart('unknown-version'))
+    await fake.clock.settle()
+    const unknown = fake.records().find((record) => record.sequence === fake.starts().at(-1))
+    expect(unknown?.update).toEqual({ sessionUpdate: 'state_update', state: 'running' })
+    for (const operation of ['create', 'share', 'append']) {
+      const calls = fake.cliIntegrations.filter((call) => call.operation === operation)
+      expect(calls.length).toBeGreaterThan(0)
+      expect(calls.every((call) => call.integration === 'claude_code')).toBe(true)
+    }
+    fake.expectClean()
+  })
+
+  for (const [flag, location] of [
+    ['true', 'remote'], ['false', 'local'], [undefined, undefined],
+  ] as const)
+    test(`execution location follows only an explicit Claude host flag (${flag ?? 'missing'})`, async ($, on) => {
+      const fake = fakeThreads(on, { env: flag ? { CLAUDE_CODE_REMOTE: flag } : {} })
+      await $.session.start(sessionStart)
+      await fake.share($)
+      await $.turn.start(turnStart('host-context'))
+      await fake.clock.settle()
+      const start = fake.records().find((record) => record.sequence === fake.starts().at(-1))
+      expect(start?.update).toEqual({
+        sessionUpdate: 'state_update', state: 'running',
+        _meta: { delta: {
+          producer_version: '0.1.1',
+          ...location ? { execution_location: location } : {},
+        } },
+      })
+      fake.expectClean()
+    })
+
   for (const failure of ['write'] as const)
     test(`a failed durable start ${failure} aborts its local ID without publishing a partial start`, async ($, on) => {
       const fake = fakeThreads(on)
@@ -2189,7 +2255,10 @@ describe('native turns', () => {
     const start = JSON.parse(fake.files.get(saved.pending[0].files[0])!)
     expect(start).toEqual({
       schemaVersion: 1, sequence, turnSequence: sequence,
-      update: { sessionUpdate: 'state_update', state: 'running' },
+      update: {
+        sessionUpdate: 'state_update', state: 'running',
+        _meta: { delta: { producer_version: '0.1.1' } },
+      },
     })
     // Steering uses local lifecycle even while the start is undelivered.
     const steering = await $.prompt.submit(prompt('also test it', 'native-1'))

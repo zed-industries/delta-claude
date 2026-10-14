@@ -207,6 +207,8 @@ export function fakeThreads(on: On, options: {
   const fake = {
     session,
     cwd: CHECKOUT,
+    pluginVersion: '0.1.1',
+    cliIntegrations: [] as { operation: string; integration?: string }[],
     surfaces: ['terminal'] as ('terminal' | 'desktop')[],
     builtins: ['clear', 'cd'],
     sessionCommands: [] as { command: string; args: string }[],
@@ -546,7 +548,8 @@ export function fakeThreads(on: On, options: {
     return { value: undefined }
   })
   on('fs.read', ($, e) => {
-    const value = fake.files.get(e.path)
+    const value = fake.files.get(e.path) ??
+      (e.path.endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ version: fake.pluginVersion }) : undefined)
     if (value === undefined) throw new Error(`Missing fixture file: ${e.path}`)
     return { value }
   })
@@ -582,6 +585,7 @@ export function fakeThreads(on: On, options: {
     }
     const parsed = cliArguments(argv)
     const operation = parsed?.positionals[1]
+    if (operation) fake.cliIntegrations.push({ operation, integration: e.init?.env?.DELTA_CLI_INTEGRATION })
     // The recording-contract probe is counted on its own (`contractChecks`) so tests asserting the
     // plugin's recording commands through `commands`/`delta()`/`operations()` stay unaffected by it.
     if (operation === 'contract') {
@@ -668,6 +672,7 @@ export function fakeThreads(on: On, options: {
       return { value: { code: 0, signal: null } }
     }
     const operation = cliArguments(e.argv)?.positionals[1]
+    if (operation) fake.cliIntegrations.push({ operation, integration: e.env?.DELTA_CLI_INTEGRATION })
     if (operation === 'mount') {
       fake.commands.push([...e.argv])
       if (!matchesCommand(e.argv, ['thread', 'mount', threadLocator(cliArguments(e.argv)?.positionals[2])], { '--owner': fake.session }))

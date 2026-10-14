@@ -60,6 +60,9 @@ describe('joining', () => {
     expect(fake.cwd).toBe(directory)
     expect(fake.delta().filter((argv) => argv[3] === 'mount')).toEqual([
       ['/selected/delta', '--json', 'thread', 'mount', link(fake), '--owner', fake.session]])
+    expect(fake.cliIntegrations.filter((call) => call.operation === 'mount')).toEqual([
+      { operation: 'mount', integration: 'claude_code' },
+    ])
     // Delta places the checkouts: the plugin chooses no directory and keeps nothing under its config.
     expect([...fake.files.keys()].filter((path) => path.includes('checkouts'))).toEqual([])
     expect(fake.commands.some((argv) => argv[0] === 'pwd')).toBe(false)
