@@ -205,7 +205,7 @@ kept across `/clear`. Older compatible CLI versions receive no new flag. New
 apps emit no join telemetry for mounts without it. This prevents background
 maintenance from adding user activity.
 
-The plugin speaks contract versions 1 and 2. Version 2 adds ACP's `session_info_update` to `append`,
+The plugin speaks contract versions 1 through 3. Version 2 adds ACP's `session_info_update` to `append`,
 carrying the session's title, which Delta makes the thread's name in place of "Recorded conversation".
 When a shared session's turn ends, the plugin reads the title from that session's own transcript
 file, whose path the turn's end names: Claude's own `ai-title` row, or a `/rename`'s `custom-title`
