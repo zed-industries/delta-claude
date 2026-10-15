@@ -42,8 +42,8 @@ describe('joining', () => {
     await $.command.run({ ...shareCommand, args: `join ${address}` })
     await finishJoin(fake)
     const text = fake.logs.join('\n')
-    expect(text).toContain("Use the thread's share link with /delta join")
-    expect(text).not.toContain(`Retry /delta join ${address}`)
+    expect(text).toContain("Use the thread's share link with /delta-join")
+    expect(text).not.toContain(`Retry /delta-join ${address}`)
     expect(fake.session).toBe(previousSession)
     expect(fake.sessionCommands).toEqual([])
     await $.session.end(sessionEnd(fake.session))
@@ -124,7 +124,7 @@ describe('joining', () => {
     expect(fake.delta().filter((argv) => argv[3] === 'mount')).toEqual([
       ['/selected/delta', '--json', 'thread', 'mount', link(fake), '--owner', fake.session, '--join']])
     expect(fake.cliIntegrations.filter((call) => call.operation === 'mount')).toEqual([
-      { operation: 'mount', integration: 'claude_code' },
+      { operation: 'mount', integration: 'claude_code', commandForm: 'delta_subcommand' },
     ])
     // Delta places the checkouts: the plugin chooses no directory and keeps nothing under its config.
     expect([...fake.files.keys()].filter((path) => path.includes('checkouts'))).toEqual([])
@@ -199,6 +199,25 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
+  test('a session joining a hand-off is not told it is unrecorded while its mount runs', async ($, on) => {
+    const fake = desktopTab(on, $)
+    const offer = await offerFromDesktopTab($, fake)
+    let release!: () => void
+    fake.holdRun = (operation) => operation === 'mount' ? new Promise<void>((resolve) => { release = resolve }) : undefined
+    const earlierLogs = fake.logs.length
+    const starting = startInThreadFolder($, fake, offer.folder)
+    await fake.clock.settle()
+    // Claude raises its classic startup hook too, while the hand-off's mount is still running.
+    await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: offer.folder } as never)
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(fake.logs.slice(earlierLogs).some((log) => log.includes("Delta isn't set up here") || log.includes('Not syncing'))).toBe(false)
+    release()
+    await starting
+    await $.session.end(sessionEnd(fake.session))
+  })
+
   test('an opening line the person changed before sending goes to Claude and the thread as they wrote it', async ($, on) => {
     const fake = desktopTab(on, $)
     const offer = await offerFromDesktopTab($, fake)
@@ -226,7 +245,7 @@ describe('joining', () => {
     expect(fake.files.has(offer.record)).toBe(false)
     const text = fake.logs.join('\n')
     expect(text).toContain('No session joined the Delta thread within 5 minutes')
-    expect(text).toContain(`Run /delta join ${link(fake)} to bring it back`)
+    expect(text).toContain(`Run /delta-join ${link(fake)} to bring it back`)
     fake.expectClean()
     await $.session.end(sessionEnd(fake.session))
   })
@@ -295,7 +314,7 @@ describe('joining', () => {
     expect(fake.exports).toBe(0)
     expect(fake.updates()).toHaveLength(1)
     expect(fake.updates()[0]?.update?.toolCallId).toBe('new-tool')
-    expect(await fake.share($)).toContain('/delta join')
+    expect(await fake.share($)).toContain('/delta-join')
     expect(fake.operations().some((operation) => ['attach', 'share', 'create'].includes(operation!))).toBe(false)
     // Resuming in the right directory mounts again but needs no move.
     await $.session.end({ ...sessionEnd(session), reason: 'logout' })
@@ -490,7 +509,7 @@ describe('joining', () => {
         expect((await $.prompt.submit(prompt('do not run here'))).drop).toBeDefined()
         const saved = structuredClone(fake.store.get(`session:${fake.session}`))
         const commands = fake.delta().length
-        expect(await fake.share($)).toContain('/delta join')
+        expect(await fake.share($)).toContain('/delta-join')
         expect(fake.exports).toBe(0)
         expect(fake.delta().length).toBe(commands)
         expect(fake.store.get(`session:${fake.session}`)).toEqual(saved)

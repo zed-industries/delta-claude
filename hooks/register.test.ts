@@ -66,7 +66,7 @@ describe('thread commands', () => {
     expect(fake.cliSetups).toEqual(['discover'])
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.operations()).toEqual([])
-    expect(fake.logs.join('\n')).toContain('Run /delta share or /delta join')
+    expect(fake.logs.join('\n')).toContain('Run /delta-share or /delta-join')
   })
 
   test('first explicit share installs a missing CLI, never plugin load or contract failure', async ($, on) => {
@@ -169,7 +169,7 @@ describe('thread commands', () => {
     await $.session.start(sessionStart)
     fake.commandFault = { operation: 'share', code: 'authentication_required', message: 'Sign in to Delta' }
     expect(await $.command.run(shareCommand)).toEqual({
-      text: 'Delta sharing failed: DeltaCommandError: thread share: authentication_required: Sign in to Delta. Fix the issue and retry /delta share; saved records retain their sequence.',
+      text: 'Delta sharing failed: DeltaCommandError: thread share: authentication_required: Sign in to Delta. Fix the issue and retry /delta-share; saved records retain their sequence.',
     })
 
     fake.commandFault = undefined
@@ -183,6 +183,28 @@ describe('thread commands', () => {
     expect(await result).toEqual({ text: `Delta share link: https://delta.dev/join/${fake.shareId}` })
     // Completion releases the command's prompt gate without relying on a redraw or a timer.
     expect((await $.prompt.submit(prompt('after sharing'))).drop).toBeUndefined()
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('each menu command runs its /delta form, and both forms keep working', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [text('initial')] })
+    fake.surfaces = []
+    await $.session.start(sessionStart)
+    const run = (command: string, args: string) => $.command.run({ ...shareCommand, command, args } as never)
+    expect(await run('delta-org', 'current')).toEqual(await run('delta', 'org current'))
+    expect(await run('delta-setup', '')).toEqual(await run('delta', 'setup'))
+    // A menu command missing its argument explains that command's own format.
+    expect((await run('delta-join', '')).text).toContain('Usage: /delta-join <link>')
+    expect((await run('delta-org', '')).text).toContain('Usage: /delta-org list')
+    expect(await run('delta-share', '')).toEqual({ text: `Delta share link: https://delta.dev/join/${fake.shareId}` })
+    expect(await run('delta', 'share')).toEqual({ text: `Delta share link: https://delta.dev/join/${fake.shareId}` })
+    expect(fake.commandRuns).toEqual([])
+    // Only the command a share reports tells Delta which form ran it.
+    expect(fake.cliIntegrations.filter((call) => call.commandForm)).toEqual([
+      { operation: 'share', integration: 'claude_code', commandForm: 'dedicated_command' },
+      { operation: 'share', integration: 'claude_code', commandForm: 'delta_subcommand' },
+    ])
     fake.expectClean()
     await $.session.end(sessionEnd(fake.session))
   })
@@ -1616,7 +1638,7 @@ describe('remote activity', () => {
     const watches = fake.watches.length
     await fake.clock.advance(120_000)
     expect(fake.watches.length).toBe(watches)
-    expect(fake.logs.some((log) => log.includes('not_visible (thread_gone)') && log.includes('/delta share'))).toBe(true)
+    expect(fake.logs.some((log) => log.includes('not_visible (thread_gone)') && log.includes('/delta-share'))).toBe(true)
     expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain('not_visible')
     // A delivery pause stops delivery, not Claude: the prompt is accepted while the reason stays shown.
     expect((await $.prompt.submit(prompt('after deletion'))).drop).toBeUndefined()
@@ -2830,13 +2852,12 @@ describe('the status band', () => {
     // A survey owns the band, and with no room at all the band is the host's.
     expect(JSON.stringify(await (await mount('terminal', { hasSurvey: true })).drawn())).not.toContain('Delta')
     expect(JSON.stringify(await (await mount('terminal', { maxRows: 0 })).drawn())).not.toContain('Delta')
-    // The terminal shades the row and shows the URL as text: a terminal without hyperlinks would
-    // draw a Link's URL twice. Pressing copy puts the whole link on the clipboard, and says so
-    // only once the clipboard took it.
+    // The terminal shades the row and draws the URL as an unlabelled hyperlink: a labelled one prints
+    // the URL twice in a terminal Claude does not treat as hyperlink-capable. Pressing copy puts the
+    // whole link on the clipboard, and says so only once the clipboard took it.
     const terminal = await mount('terminal')
     expect(JSON.stringify(await terminal.drawn())).toContain('"backgroundColor":"#303030"')
-    expect(await terminal.find({ type: 'Link' })).toBeUndefined()
-    expect(await terminal.find({ type: 'Text', text: link })).toBeDefined()
+    expect((await terminal.find({ type: 'Link' }))?.props).toEqual({ href: link })
     await terminal.press({ key: 'copy' })
     expect(copied).toEqual([link])
     await fake.clock.settle()

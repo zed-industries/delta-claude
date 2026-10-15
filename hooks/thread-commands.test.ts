@@ -98,7 +98,7 @@ describe('thread watch', () => {
     const local = { ...status(), producer: null, url: null,
       access: { state: 'local_only' as const, is_owner: null }, worktrees: { status: 'available' as const, items: [] } }
     expect(parseThreadStatus(JSON.stringify(local))).toEqual(local)
-    expect(() => validateThreadCheckout({ ...local, url: status().url }, { checkout: '/repo' })).toThrow('/delta share')
+    expect(() => validateThreadCheckout({ ...local, url: status().url }, { checkout: '/repo' })).toThrow('/delta-share')
     for (const is_owner of [false, null]) {
       const state = { ...status(), access: { state: 'granted' as const, is_owner }, url: null }
       expect(validateThreadCheckout(state, { checkout: '/repo' }))
@@ -145,7 +145,7 @@ describe('thread watch', () => {
     for (const state of ['inactive', 'detached', 'missing'] as const)
       expect(() => validateThreadCheckout({
         ...status(), worktrees: { status: 'available', items: [{ reference: 'history#t=0', checkouts: [{ directory: '/repo', state }] }] },
-      }, binding)).toThrow('/delta share')
+      }, binding)).toThrow('/delta-share')
     const worktrees = status().worktrees
     if (worktrees.status !== 'available') throw new Error('Expected available status fixture')
     expect(() => validateThreadCheckout({
@@ -345,8 +345,8 @@ describe('permanent failure advice', () => {
   test('names the documented client action for each published code', () => {
     for (const code of ['not_visible', 'authentication_required', 'wrong_account'])
       expect(permanentFailureAdvice(code)).toContain('sign-in')
-    expect(permanentFailureAdvice('organization_required')).toContain('delta org switch')
-    expect(permanentFailureAdvice('not_shared')).toContain('/delta share')
+    expect(permanentFailureAdvice('organization_required')).toContain('delta-org switch')
+    expect(permanentFailureAdvice('not_shared')).toContain('/delta-share')
     expect(permanentFailureAdvice('invalid_reference')).toContain('reference')
     expect(permanentFailureAdvice('invalid_record')).toContain('Update Delta')
     expect(permanentFailureAdvice('sequence_gap')).toContain('do not reset the sequence')

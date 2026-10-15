@@ -30,7 +30,7 @@ export async function requireAuthentication(
   notice: (text: string) => Promise<void>,
 ) {
   const { interactive, windows } = host
-  const recovery = `Resolve access${windows ? ', then run in PowerShell' : ', then run in your shell'}: ${authLoginCommand(executable, windows)}. After signing in again, retry /delta share or /delta join <link>.`
+  const recovery = `Resolve access${windows ? ', then run in PowerShell' : ', then run in your shell'}: ${authLoginCommand(executable, windows)}. After signing in again, retry /delta-share or /delta-join <link>.`
   const stopped = new AbortController()
   const monitor = async () => {
     while (!stopped.signal.aborted) {
@@ -72,7 +72,7 @@ export async function requireAuthentication(
         !/^https?:\/\//.test(login.url) || !Number.isFinite(expires))
       throw new Error('Delta returned an invalid sign-in link; update Delta and retry')
     if (!interactive)
-      throw new PendingAuthenticationError(`Delta sign-in is pending. Open ${login.url} in your browser and finish signing in, then retry /delta share. This link expires at ${login.expires_at}. No thread has been shared by this command.`)
+      throw new PendingAuthenticationError(`Delta sign-in is pending. Open ${login.url} in your browser and finish signing in, then retry /delta-share. This link expires at ${login.expires_at}. No thread has been shared by this command.`)
     await notice(`Finish signing in to Delta in your browser: ${login.url}\nWaiting for sign-in; this link expires at ${login.expires_at}.`)
     // Detached attempts can be shared by other clients. Stop our waiter, never
     // cancel the app's attempt or sign the account out when Claude changes session.
@@ -87,8 +87,8 @@ function authFailure(value: { status: string; message?: string; url?: string }, 
   switch (value.status) {
     case 'access_denied': return new Error(`Delta access denied: ${value.message ?? 'account access is required'}. ${value.url ?? ''}\n${recovery}`)
     case 'wrong_account': return new Error('Delta is using another account’s data directory. Resolve the account in Delta and retry; the plugin will not switch accounts.')
-    case 'cancelled': return new Error('Delta sign-in was cancelled. Retry /delta share or /delta join <link>.')
-    case 'expired': return new Error('Delta sign-in expired. Retry /delta share or /delta join <link>.')
+    case 'cancelled': return new Error('Delta sign-in was cancelled. Retry /delta-share or /delta-join <link>.')
+    case 'expired': return new Error('Delta sign-in expired. Retry /delta-share or /delta-join <link>.')
     default: return new Error(`Unsupported Delta authentication status: ${value.status}. Update Delta and retry.`)
   }
 }

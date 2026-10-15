@@ -27,6 +27,21 @@ function seedEnded(store: Map<string, unknown>, id: string, overrides: Record<st
   store.set(`appended:${id}`, { thread: 't', items: {} })
 }
 
+type NoticeKind = 'manual' | 'not set up' | 'none'
+
+/** The startup reminders in `logs`, by what each tells the person rather than its exact words. */
+function noticeKinds(logs: string[]): NoticeKind[] {
+  return logs.flatMap((log): NoticeKind[] => {
+    if (log.includes('Not syncing this session')) return ['manual']
+    return log.includes("Delta isn't set up here") ? ['not set up'] : []
+  })
+}
+
+/** Store a recorded session for the fixture's session to resume; `overrides` change any binding field. */
+function seedResumed(fake: ReturnType<typeof fakeThreads>, overrides: Record<string, unknown> = {}) {
+  fake.store.set(`session:${fake.session}`, { session: fake.session, snapshot: true, next: 1, pending: [], ...overrides })
+}
+
 function binding(fake: ReturnType<typeof fakeThreads>) {
   return fake.store.get(`session:${fake.session}`) as any
 }
@@ -101,7 +116,7 @@ describe('automatic activation', () => {
     fake.files.set(POLICY, policy('private', 'org-1'))
     await startAuto($, fake)
     expect(fake.server.thread).toBeUndefined()
-    expect(fake.logs.join('\n')).toContain('must be updated for automatic uploads')
+    expect(fake.logs.join('\n')).toContain('Update Delta to sync sessions automatically')
     expect(binding(fake)).toBeUndefined()
     fake.expectClean()
   })
@@ -165,6 +180,56 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
+  test('the setup offer shows plain-text options, and quitting partway through setup offers it again', async ($, on) => {
+    const fake = fakeThreads(on)
+    const answers: ((value: unknown) => void)[] = []
+    fake.answerQuestion = () => new Promise((resolve) => { answers.push(resolve) })
+    await startAuto($, fake)
+    // Claude draws only plain-text options; an option it cannot read would show as nonsense or fail.
+    expect(fake.questions[0].questions[0].options.map((option: { label: string }) => option.label)).toEqual(['Set it up', 'Not now'])
+    answers[0]!({ result: { answers: { [fake.questions[0].questions[0].question]: 'Set it up' } } })
+    await fake.clock.settle()
+    // The wizard's first question is open and never answered.
+    expect(fake.questions).toHaveLength(2)
+    const offered = [...fake.store.keys()].find((key) => key.startsWith('setup-offered:'))!
+    expect(fake.store.get(offered)).toBe(true)
+    await $.session.end({ ...sessionEnd(fake.session), reason: 'prompt_input_exit' })
+    expect(fake.store.get(offered)).toBe(false)
+  })
+
+  const noticeCases: { name: string; source?: string; expected: NoticeKind; arrange?: (fake: ReturnType<typeof fakeThreads>) => void }[] = [
+    { name: 'an unconfigured checkout is told how to set up', expected: 'not set up' },
+    { name: 'a Manual checkout is told how to share, not to set up', expected: 'manual',
+      arrange: (fake) => { fake.files.set(POLICY, policy('manual')) } },
+    { name: 'a compaction gets none', source: 'compact', expected: 'none' },
+    { name: 'a headless session gets none', expected: 'none', arrange: (fake) => { fake.surfaces = [] } },
+    { name: 'an automatic session Delta refused gets none', expected: 'none',
+      arrange: (fake) => { fake.files.set(POLICY, policy('private', 'org-1')); fake.contractRange = { min: 1, max: 2 } } },
+    { name: 'a session with an unfinished join gets none', source: 'resume', expected: 'none',
+      arrange: (fake) => { seedResumed(fake, { snapshot: false, joinTransition: { locator: 'x' } }) } },
+  ]
+  for (const { name, source, expected, arrange } of noticeCases) test(`startup notice: ${name}`, async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }]
+    fake.answerQuestion = async () => ({ result: { answers: {} } })
+    arrange?.(fake)
+    await startAuto($, fake, source)
+    expect(noticeKinds(fake.logs)).toEqual(expected === 'none' ? [] : [expected])
+  })
+
+  test('a session shared since it began resumes with no reminder, because the band says it is syncing', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = async () => ({ result: { answers: {} } })
+    await startAuto($, fake)
+    expect(noticeKinds(fake.logs)).toEqual(['not set up'])
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    const earlierLogs = fake.logs.length
+    await startAuto($, fake, 'resume')
+    expect(noticeKinds(fake.logs.slice(earlierLogs))).toEqual([])
+    expect(await drawn($)).toContain('Syncing')
+  })
+
   test('a session that ends during attach starts no watcher and gives no share advice', { timeoutMs: 15_000 }, async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('private', 'org-1'))
@@ -181,7 +246,7 @@ describe('automatic activation', () => {
     release()
     await fake.clock.settle()
     expect(fake.watches).toHaveLength(0)
-    expect(fake.logs.join('\n')).not.toContain('/delta share')
+    expect(fake.logs.join('\n')).not.toContain('/delta-share')
     fake.expectClean()
   })
 })
@@ -195,7 +260,7 @@ describe('the band on an automatic session', () => {
     // status has no link. The upload is the band's operation, like a share's steps, so even a
     // one-row band shows it.
     await startAuto($, fake)
-    expect(await drawnInRows($, 1)).toContain('Waiting to upload…')
+    expect(await drawnInRows($, 1)).toContain('Waiting to sync…')
     // Delta registers the thread: the URL appears, but the content upload is still running, so the
     // first-upload operation stays on the band's row instead of moving to a hidden second row.
     fake.server.registered = true
@@ -204,8 +269,8 @@ describe('the band on an automatic session', () => {
     await drawn($)
     await fake.clock.settle()
     const registering = await drawnInRows($, 1)
-    expect(registering).toContain('Uploading to Delta…')
-    expect(registering).not.toContain('Uploaded to Delta')
+    expect(registering).toContain('Syncing to DeltaDB…')
+    expect(registering).not.toContain('Synced to DeltaDB')
     // Only Delta's confirmation of the content ends the first-upload operation.
     fake.server.confirmed = true
     await fake.clock.advance(2_000)
@@ -213,14 +278,14 @@ describe('the band on an automatic session', () => {
     await drawn($)
     await fake.clock.settle()
     const finished = await drawn($)
-    expect(finished).toContain('Uploaded to Delta')
+    expect(finished).toContain('Synced to DeltaDB')
     expect(finished).toContain(`https://delta.dev/join/${fake.shareId}`)
     expect(finished).toContain('Shared with Zed')
     await fake.clock.advance(5_000)
     await fake.clock.settle()
     const band = await drawn($)
     expect(band).toContain(`https://delta.dev/join/${fake.shareId}`)
-    expect(band).not.toContain('Uploaded to Delta')
+    expect(band).not.toContain('Synced to DeltaDB')
     // Organization mode reaches the organization through the upload, never through `thread share`.
     expect(fake.server.shared).toBe(false)
     fake.expectClean()
@@ -238,9 +303,9 @@ describe('the band on an automatic session', () => {
     await drawn($)
     await fake.clock.settle()
     const band = await drawn($)
-    expect(band).toContain('Upload failed: storage quota exceeded')
+    expect(band).toContain('Sync failed: storage quota exceeded')
     expect(band).toContain(`https://delta.dev/join/${fake.shareId}`)
-    expect(band).not.toContain('Uploaded to Delta')
+    expect(band).not.toContain('Synced to DeltaDB')
     fake.expectClean()
   })
 
@@ -571,7 +636,7 @@ describe('setup command and policy problems', () => {
     const broken = '{ not json'
     fake.files.set(POLICY, broken)
     await startAuto($, fake)
-    expect(fake.logs.join('\n')).toContain('could not be used')
+    expect(fake.logs.join('\n')).toContain("couldn't be used")
     expect(fake.files.get(POLICY)).toBe(broken)
     expect(fake.server.thread).toBeUndefined()
     expect(fake.operations()).not.toContain('create')
@@ -630,14 +695,16 @@ describe('setup dialogs and notices', () => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
-      const answer = text.startsWith('Write this Delta policy') ? 'Write it' : 'Private upload'
+      // Choose the private option as the person would, by its offered label.
+      const offered = question.questions[0].options.map((option: { label: string }) => option.label)
+      const answer = text.startsWith('Save this setting') ? 'Save it' : offered.find((label: string) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
     }
     await $.session.start(sessionStart)
     await $.command.run({ ...typedDelta('setup') } as never)
     expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-1' } })
     // The person sees exactly what will be written before confirming it.
-    expect(fake.logs.join('\n')).toContain(`Delta will write ${POLICY}`)
+    expect(fake.logs.join('\n')).toContain('Delta will save this to .delta/settings.json')
     fake.expectClean()
   })
 

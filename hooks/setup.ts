@@ -12,7 +12,11 @@ export class InteractionUnavailable extends Error {}
 /** The person dismissed the question. */
 export class InteractionDismissed extends Error {}
 
-export type AskOption = string | { label: string; description?: string }
+/**
+ * One answer a question offers. `$.ui.ask` takes plain-text options only and shows no per-option
+ * description, so anything a person needs to choose goes in the question itself.
+ */
+export type AskOption = string
 export type AskOptions = readonly AskOption[] | {
   options: readonly AskOption[]; header?: string; multiSelect?: boolean
 }
@@ -64,21 +68,33 @@ export type SetupOutcome = {
   text: string
 }
 
-const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Private upload', organization: 'Organization sharing' }
+const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Private sync', organization: 'Organization sharing' }
+/**
+ * Each mode's answer in the setup question, recommended one first. `$.ui.ask` shows no per-option
+ * description, so the label carries its own short explanation.
+ */
+const MODE_LABELS: [ThreadMode, string][] = [
+  ['private', 'Private sync (Recommended) (every new session, visible only to you)'],
+  ['organization', 'Organization sharing (every new session, visible to your organization)'],
+  ['manual', 'Manual (only sessions you share with /delta-share)'],
+]
+/** The tag above each setup question; Claude Code allows at most 12 characters. */
+const HEADER = 'Delta sync'
+/** The setting's file, relative to the checkout root, as people see it named. */
+const SETTINGS_FILE = '.delta/settings.json'
 /** `$.ui.ask` takes at most four options; the rest of an organization list is reached by typing. */
 const MAX_ORGANIZATION_OPTIONS = 4
 const CANCELLED: SetupOutcome = { status: 'cancelled', text: 'Left the existing Delta settings untouched.' }
 
 const UNAVAILABLE_NOTICE =
-  'This Claude build cannot show /delta setup\'s questions. Update Claude Code, or edit .delta/settings.json at the checkout root by hand.'
+  'This Claude build cannot show /delta-setup\'s questions. Update Claude Code, or edit .delta/settings.json at the checkout root by hand.'
 
 /** What `/delta setup` answers a session with no interactive surface: it can never ask. */
 export const HEADLESS_REFUSAL =
-  '/delta setup needs an interactive Claude Code terminal or Desktop Code tab. Print mode and SDK sessions cannot answer its questions. Edit .delta/settings.json at the checkout root by hand instead.'
+  '/delta-setup needs an interactive Claude Code terminal or Desktop Code tab. Print mode and SDK sessions cannot answer its questions. Edit .delta/settings.json at the checkout root by hand instead.'
 const UPDATE_NOTICE =
-  'Automatic Delta uploads need a newer Delta: this CLI speaks recording contract ' +
-  `versions up to ${OFFLINE_CONTRACT_VERSION - 1}, and automatic uploads need ${OFFLINE_CONTRACT_VERSION}. Update Delta, then run /delta setup again. ` +
-  'Manual sharing and /delta join keep working as they do today.'
+  'Syncing sessions automatically needs a newer Delta. Update Delta, then run /delta-setup again. ' +
+  '/delta-share and /delta-join keep working.'
 
 /** An organization's option label: its name, plus its id when another organization shares the name. */
 function organizationLabel(organization: Organization, organizations: readonly Organization[]): string {
@@ -103,8 +119,8 @@ function matchOrganization(answer: string, organizations: readonly Organization[
 
 /** Describe a repository's current policy for the wizard's first question. */
 function currentPolicy(policy: PolicyFile['policy']): string {
-  if (!policy.configured) return 'This repository has no Delta policy yet.'
-  if (policy.mode === 'manual') return 'Currently: manual (only /delta share records anything).'
+  if (!policy.configured) return 'Delta isn\'t set up for this repository yet.'
+  if (policy.mode === 'manual') return 'Currently: Manual (only sessions you share with /delta-share).'
   return `Currently: ${MODE_NAMES[policy.mode]}${policy.organization ? ` (${policy.organization})` : ''}.`
 }
 
@@ -124,15 +140,15 @@ export async function runSetupWizard(env: SetupEnv, interaction: Interaction): P
 async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<SetupOutcome> {
   let root: string
   try { root = await env.checkoutRoot() }
-  catch (error) { return { status: 'no-checkout', text: `/delta setup needs a Git checkout: ${String(error)}` } }
+  catch (error) { return { status: 'no-checkout', text: `/delta-setup needs a Git checkout: ${String(error)}` } }
   const path = policyPath(root)
   let file: PolicyFile
   try { file = readProjectPolicy(await env.readFile(path)) }
-  catch (error) { return { status: 'failed', text: `/delta setup could not read ${path}: ${String(error)}` } }
+  catch (error) { return { status: 'failed', text: `/delta-setup could not read ${path}: ${String(error)}` } }
 
   if (file.malformed) {
     await interaction.log(`Delta could not read ${path}: ${file.policy.problem}. Its contents were left untouched.`, 'transcript')
-    if (await interaction.ask(`Replace the unreadable Delta settings at ${path}?`, ['Replace it', 'Cancel']) !== 'Replace it') return CANCELLED
+    if (await interaction.ask(`Replace the unreadable Delta settings at ${path}?`, { options: ['Replace it', 'Cancel'], header: HEADER }) !== 'Replace it') return CANCELLED
   }
 
   // A policy that records to an organization this account isn't in records nothing for it; say so
@@ -141,19 +157,22 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   if (recordsAutomatically(file.policy) && file.policy.organization) {
     try { listed = await env.organizations() } catch {}
     if (listed?.length && !listed.some((org) => org.id === file.policy.organization))
-      await interaction.log(`This repository records to ${file.policy.organization}, which your Delta account isn't a member of, so its sessions aren't recorded for you. Choose an organization you're in to fix the file, or cancel to leave it unchanged.`, 'transcript')
+      await interaction.log(`This repository syncs to ${file.policy.organization}, which your Delta account isn't a member of, so its sessions don't sync for you. Choose an organization you're in, or cancel to leave it unchanged.`, 'transcript')
   }
 
   const contract = await env.contract()
   const answer = await interaction.ask(
-    `${currentPolicy(file.policy)} Delta records a session's conversation, tool input and output, ` +
-    'thinking, and your checkout files. It applies to sessions started afterwards; this one is unchanged. ' +
-    'How should this checkout record Claude Code sessions?',
-    { options: Object.values(MODE_NAMES), header: 'Recording' })
-  const mode = (Object.keys(MODE_NAMES) as ThreadMode[]).find((candidate) => MODE_NAMES[candidate] === answer)
+    `${currentPolicy(file.policy)} When Delta syncs a Claude Code session, it stores the conversation and ` +
+    'a copy of this checkout\'s code, including uncommitted changes, in DeltaDB. This applies to new ' +
+    'sessions, not this one. Which sessions should Delta sync?',
+    { options: MODE_LABELS.map(([, label]) => label), header: HEADER })
+  // A typed answer may name a mode by its short name instead of choosing its label.
+  const mode = MODE_LABELS.find(([candidate, label]) =>
+    answer === label || answer.trim().toLowerCase() === MODE_NAMES[candidate].toLowerCase())?.[0]
   if (!mode) return CANCELLED
 
   let organization: string | undefined
+  let organizationName: string | undefined
   if (mode !== 'manual') {
     if ((contract?.max ?? 0) < OFFLINE_CONTRACT_VERSION) {
       await interaction.log(UPDATE_NOTICE, 'transcript')
@@ -161,8 +180,8 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     }
     let organizations: Organization[]
     try { organizations = listed ?? await env.organizations() }
-    catch (error) { return { status: 'failed', text: `/delta setup could not list your Delta organizations: ${String(error)}` } }
-    if (!organizations.length) return { status: 'failed', text: '/delta setup found no Delta organization. Sign in with `delta auth login` and try again.' }
+    catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta organizations: ${String(error)}` } }
+    if (!organizations.length) return { status: 'failed', text: '/delta-setup found no Delta organization. Sign in with `delta auth login` and try again.' }
     const current = organizations.find((org) => org.current) ?? organizations[0]!
     // Offer the current organization and up to three others; any organization is still reachable by
     // typing its exact name or id, and an unmatched or ambiguous answer asks again.
@@ -170,30 +189,36 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     if (organizations.length === 1) organization = current.id
     while (!organization) {
       organization = matchOrganization(await interaction.ask(
-        'Which organization should this checkout upload to? Choose one, or type an exact organization name or id.',
+        'Which organization should this checkout sync to? Choose one, or type an exact organization name or id.',
         { options: offered.map((org) => organizationLabel(org, organizations)), header: 'Organization' }), organizations)?.id
     }
+    organizationName = organizations.find((org) => org.id === organization)?.name
   }
 
   const text = serializeProjectPolicy(file.document, mode, organization)
-  await interaction.log(`Delta will write ${path}:\n${text}`, 'transcript')
-  if (await interaction.ask(`Write this Delta policy to ${path}? It is not committed.`, ['Write it', 'Cancel']) !== 'Write it') return CANCELLED
+  await interaction.log(`Delta will save this to ${SETTINGS_FILE}:\n${text}`, 'transcript')
+  if (await interaction.ask(`Save this setting for this repository? Delta saves it in ${SETTINGS_FILE}.`,
+    { options: ['Save it', 'Cancel'], header: HEADER }) !== 'Save it') return CANCELLED
 
   try { await env.writeFile(path, text) }
-  catch (error) { return { status: 'failed', text: `Delta could not write ${path}: ${String(error)}` } }
-  const wrote = `Wrote ${path}. Commit it to apply this policy to everyone who opens this repository with the plugin. New sessions then record automatically.`
-  // The policy never applies to the session that wrote it, so offer to share this one now. The file
-  // is already written, so declining or dismissing this question still reports the write.
-  if (await env.sessionShared()) return { status: 'wrote', text: wrote }
+  catch (error) { return { status: 'failed', text: `Delta could not save ${path}: ${String(error)}` } }
+  const saved = `Saved to ${SETTINGS_FILE}. New sessions follow it from now on.`
+  // The setting never applies to the session that saved it. Only Organization sharing offers to sync
+  // this one now: sharing it is what that choice asked for, while a share would contradict Private sync
+  // (it publishes to the organization) and Manual (sessions are shared by hand).
+  if (mode !== 'organization' || await env.sessionShared()) return { status: 'wrote', text: saved }
   let share: string | undefined
-  try { share = await interaction.ask('Share this session with your Delta organization now?', ['Share it', 'Not now']) }
+  try {
+    share = await interaction.ask(`Your new setting starts with your next session. Sync this session to ${organizationName ?? 'your organization'} too?`,
+      { options: ['Sync it', 'Not now'], header: HEADER })
+  }
   catch (error) { if (!(error instanceof InteractionDismissed || error instanceof InteractionUnavailable)) throw error }
-  if (share !== 'Share it') return { status: 'wrote', text: `${wrote} This session is not shared; use /delta share to share it.` }
+  if (share !== 'Sync it') return { status: 'wrote', text: `${saved} This session isn't syncing; use /delta-share to share it.` }
   return {
     status: 'wrote',
     text: await env.shareSession()
-      ? `${wrote} Sharing this session now.`
-      : `${wrote} This session could not start sharing now; use /delta share once Claude is idle.`,
+      ? `${saved} Syncing this session now.`
+      : `${saved} This session couldn't start syncing now; use /delta-share once Claude is idle.`,
   }
 }
 
@@ -220,32 +245,58 @@ export type OnboardingStore = {
 /**
  * Offer to set up automatic uploads once per repository, recording the offer before asking so two
  * sessions starting together cannot both show it. Linked worktrees share the marker through the
- * repository's Git common directory. An unavailable surface clears the marker again, so a session
- * that could not ask does not consume the offer; a dismissal does. A setup started from the offer
- * reports its outcome in the transcript, as `/delta setup` answers with it.
+ * repository's Git common directory. Only a decision consumes the offer: "Not now", or a setup that
+ * wrote the policy. Anything left unfinished (a dismissed offer, a setup cancelled or failed partway,
+ * or a surface that cannot ask) clears the marker, so the next new session offers again from the
+ * start. `claimed` receives the marker while the offer is open, so a host whose session ends before
+ * it settles can clear it with `releaseOnboarding`. A setup started from the offer reports its
+ * outcome in the transcript, as `/delta setup` answers with it.
  */
 export async function offerOnboarding(
   env: SetupEnv, interaction: Interaction, store: OnboardingStore, flags: OnboardingFlags,
+  claimed: (key: string) => void = () => {},
 ): Promise<OnboardingOutcome> {
   if (flags.configured || flags.joined || flags.joining || !flags.newSession) return 'skipped'
   const key = `setup-offered:${await env.gitCommonDir() ?? flags.root}`
   if (await store.get(key)) return 'skipped'
   await store.set(key, true)
-  let answer: string | undefined
-  try { answer = await interaction.ask('Set up automatic Delta uploads for this repository?', ['Set it up', 'Not now']) }
-  catch (error) {
-    if (error instanceof InteractionUnavailable) {
-      await store.set(key, false)
-      return 'unavailable'
-    }
+  claimed(key)
+  let unfinished = true
+  try {
+    const outcome = await askOnboarding(env, interaction)
+    unfinished = outcome !== 'settled'
+    return outcome === 'unavailable' ? 'unavailable' : 'offered'
+  } finally {
+    if (unfinished) await releaseOnboarding(store, key)
   }
-  if (answer !== 'Set it up') return 'offered'
+}
+
+/** Clear an onboarding marker whose offer never reached a decision, so it is offered again. */
+export async function releaseOnboarding(store: OnboardingStore, key: string): Promise<void> {
+  await store.set(key, false)
+}
+
+/** Ask the onboarding question and run the setup it opens; `settled` when the person decided. */
+async function askOnboarding(env: SetupEnv, interaction: Interaction): Promise<'settled' | 'unfinished' | 'unavailable'> {
+  let answer: string | undefined
+  try {
+    answer = await interaction.ask('Set up Delta syncing for this repository?', { options: ['Set it up', 'Not now'], header: HEADER })
+  }
+  catch (error) {
+    return error instanceof InteractionUnavailable ? 'unavailable' : 'unfinished'
+  }
+  // Only "Not now" declines. Anything typed instead, such as a slash command entered while the dialog
+  // was open, decides nothing, so the offer comes back.
+  if (answer === 'Not now') return 'settled'
+  if (answer !== 'Set it up') return 'unfinished'
   let text: string
+  let wrote = false
   try {
     const outcome = await runSetupWizard(env, interaction)
-    if (outcome.status === 'cancelled') return 'offered'
+    if (outcome.status === 'cancelled') return 'unfinished'
+    wrote = outcome.status === 'wrote'
     text = outcome.text
-  } catch (error) { text = `/delta setup failed: ${String(error)}` }
+  } catch (error) { text = `/delta-setup failed: ${String(error)}` }
   await interaction.log(text, 'transcript')
-  return 'offered'
+  return wrote ? 'settled' : 'unfinished'
 }

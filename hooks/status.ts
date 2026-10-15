@@ -11,6 +11,8 @@ export type StatusSegment = { text: string; color?: string; bold?: boolean; dim?
 export type Person = { id: string; name: string; arriving?: boolean; leaving?: boolean }
 export type StatusState = {
   connection: 'stopped' | 'connecting' | 'live' | 'retrying'
+  /** This session's conversation and checkout are being captured for Delta, uploaded or still queued. */
+  recording?: boolean
   /** A dropped watch that outlasted its grace; within it the band is told the watch is live. */
   reconnecting?: boolean
   turn: TurnStatus
@@ -47,6 +49,8 @@ export type StatusState = {
 export type BandView = {
   tone: 'error' | 'live' | 'pending' | 'quiet'
   mark: StatusSegment
+  /** The name beside the mark, which says `Syncing` while the session is captured; it never gives way. */
+  label: StatusSegment[]
   /**
    * The link: `text` shows it, on the row or on its own row below (`ownRow`), or nowhere when no
    * row can hold it. It is followable and copyable only with `href`; while a share or join still
@@ -232,7 +236,7 @@ export function bandWidth(band: BandView, terminal: boolean): number {
   const conflict = band.conflict ? 2 + textWidth(band.conflict.fork) + 2 + textWidth(band.conflict.discard) : 0
   const share = band.share ? 2 + textWidth(band.share.label) : 0
   const right = width(band.right)
-  return (terminal ? BAR_PADDING : 0) + width([band.mark, { text: ' Delta' }]) + link + audience + copy + share + conflict + (right ? MIN_GAP + right : 0)
+  return (terminal ? BAR_PADDING : 0) + width([band.mark, ...band.label]) + link + audience + copy + share + conflict + (right ? MIN_GAP + right : 0)
 }
 
 /** What gives way as the row narrows, each step keeping the ones before it. */
@@ -272,6 +276,7 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     error: { text: '✕', color: 'red' }, pending: { text: '◌', color: 'yellow' },
     live: { text: '●', color: 'green' }, quiet: { text: '○', dim: true },
   } as const)[tone]
+  const label: StatusSegment[] = [{ text: ' Delta', dim: true }, ...state.recording ? [{ text: ' · ', dim: true }, { text: 'Syncing' }] : []]
   const detail = failure ? [{ text: failure, color: 'red' }]
     : state.retryReason ? [{ text: `Retrying: ${state.retryReason}`, color: 'yellow' }] : undefined
   const frame = SPINNER_FRAMES[state.spinner?.frame ?? 0]!
@@ -345,7 +350,7 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     const text = give.noLink && !below && (layout.terminal || !!state.children?.length) ? undefined : linkText
     const copy = href ? { copy: { label: give.shortCopy ? 'copy' : 'copy link', ...state.copied ? { copied: true as const } : {} } } : {}
     return {
-      tone, mark, right: right(give),
+      tone, mark, label, right: right(give),
       ...detail ? { detail } : {},
       ...state.audience && !give.noAudience ? { audience: [{ text: state.audience, dim: true }] } : {},
       ...state.conflict ? { conflict: state.conflict } : {},

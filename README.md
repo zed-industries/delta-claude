@@ -71,6 +71,12 @@ those declarations. Generated files are ignored. The marketplace is
 
 ## Share and resume
 
+Each `/delta` action is also its own command, so all of them appear in Claude's
+slash-command menu: `/delta-share`, `/delta-join <link>`, `/delta-setup`, and
+`/delta-org list | current | switch <ID>` run exactly what `/delta share`,
+`/delta join <link>`, `/delta setup`, and `/delta org …` run. Claude Code plugin
+commands cannot declare subcommands, which is why both forms exist.
+
 From a Claude session inside the intended Git checkout, run `/delta share`.
 It stages the complete bounded, normalized post-compaction conversation locally
 (the newest up to 4096 Messages API messages) before contacting Delta. It then
@@ -129,23 +135,44 @@ The repository setting is sufficient consent for every collaborator who opens
 the checkout with the plugin; no separate personal confirmation is asked.
 
 Run `/delta setup` for an interactive wizard. It shows the current mode and
-organization, offers manual, private upload, or organization sharing, lists
-organization names from `delta --json org list`, explains that uploads include
-the conversation, tool input and output, thinking, and checkout files, previews
+organization and explains that syncing stores the conversation and a copy of the
+checkout's code, including uncommitted changes, in DeltaDB. It offers Private
+sync (recommended, `private`), Organization sharing (`organization`), or Manual
+(`manual`), each labelled with what it syncs and who sees it, lists organization
+names from `delta --json org list`, previews
 the destination path and resulting content, and writes only after confirmation.
 It does not commit the file: committing it applies the policy to everyone who
 opens the repository with the plugin. Cancelling or dismissing any step leaves
 the file untouched. Print and SDK
 sessions get a clear refusal instead. The policy applies to sessions started
-afterwards, so after writing it the wizard offers to share the current session
-with the organization, as `/delta share` does, unless it is already shared.
+afterwards, so after saving Organization sharing the wizard offers to sync the
+current session to the organization, as `/delta share` does, unless it is already
+shared. Private sync and Manual offer nothing, since a share would publish to the
+organization.
 
 When an interactive session starts as a **new** session in a checkout with no
-policy, the plugin offers once, in the background, to set up automatic uploads;
-choosing yes opens the same wizard. Every outcome records a local marker keyed by
-the repository's Git common directory, so linked worktrees share it and it is
-never offered again automatically. It is never offered in a joined session,
-during a join, or headless, and it never delays a prompt beyond the dialog.
+policy, the plugin offers once, in the background, to set up Delta syncing;
+choosing yes opens the same wizard. A decision ("Not now", or a written policy)
+records a local marker keyed by the repository's Git common directory, so linked
+worktrees share it and it is never offered again automatically. A setup left
+unfinished records nothing, so the next new session offers it again from the
+start: the offer dismissed or answered with typed text, the wizard cancelled or
+failed partway, or the session ending while it was open. That last case relies on
+Claude's session-end hook; if the Claude process is killed instead, the offer
+stays consumed until the marker is cleared. It is never offered in a joined
+session, during a join, or headless, and it never delays a prompt beyond the
+dialog.
+
+Each session shows one Delta indicator, never two. A synced session (automatic,
+shared with `/delta share`, or joined) has the status band above the prompt, which
+reads `Delta · Syncing` and who can see the session, and updates live. An
+interactive session that Delta does not sync instead opens, when it starts,
+resumes, or is cleared, with a one-line reminder in the transcript: a Manual
+checkout points to `/delta-share`, and one that was never set up to
+`/delta-setup`. No reminder is shown after a compaction, in a headless session,
+while a join or Desktop hand-off is still in progress, in an automatic session
+Delta refused, or when the checkout's policy file cannot be read (that problem is
+reported instead).
 
 Automatic activation applies only to new sessions — `classic.SessionStart` with
 source `startup` or `clear`, never `resume`, `compact`, or `fork`, and never a
@@ -200,8 +227,8 @@ The band shows the thread's link whenever status reports one (a URL alone does n
 mean others can see the thread), its audience apart from the link (`Private`,
 `Shared with <organization name>`, or `Unlisted`), and an automatic session's
 background upload as the band's running operation, drawn on its row like a share's
-steps: `Waiting to upload…` or `Uploading to Delta…`, then `Uploaded to Delta`, or
-`Upload failed: <reason>`. Activation returns before Delta registers the thread, and
+steps: `Waiting to sync…` or `Syncing to DeltaDB…`, then `Synced to DeltaDB`, or
+`Sync failed: <reason>`. Activation returns before Delta registers the thread, and
 Delta registers it a moment before it confirms the content, so the operation runs
 until status reports the link **and** the upload is `uploaded`; the link is drawn dim
 until then, and later per-turn syncs are not shown. The plugin re-reads status on a
@@ -635,8 +662,10 @@ reason and what to do.
 
 The thread's link follows the mark whenever status reports one, whether or not a
 share published it: on the terminal the URL
-itself, as text that terminals make clickable (a hyperlink would be drawn twice by a terminal
-without hyperlink support), and on the desktop a link labelled with its short form. Beside it
+itself, as an unlabelled hyperlink, and on the desktop a link labelled with its short form. A
+labelled terminal link would print the URL twice where Claude does not treat the terminal as
+hyperlink-capable; an unlabelled one prints it once, as a hyperlink where the terminal supports
+them. Beside it
 is a copy control, which a click presses, or Enter once the band has the focus (ctrl+x tab
 lands on it), and which confirms only once the clipboard took the link. The thread's
 audience sits beside the link (`Private`, `Shared with <organization name>`, or
