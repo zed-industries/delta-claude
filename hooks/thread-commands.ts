@@ -338,9 +338,11 @@ function inspectionUnavailableMessage(error: { code: string; reason?: string; me
 /** The oldest recording-output contract version this plugin speaks. */
 export const PLUGIN_CONTRACT_VERSION = 1
 /** The newest recording-output contract version this plugin speaks. */
-export const PLUGIN_CONTRACT_MAX = 2
+export const PLUGIN_CONTRACT_MAX = 3
 /** The first contract version whose `append` accepts `session_info_update`, which carries a title. */
 export const TITLE_CONTRACT_VERSION = 2
+/** The first contract whose mount command accepts an explicit join-intent flag. */
+export const JOIN_INTENT_CONTRACT_VERSION = 3
 
 /** The range of recording-output contract versions a CLI build speaks. */
 export type ThreadContract = { operation: 'contract'; min: number; max: number }

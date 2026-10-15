@@ -192,11 +192,18 @@ delta --json thread unmount THREAD --owner SESSION
 ```
 
 `thread contract` reports the recording-output contract versions the CLI build speaks
-(`{"operation":"contract","min":1,"max":1}`), answered locally without starting delta-app; the
+(`{"operation":"contract","min":1,"max":3}`), answered locally without starting delta-app; the
 plugin calls it once per session before its first recording command. If the plugin's contract version
 is outside that range, the plugin refuses to share, join, or resume and says to update Delta (the CLI
 is older than the plugin) or the plugin (the CLI is newer); a CLI that predates the subcommand is
 treated as an older Delta.
+
+Contract 3 adds `thread mount --join` for an explicit join attempt. The plugin
+passes it only while completing a requested `/delta join`, not while restoring a
+session or refreshing worktrees in the background. The verified capability is
+kept across `/clear`. Older compatible CLI versions receive no new flag. New
+apps emit no join telemetry for mounts without it. This prevents background
+maintenance from adding user activity.
 
 The plugin speaks contract versions 1 and 2. Version 2 adds ACP's `session_info_update` to `append`,
 carrying the session's title, which Delta makes the thread's name in place of "Recorded conversation".

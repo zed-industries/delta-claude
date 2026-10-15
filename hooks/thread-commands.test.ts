@@ -356,7 +356,7 @@ describe('operation receipts', () => {
 
 describe('recording contract', () => {
   test('decodes a contract range and refuses a malformed one', () => {
-    expect(parseThreadContract(JSON.stringify(cliFixture('contract')))).toEqual({ operation: 'contract', min: 1, max: 2 })
+    expect(parseThreadContract(JSON.stringify(cliFixture('contract')))).toEqual({ operation: 'contract', min: 1, max: 3 })
     expect(parseThreadContract('{"operation":"contract","min":1,"max":3}')).toEqual({ operation: 'contract', min: 1, max: 3 })
     for (const bad of [
       '{"operation":"status","min":1,"max":1}',
@@ -374,8 +374,8 @@ describe('recording contract', () => {
     for (const range of [at(1, 1), at(1, 2), at(0, 3), at(2, 2)]) expect(contractRefusal(range)).toBeUndefined()
     expect(contractRefusal(at(0, 0))).toContain('Update Delta')
     expect(contractRefusal(undefined)).toContain('Update Delta')
-    expect(contractRefusal(at(3, 4))).toContain('Update the Delta plugin')
-    expect([at(1, 1), at(1, 2), at(1, 5)].map(contractVersion)).toEqual([1, 2, 2])
+    expect(contractRefusal(at(4, 4))).toContain('Update the Delta plugin')
+    expect([at(1, 1), at(1, 2), at(1, 5)].map(contractVersion)).toEqual([1, 2, 3])
     expect(PLUGIN_CONTRACT_VERSION).toBe(1)
   })
 })

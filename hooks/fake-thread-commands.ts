@@ -591,7 +591,7 @@ export function fakeThreads(on: On, options: {
     if (operation === 'contract') {
       fake.contractChecks++
       if (fake.contractUnknownSubcommand) return output('', 2, "error: unrecognized subcommand 'contract'")
-      return output(JSON.stringify(cliFixture('contract', fake.contractRange ?? {})))
+      return output(JSON.stringify(cliFixture('contract', fake.contractRange ?? { max: 2 })))
     }
     fake.commands.push(argv)
     if (argv[0] === 'git') return fake.failGit ? output('', 128, 'not a git repository') : output(`${CHECKOUT}\n`)
@@ -675,7 +675,12 @@ export function fakeThreads(on: On, options: {
     if (operation) fake.cliIntegrations.push({ operation, integration: e.env?.DELTA_CLI_INTEGRATION })
     if (operation === 'mount') {
       fake.commands.push([...e.argv])
-      if (!matchesCommand(e.argv, ['thread', 'mount', threadLocator(cliArguments(e.argv)?.positionals[2])], { '--owner': fake.session }))
+      const joining = cliArguments(e.argv)?.options['--join'] === true
+      if (joining && (fake.contractRange?.max ?? 2) < 3)
+        fake.violations.push('join-intent flag sent to an older CLI')
+      if (!matchesCommand(e.argv, ['thread', 'mount', threadLocator(cliArguments(e.argv)?.positionals[2])], {
+        '--owner': fake.session, ...joining ? { '--join': true } : {},
+      }))
         fake.violations.push(`unexpected mount arguments: ${e.argv.join(' ')}`)
       const hold = await fake.holdRun?.(operation)
       if (hold) await hold
@@ -887,7 +892,7 @@ function cliArguments(argv: readonly string[]) {
     const argument = argv[index]!
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
-    if (argument === '--json') { options[argument] = true; continue }
+    if (argument === '--json' || argument === '--join') { options[argument] = true; continue }
     if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined
@@ -897,7 +902,7 @@ function cliArguments(argv: readonly string[]) {
 }
 
 function matchesCommand(
-  argv: readonly string[], positionals: readonly (string | undefined)[], options: Record<string, string | undefined>,
+  argv: readonly string[], positionals: readonly (string | undefined)[], options: Record<string, string | boolean | undefined>,
 ): boolean {
   const parsed = cliArguments(argv)
   return !!parsed && parsed.positionals.length === positionals.length &&

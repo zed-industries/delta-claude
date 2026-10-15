@@ -14,7 +14,7 @@ import { PresenceTracker } from './presence'
 import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
   JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
-  validateJoinedMounts, validateThreadFrontier, validateThreadCheckout, PLUGIN_CONTRACT_VERSION, TITLE_CONTRACT_VERSION,
+  validateJoinedMounts, validateThreadFrontier, validateThreadCheckout, PLUGIN_CONTRACT_VERSION, TITLE_CONTRACT_VERSION, JOIN_INTENT_CONTRACT_VERSION,
   type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadTurn, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
 import {
@@ -67,7 +67,7 @@ type RemoteTurn = { turnId: string | null; name: string; id?: string; since?: nu
 /** A share or join that the band is reporting: running, finished, or failed. */
 type ProgressTone = 'active' | 'done' | 'error'
 type JoinPlan = { session: string; cwd: string; locator: string; thread: string }
-type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean }
+type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean; contractVersion?: number }
 type ShareRequest = { session: string; cwd: string; cancelled?: boolean }
 
 const encoder = new TextEncoder()
@@ -1927,6 +1927,7 @@ async function join($: Runtime, request: JoinRequest) {
     // Refuse a CLI this plugin cannot record against before any transition, mount, or clear.
     await resolveCli($, true)
     await requireContract($, request.session)
+    request.contractVersion = contractVerified.get(request.session) ?? PLUGIN_CONTRACT_VERSION
     if (pending.joinTransition) {
       plan = pending.joinTransition
       fresh = request.session
@@ -2033,11 +2034,11 @@ async function requireJoinCommands($: Runtime, names: string[]) {
 /** Complete only the saved fresh session's transition, never clear again on retry. */
 async function completeJoin($: Runtime, session: string, plan: JoinPlan, request: JoinRequest) {
   // This session runs against the same CLI build `join` already verified for this process.
-  contractVerified.set(session, contractVerified.get(request.session) ?? PLUGIN_CONTRACT_VERSION)
+  contractVerified.set(session, request.contractVersion ?? PLUGIN_CONTRACT_VERSION)
   const check = () => assertJoinSession($, session, request)
   await check()
   setProgress($, "Mounting the thread's worktrees…", 'active')
-  const mounted = await mountThread($, { session, thread: plan.thread, locator: plan.locator })
+  const mounted = await mountThread($, { session, thread: plan.thread, locator: plan.locator }, true)
   await check()
   requireMounted(mounted, plan.thread)
   // Remember the verified destination even if Claude refuses /cd; the retry notice must name it.
@@ -2074,10 +2075,14 @@ async function completeJoin($: Runtime, session: string, plan: JoinPlan, request
 /** Ask Delta to keep the checkout of every worktree of a joined thread mounted for this session. */
 async function mountThread(
   $: Runtime, binding: { session: string; thread?: string; locator?: string; owner?: string },
+  reportJoin = false,
 ): Promise<MountedThread> {
   const owner = binding.owner ?? binding.session
+  const args = ['thread', 'mount', binding.locator ?? binding.thread!, '--owner', owner]
+  if (reportJoin && (contractVerified.get(binding.session) ?? PLUGIN_CONTRACT_VERSION) >= JOIN_INTENT_CONTRACT_VERSION)
+    args.push('--join')
   // A first mount can materialize large checkouts, which the CLI waits for.
-  return parseThreadMount(await readCommand($, ['thread', 'mount', binding.locator ?? binding.thread!, '--owner', owner],
+  return parseThreadMount(await readCommand($, args,
     'thread mount', new AbortController().signal, MOUNT_TIMEOUT_MS), owner)
 }
 

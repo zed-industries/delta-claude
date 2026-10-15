@@ -27,6 +27,7 @@ describe('joining', () => {
 
   for (const surface of ['terminal'] as const) test(`${surface} joins in a fresh session and separate exact mount without exporting, attaching, publishing, or executing`, async ($, on) => {
     const fake = sharedThread(on, $)
+    fake.contractRange = { min: 1, max: 3 }
     fake.cliMissing = true
     fake.surfaces = [surface]
     const previousSession = fake.session
@@ -59,7 +60,7 @@ describe('joining', () => {
     })
     expect(fake.cwd).toBe(directory)
     expect(fake.delta().filter((argv) => argv[3] === 'mount')).toEqual([
-      ['/selected/delta', '--json', 'thread', 'mount', link(fake), '--owner', fake.session]])
+      ['/selected/delta', '--json', 'thread', 'mount', link(fake), '--owner', fake.session, '--join']])
     expect(fake.cliIntegrations.filter((call) => call.operation === 'mount')).toEqual([
       { operation: 'mount', integration: 'claude_code' },
     ])
@@ -106,6 +107,7 @@ describe('joining', () => {
 
   test('resume mounts again, moves Claude from its launch directory, and records only new rows', async ($, on) => {
     const fake = sharedThread(on, $)
+    fake.contractRange = { min: 1, max: 3 }
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${fake.shareId}` })
     await finishJoin(fake)
@@ -127,6 +129,7 @@ describe('joining', () => {
     expect(fake.sessionCommands.slice(moves)).toEqual([{ command: 'cd', args: binding.directory }])
     expect(fake.store.get(`session:${session}`)).toEqual(binding)
     expect(fake.delta().slice(commands).some((argv) => argv.includes('mount'))).toBe(true)
+    expect(fake.delta().slice(commands).filter((argv) => argv[3] === 'mount').every((argv) => !argv.includes('--join'))).toBe(true)
     expect(fake.operations().slice(commands).some((operation) => ['create', 'attach', 'share'].includes(operation!))).toBe(false)
     expect((await $.prompt.submit(prompt('after restore'))).drop).toBeUndefined()
     await $.tool.call(bash('new-tool', 'echo new local output'))
@@ -214,6 +217,7 @@ describe('joining', () => {
 
   test('worktrees added and removed live update the mounts, tell Claude and the person, and move Claude to the thread folder once', async ($, on) => {
     const fake = sharedThread(on, $)
+    fake.contractRange = { min: 1, max: 3 }
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
     await finishJoin(fake)
@@ -235,6 +239,7 @@ describe('joining', () => {
     fake.addWorktree('zed')
     await fake.clock.advance(0)
     expect(mounts()).toBe(2)
+    expect(fake.delta().filter((argv) => argv[3] === 'mount').map((argv) => argv.includes('--join'))).toEqual([true, false])
     expect(fake.cwd).toBe(folder)
     expect(fake.sessionCommands.at(-1)).toEqual({ command: 'cd', args: folder })
     expect((fake.store.get(`session:${session}`) as any)).toMatchObject({

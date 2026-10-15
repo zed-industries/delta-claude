@@ -5,7 +5,7 @@ export const cliFixtureData: Record<string, any> = {
   "thread-append.duplicate": {"operation":"appended","thread_id":"thread_example","sequence":1,"next_sequence":3,"duplicate":true,"disposition":"duplicate","turn_sequence":null,"version":"actor.42"},
   "thread-append.fenced": {"operation":"appended","thread_id":"thread_example","sequence":2,"next_sequence":3,"duplicate":false,"disposition":"fenced","turn_sequence":1,"version":"actor.42"},
   "thread-append.recorded": {"operation":"appended","thread_id":"thread_example","sequence":1,"next_sequence":2,"duplicate":false,"disposition":"recorded","turn_sequence":null,"version":"actor.42"},
-  "thread-contract": {"operation":"contract","min":1,"max":2},
+  "thread-contract": {"operation":"contract","min":1,"max":3},
   "thread-create": {"operation":"created","thread_id":"thread_example","created":true},
   "thread-mount": {"operation":"mounted","thread_id":"thread_example","owner":"session","directory":"/folder","worktrees":[{"reference":"reference","name":"delta","directory":"/checkout","state":"mounted"}]},
   "thread-share": {"operation":"shared","thread_id":"thread_example","share_id":"share_example","url":"https://delta.dev/join/share_example"},
