@@ -26,8 +26,8 @@ import {
 import { TitleScanner, transcriptRead } from './title'
 import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
 import {
-  HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, offerOnboarding, organizationsFrom, runSetupWizard,
-  type Interaction, type Organization, type SetupEnv,
+  HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, offerOnboarding, organizationsFrom, releaseOnboarding, runSetupWizard,
+  type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
 import { PendingAuthenticationError, requireAuthentication, type AuthenticationHost } from './auth'
@@ -102,8 +102,15 @@ type RemoteTurn = { turnId: string | null; name: string; id?: string; since?: nu
 type ProgressTone = 'active' | 'done' | 'error'
 /** A join to finish in a session; `owner` names a mount another session made for it to take over. */
 type JoinPlan = { session: string; cwd: string; locator: string; thread: string; owner?: string }
-type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean; contractVersion?: number }
-type ShareRequest = { session: string; cwd: string; cancelled?: boolean }
+type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean; contractVersion?: number; form?: CommandForm }
+type ShareRequest = { session: string; cwd: string; cancelled?: boolean; form?: CommandForm }
+/** How a person ran a share or join: `/delta share` (`delta_subcommand`) or `/delta-share` (`dedicated_command`). */
+type CommandForm = 'delta_subcommand' | 'dedicated_command'
+
+/** The CLI environment that labels the command a share or join reports with how it was run, for Delta's telemetry. */
+function commandFormEnv(form: CommandForm | undefined): Record<string, string> {
+  return form ? { DELTA_CLI_COMMAND_FORM: form } : {}
+}
 
 const encoder = new TextEncoder()
 const cli = new DeltaCli()
@@ -303,7 +310,7 @@ function newReadyGate(): ReadyGate {
 /** The engine requires helpers receiving `$` to remain in the hooks module. */
 async function startConversation($: Runtime, session: string): Promise<ThreadReady> {
   if (!boundDirectory(stateFor(session).binding))
-    throw new Error('Thread setup is incomplete; run /delta share to finish explicit creation, attachment, and publication')
+    throw new Error('Thread setup is incomplete; run /delta-share to finish explicit creation, attachment, and publication')
   if (feed.session === session && feed.cancel && feed.readyGate) {
     if (feed.connection === 'retrying') throw new Error(feed.interruption ?? 'Delta is reconnecting')
     return feed.readyGate.promise
@@ -468,7 +475,7 @@ async function consumeConversation(
       const binding = await serial(() => load($, session))
       if (!ownsObserver()) return
       if (!boundDirectory(binding))
-        throw new Error('No attached thread selected; run /delta share from the intended Git checkout')
+        throw new Error('No attached thread selected; run /delta-share from the intended Git checkout')
       const argv = [await resolveCli($), '--json', 'thread', 'watch', binding.locator ?? binding.thread,
         '--source', 'claude-code', '--external-id', session]
       if (!ownsObserver()) return
@@ -836,6 +843,8 @@ async function statusView($: Runtime): Promise<StatusState> {
   if (binding?.visibility === 'organization' || binding?.upload?.organization_id) void loadOrganizationDirectory($)
   return {
     ...feed,
+    // A staged automatic session records before its watch starts, while the band shows its connection step.
+    recording: !!sessions.get(feed.session ?? active)?.binding?.snapshot,
     // Within the grace after a drop, the band carries on as if the watch were live.
     connection: feed.reconnectTimer ? 'live' : feed.connection,
     deliveryPause: state?.pauses.get('delivery') ?? state?.pauses.get('verification'),
@@ -879,12 +888,12 @@ function uploadProgress(binding: Binding | undefined): StatusState['progress'] {
   if (!binding?.autoUpload || !binding.thread) return undefined
   const upload = binding.upload
   if (upload?.state === 'failed')
-    return { text: `Upload failed: ${upload.error?.message ?? upload.error?.reason ?? 'unknown reason'}`, tone: 'error' }
+    return { text: `Sync failed: ${upload.error?.message ?? upload.error?.reason ?? 'unknown reason'}`, tone: 'error' }
   if (binding.uploaded) return undefined
   // Delta reports a failure it retries itself as queued with its error, which is progress, not a failure.
   if (upload?.state === 'queued' && upload.error)
-    return { text: `Retrying upload: ${upload.error.message || upload.error.reason || upload.error.code}`, tone: 'active' }
-  return { text: upload?.state === 'queued' ? 'Waiting to upload…' : 'Uploading to Delta…', tone: 'active' }
+    return { text: `Retrying sync: ${upload.error.message || upload.error.reason || upload.error.code}`, tone: 'active' }
+  return { text: upload?.state === 'queued' ? 'Waiting to sync…' : 'Syncing to DeltaDB…', tone: 'active' }
 }
 
 /** The operation the band draws: a share, join, or activation step, else an automatic session's upload. */
@@ -1134,7 +1143,7 @@ async function rememberStatus($: Runtime, session: string, status: ThreadStatus)
   })
   // The first upload ends the way a share does, unless a share or join is drawing its own steps.
   if (published && feed.session === session && !feed.progress && !sharing && !joining)
-    finishProgress($, 'Uploaded to Delta', 'done')
+    finishProgress($, 'Synced to DeltaDB', 'done')
   else {
     syncSpinner($)
     $.ui.invalidate('ui.render')
@@ -1195,7 +1204,7 @@ async function resolveCli($: Runtime, allowInstall = false) {
       ? { exists: (path) => $.fs.exists(path) } : false)
 }
 
-async function readCommand($: Runtime, args: string[], name: string, signal: AbortSignal, timeoutMs = 120_000): Promise<string> {
+async function readCommand($: Runtime, args: string[], name: string, signal: AbortSignal, timeoutMs = 120_000, env: Record<string, string> = {}): Promise<string> {
   if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
   let stream: ReturnType<Runtime['process']['spawn']>
   try {
@@ -1203,7 +1212,7 @@ async function readCommand($: Runtime, args: string[], name: string, signal: Abo
     if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
     stream = $.process.spawn({
       argv: [executable, '--json', ...args],
-      env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+      env: { ...env, DELTA_CLI_INTEGRATION: 'claude_code' },
     })
   }
   catch (error) { throw new DeltaCommandError('process_failed', `${name}: cannot run Delta CLI (${String(error)})`) }
@@ -1328,7 +1337,7 @@ function ledgerKey(session: string) { return `appended:${session}` }
 
 function recoveryCommand(binding?: Binding) {
   const locator = binding?.joinTransition?.locator ?? (binding?.joined ? binding.locator ?? binding.thread : undefined)
-  return locator ? `/delta join ${locator}` : '/delta share'
+  return locator ? `/delta-join ${locator}` : '/delta-share'
 }
 
 /**
@@ -1469,13 +1478,13 @@ async function cleanupOutbox($: Runtime, session: string) {
   }
 }
 
-async function command($: Runtime, args: string[], name: string, check?: () => Promise<void>, timeoutMs = 120_000) {
+async function command($: Runtime, args: string[], name: string, check?: () => Promise<void>, timeoutMs = 120_000, env: Record<string, string> = {}) {
   let result: Awaited<ReturnType<Runtime['process']['run']>>
   try {
     const executable = await resolveCli($)
     if (check) await check()
     result = await $.process.run([executable, '--json', ...args], {
-      timeoutMs, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+      timeoutMs, env: { ...env, DELTA_CLI_INTEGRATION: 'claude_code' },
     })
   } catch (error) {
     throw new Error(`${name}: cannot run Delta CLI (${String(error)}). Install the matching new Delta CLI and app, and put delta on PATH.`)
@@ -1489,7 +1498,7 @@ async function organizationCommand($: Runtime, args: string[]) {
     const executable = await resolveCli($)
     const result = await $.process.run([executable, 'org', ...args], { timeoutMs: 120_000 })
     if (result.isStdoutTruncated || result.isStderrTruncated)
-      throw new Error('Delta organization output was truncated; check the selection with /delta org current.')
+      throw new Error('Delta organization output was truncated; check the selection with /delta-org current.')
     if (result.exitCode !== 0)
       throw new Error(result.stderr.trim() || result.stdout.trim() || `Delta exited with code ${result.exitCode}`)
     return { text: result.stdout.trim() }
@@ -2139,18 +2148,19 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
   })
   await assertShareSession($, request)
   setProgress($, 'Publishing the thread…', 'active', [4, 5])
-  const shared = await command($, ['thread', 'share', binding.thread!, '--visibility', 'organization'], 'thread share', check)
+  const shared = await command($, ['thread', 'share', binding.thread!, '--visibility', 'organization'], 'thread share', check,
+    undefined, commandFormEnv(request.form))
   validatePublicationReceipt(shared, binding.thread)
   await serial(async () => save($, { ...await load($, session), url: shared.url }))
   await assertShareSession($, request)
   await startConversation($, session)
   await assertShareSession($, request)
-  setProgress($, 'Uploading files…', 'active', [5, 5])
+  setProgress($, 'Syncing files…', 'active', [5, 5])
   await drain($, session)
   if (isPaused(runtime))
     throw new Error('checkout sharing is paused; saved messages remain queued until reattachment succeeds')
   if (runtime.captureFailure || runtime.unsaved.length)
-    throw new Error('a live row could not be saved locally; fix the outbox error and retry /delta share')
+    throw new Error('a live row could not be saved locally; fix the outbox error and retry /delta-share')
   await verifyCheckout($, await load($, session))
   await assertShareSession($, request)
   return shared.url
@@ -2295,10 +2305,10 @@ async function join($: Runtime, request: JoinRequest) {
     if (request.cancelled) return
     const invalidLocator = error instanceof DeltaCommandError && error.code === 'invalid_reference'
     const text = `Delta join failed: ${String(error)}. ${invalidLocator
-      ? `The ${fresh ? 'fresh session' : 'previous session and folder'} was preserved. Use the thread's share link with /delta join instead of retrying this locator.`
+      ? `The ${fresh ? 'fresh session' : 'previous session and folder'} was preserved. Use the thread's share link with /delta-join instead of retrying this locator.`
       : fresh
-      ? `Fresh session ${fresh} was preserved. Retry /delta join ${plan?.locator ?? request.locator} to finish the saved transition; the previous session is ${plan?.session ?? request.session} at ${plan?.cwd ?? request.cwd}.`
-      : `The previous session and folder were preserved. Retry /delta join ${request.locator}.`}`
+      ? `Fresh session ${fresh} was preserved. Retry /delta-join ${plan?.locator ?? request.locator} to finish the saved transition; the previous session is ${plan?.session ?? request.session} at ${plan?.cwd ?? request.cwd}.`
+      : `The previous session and folder were preserved. Retry /delta-join ${request.locator}.`}`
     if (fresh) stateFor(fresh).joinFailure = text
     setProgress($, text, 'error')
     await $.ui.log(text, { to: 'transcript' })
@@ -2352,7 +2362,7 @@ async function completeJoin($: Runtime, session: string, plan: JoinPlan, request
   setProgress($, "Mounting the thread's worktrees…", 'active')
   const mounted = await mountThread(
     $, { session, thread: plan.thread, locator: plan.locator, owner: plan.owner },
-    { reportJoin: !plan.owner },
+    { reportJoin: !plan.owner, form: request.form },
   )
   await check()
   requireMounted(mounted, plan.thread)
@@ -2398,18 +2408,19 @@ async function completeJoin($: Runtime, session: string, plan: JoinPlan, request
 async function mountThread(
   $: Runtime,
   binding: { session: string; thread?: string; locator?: string; owner?: string },
-  options: { folder?: boolean; reportJoin?: boolean } = {},
+  options: { folder?: boolean; reportJoin?: boolean; form?: CommandForm } = {},
 ): Promise<MountedThread> {
   const owner = binding.owner ?? binding.session
   const args = [
     'thread', 'mount', binding.locator ?? binding.thread!, '--owner', owner,
     ...options.folder ? ['--folder'] : [],
   ]
-  if (options.reportJoin &&
-      (contractVerified.get(binding.session) ?? PLUGIN_CONTRACT_VERSION) >= JOIN_INTENT_CONTRACT_VERSION)
-    args.push('--join')
+  const join = !!options.reportJoin &&
+    (contractVerified.get(binding.session) ?? PLUGIN_CONTRACT_VERSION) >= JOIN_INTENT_CONTRACT_VERSION
+  if (join) args.push('--join')
   // A first mount can materialize large checkouts, which the CLI waits for.
-  return parseThreadMount(await readCommand($, args, 'thread mount', new AbortController().signal, MOUNT_TIMEOUT_MS), owner)
+  return parseThreadMount(await readCommand($, args, 'thread mount', new AbortController().signal, MOUNT_TIMEOUT_MS,
+    join ? commandFormEnv(options.form) : {}), owner)
 }
 
 function handoffPath(owner: string) { return `${pluginData}/handoffs/${owner}.json` }
@@ -2426,7 +2437,7 @@ async function offerHandoff($: Runtime, request: JoinRequest, status: ThreadStat
   const single = status.worktrees.status === 'available' && status.worktrees.items.length === 1
   const mounted = await mountThread(
     $, { session: request.session, thread: status.thread_id, locator: request.locator, owner },
-    { folder: single, reportJoin: true },
+    { folder: single, reportJoin: true, form: request.form },
   )
   const handoff: Handoff = {
     owner, thread: status.thread_id, locator: request.locator, directory: mounted.directory,
@@ -2469,7 +2480,7 @@ async function watchHandoff($: Runtime, session: string, handoff: Handoff) {
   }
   runtime.offered = undefined
   await releaseHandoff($, handoff)
-  const text = `No session joined the Delta thread within 5 minutes, so Delta released its checkouts. Run /delta join ${handoff.locator} to bring it back.`
+  const text = `No session joined the Delta thread within 5 minutes, so Delta released its checkouts. Run /delta-join ${handoff.locator} to bring it back.`
   finishProgress($, text, 'done')
   await $.ui.log(text, { to: 'transcript' })
 }
@@ -2510,7 +2521,7 @@ async function claimHandoff($: Runtime, session: string, handoff: Handoff) {
     await takeOverHandoff($, request, handoff)
   } catch (error) {
     if (request.cancelled) return
-    const text = `Delta couldn't join the thread in this session: ${String(error)}. Run /delta join ${handoff.locator} to retry.`
+    const text = `Delta couldn't join the thread in this session: ${String(error)}. Run /delta-join ${handoff.locator} to retry.`
     stateFor(session).joinFailure = text
     setProgress($, text, 'error')
     await $.ui.log(text, { to: 'transcript' })
@@ -2546,7 +2557,7 @@ async function enterDirectory($: Runtime, session: string, directory: string, ch
   setProgress($, "Waiting for you to trust the thread's folder…", 'active')
   // Claude's trust prompt names only a path, so say what the folder is and which answer joins.
   await $.ui.log(
-    `Delta put this thread's code in its own folder for this session. Claude Code asks before working in a new folder: choose "Yes, move here" to continue. "No, stay put" pauses Delta in this session until you run /delta join again.`,
+    `Delta put this thread's code in its own folder for this session. Claude Code asks before working in a new folder: choose "Yes, move here" to continue. "No, stay put" pauses Delta in this session until you run /delta-join again.`,
     { to: 'transcript' })
   await $.command.run({ command: 'cd', args: directory })
   await check()
@@ -2758,7 +2769,7 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
     runtime.binding = binding
     runtime.captureFailure ??= binding.captureFailure
     if (binding.joinTransition) {
-      await report($, new Error(`The join directory transition is incomplete. Run /delta join ${binding.joinTransition.locator} to retry the saved mount${binding.directory ? ` at ${binding.directory}` : ''}; prompts remain blocked.`))
+      await report($, new Error(`The join directory transition is incomplete. Run /delta-join ${binding.joinTransition.locator} to retry the saved mount${binding.directory ? ` at ${binding.directory}` : ''}; prompts remain blocked.`))
       return
     }
     // A session Desktop started in a hand-off's folder joins it before its first prompt.
@@ -2957,25 +2968,54 @@ async function startSession($: Runtime, session: string) {
     const path = policyPath(root)
     try { policy = readProjectPolicy(await env.readFile(path)).policy }
     catch (error) {
-      await notifyOnce($, `Delta settings at ${path} could not be read (${String(error)}); this checkout records manually until it is fixed.`)
+      await notifyOnce($, `Delta settings at ${path} couldn't be read (${String(error)}). Until it's fixed, only sessions you share with /delta-share sync.`)
       return
     }
     if (policy.problem)
-      await notifyOnce($, `Delta settings at ${path} could not be used (${policy.problem}); this checkout records manually until it is fixed. Run /delta setup to replace the file.`)
+      await notifyOnce($, `Delta settings at ${path} couldn't be used (${policy.problem}). Until it's fixed, only sessions you share with /delta-share sync. Run /delta-setup to replace it.`)
     if (newSession && recordsAutomatically(policy))
       await activateAutomatically($, session, root, { mode: policy.mode === 'private' ? 'private' : 'organization', organization: policy.organization! })
   } finally {
     // Nothing below records, so the session's activity never waits on the setup offer's dialog.
     decideCapture(session)
   }
-  // Headless sessions are never offered setup; only an interactive surface can show the dialog.
+  // Headless sessions get no notice and are never offered setup; only an interactive surface shows them.
   if (!hasInteractiveSurface(await $.session.surfaces())) return
-  await offerOnboarding(env, claudeInteraction($), {
+  const notice = active === session && sessionSources.get(session) !== 'compact'
+    ? startupNotice(stateFor(session), policy) : undefined
+  if (notice) await $.ui.log(notice, { to: 'transcript' })
+  try {
+    await offerOnboarding(env, claudeInteraction($), onboardingStore($), {
+      root, configured: policy.configured, newSession, joined: !!stateFor(session).binding?.joined, joining: !!joining,
+    }, (key) => { openOnboarding.set(session, key) })
+  } finally {
+    openOnboarding.delete(session)
+  }
+}
+
+/** The onboarding marker each session's still-open setup offer holds, cleared if the session ends first. */
+const openOnboarding = new Map<string, string>()
+
+function onboardingStore($: Runtime): OnboardingStore {
+  return {
     get: (key) => $.store.get(key) as Promise<unknown>,
     set: (key, value) => $.store.set(key, value).then(() => undefined),
-  }, {
-    root, configured: policy.configured, newSession, joined: !!stateFor(session).binding?.joined, joining: !!joining,
-  })
+  }
+}
+
+/**
+ * The reminder a session that Delta does not sync opens with, saying how to sync it. A syncing
+ * session, joined ones included, gets none: the status band above the prompt says so, live, and
+ * names who can see it. A session that is still joining, and an automatic one that could not start,
+ * already explain themselves, so they get none either.
+ */
+function startupNotice(runtime: SessionState, policy: ProjectPolicy): string | undefined {
+  const binding = runtime.binding
+  if (binding?.snapshot || binding?.joinTransition || joining || runtime.handoffClaim) return undefined
+  if (recordsAutomatically(policy)) return undefined
+  // Someone who chose Manual is not nudged toward setup every session.
+  if (policy.configured) return 'Not syncing this session. Run /delta-share to share it.'
+  return 'Delta isn\'t set up here. Run /delta-setup to choose what syncs.'
 }
 
 /** Auto-activations already running in this process, so a repeated startup hook cannot create twice. */
@@ -3016,7 +3056,7 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
       const version = contractVerified.get(session) ?? PLUGIN_CONTRACT_VERSION
       if (version < OFFLINE_CONTRACT_VERSION) {
         // Auto mode cannot record without a CLI that speaks the offline contract; say so once.
-        await notifyOnce($, `Delta must be updated for automatic uploads: this CLI speaks recording contract ${version}, and automatic recording needs ${OFFLINE_CONTRACT_VERSION}. This checkout keeps recording manually until Delta is updated.`)
+        await notifyOnce($, 'Update Delta to sync sessions automatically; this version is too old. Until then, only sessions you share with /delta-share sync.')
         return
       }
       const refusal = await misconfiguration
@@ -3066,7 +3106,7 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
         return
       }
       // Only a staged session gets this far: everything before staging fails permanently.
-      const text = `Delta couldn't start automatic recording: ${String(error)}. Records stay queued and Delta retries on your next prompt.`
+      const text = `Delta couldn't start syncing this session: ${String(error)}. Nothing is lost; Delta retries on your next prompt.`
       setProgress($, text, 'error')
       await notifyOnce($, text)
     }
@@ -3080,15 +3120,15 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
 type ActivationRefusal = { band: string; transcript: string }
 
 const SIGNED_OUT_REFUSAL: ActivationRefusal = {
-  band: 'Not recording: sign in with `delta auth login`',
-  transcript: "This repository records Claude Code sessions automatically, but Delta is signed out, so this session isn't recorded. Sign in with `delta auth login`; new sessions then record automatically.",
+  band: 'Not syncing: sign in with `delta auth login`',
+  transcript: "This repository syncs Claude Code sessions to DeltaDB, but Delta is signed out, so this session isn't syncing. Sign in with `delta auth login`; new sessions then sync automatically.",
 }
 
 function notMemberRefusal(organization: string): ActivationRefusal {
   const name = organizationName(organization)
   return {
-    band: "Not recording: your Delta account isn't in this repo's organization · /delta share",
-    transcript: `This repository's Delta settings record sessions to ${name ? `${name} (${organization})` : organization}, which your Delta account isn't a member of, so this session isn't recorded. Use /delta share to share it with your own organization, ask to be added to ${name ?? 'that organization'}, or run /delta setup if the settings name the wrong organization.`,
+    band: "Not syncing: your Delta account isn't in this repo's organization · /delta-share",
+    transcript: `This repository syncs sessions to ${name ? `${name} (${organization})` : organization}, which your Delta account isn't a member of, so this session isn't syncing. Use /delta-share to share it with your own organization, ask to be added to ${name ?? 'that organization'}, or run /delta-setup if the settings name the wrong organization.`,
   }
 }
 
@@ -3115,8 +3155,8 @@ function activationRefusal(error: unknown, organization: string): ActivationRefu
   const advice = error instanceof DeltaCommandError
     ? permanentFailureAdvice(error.code, true, error.reason) : 'Fix the cause, then start a new session'
   return {
-    band: `Not recording: ${advice}`,
-    transcript: `Delta couldn't start automatic recording: ${error instanceof Error ? error.message : String(error)}. This session isn't recorded. ${advice}.`,
+    band: `Not syncing: ${advice}`,
+    transcript: `Delta couldn't start syncing this session: ${error instanceof Error ? error.message : String(error)}. This session isn't syncing. ${advice}.`,
   }
 }
 
@@ -3259,6 +3299,64 @@ async function setupCommand($: Runtime): Promise<string> {
   return outcome.text
 }
 
+/** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
+async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
+  // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
+  if (action === 'setup') return { text: await setupCommand($) }
+  const locator = /^join\s+(\S+)$/.exec(action)?.[1]
+  const organization = /^org\s+(?:(list|current)|(switch)\s+(\S+))$/.exec(action)
+  if (action !== 'share' && !locator && !organization)
+    return { text: 'Usage: /delta share | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID>' }
+  if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
+  if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
+  if (organization)
+    return organizationCommand($, organization[1] ? [organization[1]] : ['switch', '--', organization[3]!])
+  const session = await $.session.id()
+  let shareRequest: ShareRequest | undefined
+  try {
+    if (session !== active || !stateFor(session).binding) await activate($, session)
+    if (locator) {
+      if (!hasInteractiveSurface(await $.session.surfaces()))
+        return { text: '/delta-join requires an interactive Claude Code terminal or Desktop Code tab. Print mode and SDK sessions have no interactive surface for the session transition.' }
+      if (stateFor(session).currentTurnId || stateFor(session).promptEntering)
+        return { text: 'Wait for the current Claude turn to finish before joining.' }
+      const request = { session, cwd: await $.session.cwd(), locator, form }
+      joining = request
+      setProgress($, 'Checking access to the shared thread…', 'active')
+      $.clock.after(0, () => join($, request))
+      // Progress belongs to the band; a command with no text adds no transcript row.
+      return {}
+    }
+    if (stateFor(session).currentTurnId)
+      return { text: 'Wait for the current Claude turn to finish before sharing.' }
+    const request = { session, cwd: await $.session.cwd(), form }
+    sharing = shareRequest = request
+    setProgress($, 'Preparing to share…', 'active', [1, 5])
+    if (hasInteractiveSurface(await $.session.surfaces())) {
+      $.clock.after(0, () => runShare($, request))
+      return {}
+    }
+    // Cloud and other headless hosts cannot show the band or be relied on to forward
+    // background UI notices. Keep the command open so its caller receives the outcome.
+    const url = await share($, request)
+    finishProgress($, 'Shared', 'done')
+    if (sharing === request) sharing = undefined
+    return { text: `Delta share link: ${url}` }
+  }
+  catch (error) {
+    if (error instanceof PendingAuthenticationError) {
+      if (sharing === shareRequest) sharing = undefined
+      return { text: error.message }
+    }
+    const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${locator ? `/delta-join ${locator}` : recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
+    if (!shareRequest || sharing === shareRequest) {
+      if (sharing === shareRequest) sharing = undefined
+      setProgress($, text, 'error')
+    }
+    return { text }
+  }
+}
+
 export function register(on: On) {
   on('prompt.submit', async ($, e, next) => {
     // A hand-off's opening line only started this session, which has joined by now. It becomes a
@@ -3295,7 +3393,7 @@ export function register(on: On) {
       restoring: !!runtime.restoring, movePending: !!runtime.moveTo, steering: !!e.turnId,
     })
     if (blocked === 'transition')
-      return { drop: `The Delta join directory transition is incomplete. Run /delta join ${runtime.binding!.joinTransition!.locator} to retry; the prompt was not submitted.` }
+      return { drop: `The Delta join directory transition is incomplete. Run /delta-join ${runtime.binding!.joinTransition!.locator} to retry; the prompt was not submitted.` }
     if (blocked === 'restoring')
       return { drop: "Delta is restoring this thread's worktrees. Wait for the band to say they are restored, then try again. The prompt was not submitted." }
     if (blocked === 'moving')
@@ -3445,11 +3543,14 @@ export function register(on: On) {
     const spans = (segments: StatusSegment[]) =>
       segments.map((segment, index) => <Text key={String(index)} {...segmentProps(segment)}>{segment.text}</Text>)
     const { text, href, ownRow, copy } = band.link ?? {}
-    // The terminal shows the URL as text, which terminals make clickable: a terminal without
-    // hyperlinks would draw a Link's URL a second time beside its label.
+    // A followable link is a real hyperlink on every surface, so a terminal can open it however it
+    // handles clicks. The terminal's Link takes no label: where Claude does not treat the terminal as
+    // hyperlink-capable, a labelled Link prints its label and then its URL, the same text twice, while
+    // an unlabelled one prints the URL once. While a share or join runs, the link is shown dim and not
+    // offered.
     let link = null
-    if (text && href && !terminal) link = <Link href={href} label={text} />
-    else if (text) link = <Text {...segmentProps({ text, dim: !href })}>{text}</Text>
+    if (text && href) link = terminal ? <Link href={href} /> : <Link href={href} label={text} />
+    else if (text) link = <Text {...segmentProps({ text, dim: true })}>{text}</Text>
     let copier = null
     if (href && copy?.copied) copier = <Text color="green">{copyText(copy)}</Text>
     // Taking the band's focus lands on the copy control, so Enter copies; a hotkey hint would read
@@ -3476,7 +3577,7 @@ export function register(on: On) {
         <Box flexDirection="row">
           <Text wrap="truncate-end">
             <Text {...segmentProps(band.mark)}>{band.mark.text}</Text>
-            <Text dimColor>{' Delta'}</Text>
+            {spans(band.label)}
             {inline ? '  ' : ''}{inline ? link : null}
             {band.audience?.length ? <Text>{'  '}{spans(band.audience)}</Text> : null}
             {controls.length ? '  ' : ''}
@@ -3568,6 +3669,13 @@ export function register(on: On) {
   })
   on('session.end', async ($, e, next) => {
     sessionSources.delete(e.sessionId)
+    // A setup offer still open when its session ends was never decided, so the next session offers it again.
+    const offer = openOnboarding.get(e.sessionId)
+    openOnboarding.delete(e.sessionId)
+    if (offer) {
+      try { await releaseOnboarding(onboardingStore($), offer) }
+      catch { /* the offer then simply stays consumed, as before */ }
+    }
     // A session that ended can never reach its capture boundary; release anything held on it.
     decideCapture(e.sessionId)
     if (sharing?.session === e.sessionId) {
@@ -3635,7 +3743,14 @@ export function register(on: On) {
   })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'delta', description: 'Share or join a Delta conversation, set up automatic recording, or select an organization', argumentHint: 'share | join <shared-link-or-thread> | setup | org list | org current | org switch <ID>' })
+    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, or choose an organization', argumentHint: 'share | join <shared-link-or-thread> | setup | org list | org current | org switch <ID>' })
+    // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
+    // appears in the slash-command menu.
+    await $.command.register({ name: 'delta-share', description: 'Delta: sync this session and its code to DeltaDB, and share it with your organization' })
+    // Claude's menu shows a command's description but not its argument hint, so the description carries the format.
+    await $.command.register({ name: 'delta-join', description: 'Delta: join a shared conversation. Needs its link: /delta-join <link>', argumentHint: '<shared-link-or-thread>' })
+    await $.command.register({ name: 'delta-setup', description: 'Delta: choose which sessions in this repository sync to DeltaDB' })
+    await $.command.register({ name: 'delta-org', description: 'Delta: manage your organization. /delta-org list, current, or switch <ID>', argumentHint: 'list | current | switch <ID>' })
     const result = await next(e)
     const session = await $.session.id()
     try { await activate($, session) }
@@ -3687,61 +3802,16 @@ export function register(on: On) {
     // person or another plugin, and gets the usage text below.
     if (internal !== undefined && e.origin?.kind === 'plugin' && e.origin.name === $.plugin.name)
       return { text: SHOW_ANSWER }
-    // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
-    if (action === 'setup') return { text: await setupCommand($) }
-    const locator = /^join\s+(\S+)$/.exec(action)?.[1]
-    const organization = /^org\s+(?:(list|current)|(switch)\s+(\S+))$/.exec(action)
-    if (action !== 'share' && !locator && !organization)
-      return { text: 'Usage: /delta share | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID>' }
-    if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
-    if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
-    if (organization)
-      return organizationCommand($, organization[1] ? [organization[1]] : ['switch', '--', organization[3]!])
-    const session = await $.session.id()
-    let shareRequest: ShareRequest | undefined
-    try {
-      if (session !== active || !stateFor(session).binding) await activate($, session)
-      if (locator) {
-        if (!hasInteractiveSurface(await $.session.surfaces()))
-          return { text: '/delta join requires an interactive Claude Code terminal or Desktop Code tab. Print mode and SDK sessions have no interactive surface for the session transition.' }
-        if (stateFor(session).currentTurnId || stateFor(session).promptEntering)
-          return { text: 'Wait for the current Claude turn to finish before joining.' }
-        const request = { session, cwd: await $.session.cwd(), locator }
-        joining = request
-        setProgress($, 'Checking access to the shared thread…', 'active')
-        $.clock.after(0, () => join($, request))
-        // Progress belongs to the band; a command with no text adds no transcript row.
-        return {}
-      }
-      if (stateFor(session).currentTurnId)
-        return { text: 'Wait for the current Claude turn to finish before sharing.' }
-      const request = { session, cwd: await $.session.cwd() }
-      sharing = shareRequest = request
-      setProgress($, 'Preparing to share…', 'active', [1, 5])
-      if (hasInteractiveSurface(await $.session.surfaces())) {
-        $.clock.after(0, () => runShare($, request))
-        return {}
-      }
-      // Cloud and other headless hosts cannot show the band or be relied on to forward
-      // background UI notices. Keep the command open so its caller receives the outcome.
-      const url = await share($, request)
-      finishProgress($, 'Shared', 'done')
-      if (sharing === request) sharing = undefined
-      return { text: `Delta share link: ${url}` }
-    }
-    catch (error) {
-      if (error instanceof PendingAuthenticationError) {
-        if (sharing === shareRequest) sharing = undefined
-        return { text: error.message }
-      }
-      const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${locator ? `/delta join ${locator}` : recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
-      if (!shareRequest || sharing === shareRequest) {
-        if (sharing === shareRequest) sharing = undefined
-        setProgress($, text, 'error')
-      }
-      return { text }
-    }
+    return runDeltaCommand($, action, 'delta_subcommand')
   })
+  on('command.run', { command: 'delta-share' }, async ($, e) => runDeltaCommand($, `share ${e.args.trim()}`.trim(), 'dedicated_command'))
+  on('command.run', { command: 'delta-join' }, async ($, e) => e.args.trim()
+    ? runDeltaCommand($, `join ${e.args.trim()}`, 'dedicated_command')
+    : { text: 'Usage: /delta-join <link>. Paste the Delta link someone shared with you, such as /delta-join https://delta.dev/join/…, or a thread ID.' })
+  on('command.run', { command: 'delta-setup' }, async ($, e) => runDeltaCommand($, `setup ${e.args.trim()}`.trim(), 'dedicated_command'))
+  on('command.run', { command: 'delta-org' }, async ($, e) => e.args.trim()
+    ? runDeltaCommand($, `org ${e.args.trim()}`, 'dedicated_command')
+    : { text: 'Usage: /delta-org list (your organizations), /delta-org current (the selected one), or /delta-org switch <ID>.' })
 
   on('session.append', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)

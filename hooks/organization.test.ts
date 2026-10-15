@@ -46,7 +46,7 @@ test('invalid organization syntax and CLI failures are returned without sharing'
   fake.organizationResult.stdout = 'org_two\tSecond team\n'
   fake.organizationResult.isStdoutTruncated = true
   expect(await $.command.run({ ...shareCommand, args: 'org current' })).toEqual({
-    text: 'Delta organization command failed: Error: Delta organization output was truncated; check the selection with /delta org current.',
+    text: 'Delta organization command failed: Error: Delta organization output was truncated; check the selection with /delta-org current.',
   })
   expect(fake.exports).toBe(0)
   fake.expectClean()

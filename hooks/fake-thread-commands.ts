@@ -221,7 +221,7 @@ export function fakeThreads(on: On, options: {
     session,
     cwd: CHECKOUT,
     pluginVersion: '0.1.1',
-    cliIntegrations: [] as { operation: string; integration?: string }[],
+    cliIntegrations: [] as { operation: string; integration?: string; commandForm?: string }[],
     surfaces: ['terminal'] as ('terminal' | 'desktop')[],
     builtins: ['clear', 'cd'],
     sessionCommands: [] as { command: string; args: string }[],
@@ -658,7 +658,8 @@ export function fakeThreads(on: On, options: {
     }
     const parsed = cliArguments(argv)
     const operation = parsed?.positionals[1]
-    if (operation) fake.cliIntegrations.push({ operation, integration: e.init?.env?.DELTA_CLI_INTEGRATION })
+    if (operation) fake.cliIntegrations.push({ operation, integration: e.init?.env?.DELTA_CLI_INTEGRATION,
+      ...e.init?.env?.DELTA_CLI_COMMAND_FORM ? { commandForm: e.init.env.DELTA_CLI_COMMAND_FORM } : {} })
     if (parsed?.positionals[0] === 'org' && argv.includes('--json')) {
       fake.commands.push(argv)
       if (parsed.positionals[1] !== 'list') {
@@ -823,7 +824,8 @@ export function fakeThreads(on: On, options: {
       }
     }
     const operation = cliArguments(e.argv)?.positionals[1]
-    if (operation) fake.cliIntegrations.push({ operation, integration: e.env?.DELTA_CLI_INTEGRATION })
+    if (operation) fake.cliIntegrations.push({ operation, integration: e.env?.DELTA_CLI_INTEGRATION,
+      ...e.env?.DELTA_CLI_COMMAND_FORM ? { commandForm: e.env.DELTA_CLI_COMMAND_FORM } : {} })
     if (operation === 'mount') {
       fake.commands.push([...e.argv])
       const parsed = cliArguments(e.argv)

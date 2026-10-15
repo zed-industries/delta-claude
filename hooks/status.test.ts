@@ -47,6 +47,14 @@ test('the mark carries the connection, and a failure adds its reason below', () 
   expect(renderBand({ ...live, connection: 'stopped' }, WIDE).mark.text).toBe('○')
 })
 
+test('a recorded session says so beside the name at every width, and an unrecorded one does not', () => {
+  expect(text(renderBand(live, WIDE).label)).toBe(' Delta')
+  for (const columns of [120, 40]) {
+    const band = renderBand({ ...live, recording: true, people }, { columns, terminal: true })
+    expect(text(band.label)).toBe(' Delta · Syncing')
+  }
+})
+
 test('a running share shows its step and the link only once it can be followed', () => {
   const step = { text: 'Publishing the thread…', tone: 'active' as const, step: [4, 5] as [number, number] }
   const before = renderBand({ ...live, link: undefined, progress: step }, WIDE)

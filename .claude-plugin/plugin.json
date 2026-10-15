@@ -1,6 +1,6 @@
 {
   "name": "delta",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Share Claude Code conversations and worktrees with collaborators through Delta.",
   "author": {
     "name": "Zed Industries"

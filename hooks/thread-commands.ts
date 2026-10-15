@@ -163,14 +163,14 @@ export function classifyCommandFailure(error: unknown): FailureClass {
 export function permanentFailureAdvice(code: string, automatic = false, reason?: string): string {
   // Delta publishes an organization mismatch as `invalid_invocation`; only the reason tells it apart.
   if (reason === 'organization_mismatch')
-    return 'This thread already uploads to a different Delta organization; its audience cannot change'
+    return 'This thread already syncs to a different Delta organization, so who can see it can\'t change'
   if (['not_visible', 'authentication_required', 'wrong_account'].includes(code))
     return 'Check your Delta sign-in and access to this thread'
   if (code === 'organization_required')
-    return 'Find your organization with `/delta org list`, then select it with `/delta org switch <ID>`'
+    return 'Find your organization with `/delta-org list`, then select it with `/delta-org switch <ID>`'
   if (code === 'not_shared')
     // An automatic session uploads by intent, so it recovers by retrying, not by publishing.
-    return automatic ? 'This repo has not finished asking Delta to upload it' : 'Share the thread with /delta share'
+    return automatic ? 'This repository hasn\'t finished setting up syncing with Delta' : 'Share the thread with /delta-share'
   if (code === 'invalid_reference')
     return 'Fix the thread, worktree, path, or producer reference'
   if (['invalid_record', 'invalid_acknowledgment'].includes(code))
@@ -422,11 +422,10 @@ export function parseThreadFork(stdout: string): ForkedThread {
 export function contractRefusal(range: ThreadContract | undefined): string | undefined {
   if (!range)
     return 'This Delta CLI does not recognize `thread contract`, so it is too old for this plugin. Update Delta to continue'
-  const ours = `${PLUGIN_CONTRACT_VERSION}..${PLUGIN_CONTRACT_MAX}`
   if (PLUGIN_CONTRACT_VERSION > range.max)
-    return `Delta speaks recording contract ${range.min}..${range.max}, older than this plugin's ${ours}. Update Delta to continue`
+    return 'This Delta is too old for this plugin. Update Delta to continue'
   if (PLUGIN_CONTRACT_MAX < range.min)
-    return `Delta speaks recording contract ${range.min}..${range.max}, newer than this plugin's ${ours}. Update the Delta plugin to continue`
+    return 'This Delta is newer than this plugin. Update the Delta plugin to continue'
 }
 
 /** The newest contract version both this plugin and a CLI it may record against speak. */
@@ -445,7 +444,7 @@ export function validateThreadCheckout(
   binding: { checkout?: string; checkoutReference?: string; autoUpload?: unknown },
 ): { directory: string; reference: string } {
   if (state.access.state !== 'granted' && !(binding.autoUpload && state.access.state === 'local_only'))
-    throw new Error('The thread has no authenticated shared access; run /delta share to explicitly publish it')
+    throw new Error('The thread has no authenticated shared access; run /delta-share to explicitly publish it')
   if (state.worktrees.status === 'unavailable')
     throw new DeltaCommandError(state.worktrees.error.code, inspectionUnavailableMessage(state.worktrees.error), {}, state.worktrees.error.reason)
   const matches = state.worktrees.items.flatMap((worktree) => worktree.checkouts
@@ -454,7 +453,7 @@ export function validateThreadCheckout(
       checkout.state === 'attached' && checkout.active !== false)
     .map((checkout) => ({ directory: checkout.directory, reference: worktree.reference })))
   if (matches.length !== 1)
-    throw new Error('The bound checkout is detached, inactive, missing, ambiguous, or has a different reference; the existing binding was preserved. Run /delta share from the intended checkout.')
+    throw new Error('The bound checkout is detached, inactive, missing, ambiguous, or has a different reference; the existing binding was preserved. Run /delta-share from the intended checkout.')
   return matches[0]!
 }
 
@@ -497,7 +496,7 @@ export function validateJoinedMounts(state: ThreadState, mounts: readonly { refe
     const ready = items.some((tree) => tree.reference === mount.reference && tree.checkouts.some((checkout) =>
       samePath(checkout.directory, mount.directory) && checkout.active === true && ['attached', 'detached'].includes(checkout.state)))
     if (!ready)
-      throw new JoinNotReadyError(`The worktree "${mount.name}" is not mounted at ${mount.directory} yet. Wait for Delta to finish mounting it, or run /delta join with this thread's link to mount it again`)
+      throw new JoinNotReadyError(`The worktree "${mount.name}" is not mounted at ${mount.directory} yet. Wait for Delta to finish mounting it, or run /delta-join with this thread's link to mount it again`)
   }
 }
 

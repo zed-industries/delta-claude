@@ -109,22 +109,22 @@ export class DeltaCli {
         catch { continue }
         if (await windows.exists(candidate)) return candidate
       }
-      throw new Error('Delta CLI, install Delta for Windows from https://delta.dev, restart your terminal and Claude Code, and retry /delta share or /delta join <link>.')
+      throw new Error('Delta CLI, install Delta for Windows from https://delta.dev, restart your terminal and Claude Code, and retry /delta-share or /delta-join <link>.')
     }
     const result = await run(['sh', '-c', discover], { timeoutMs: 30_000 })
     if (result.isStdoutTruncated || result.isStderrTruncated) throw new Error('Delta CLI discovery output was truncated; retry.')
     if (result.exitCode === 0) return this.path(result.stdout)
     if (result.exitCode !== 3) throw new Error(`Cannot locate Delta CLI: ${result.stderr.trim()}. Fix the issue and retry.`)
-    if (!allowInstall) throw new MissingCliError('Delta CLI is missing. Run /delta share or /delta join <link> explicitly to install Delta and reconnect.')
+    if (!allowInstall) throw new MissingCliError('Delta CLI is missing. Run /delta-share or /delta-join <link> explicitly to install Delta and reconnect.')
     progress('Installing Delta (full app and windowless client) for this user…')
     let installed: Awaited<ReturnType<EngineInterface['process']['run']>>
     try {
       installed = await run(['sh', '-c', install], { timeoutMs: 600_000 })
     } catch (error) {
-      throw new Error(`Delta installation could not finish: ${String(error)}. Check network access, curl, and disk permissions, then retry /delta share or /delta join <link>.`)
+      throw new Error(`Delta installation could not finish: ${String(error)}. Check network access, curl, and disk permissions, then retry /delta-share or /delta-join <link>.`)
     }
     if (installed.exitCode !== 0 || installed.isStdoutTruncated || installed.isStderrTruncated)
-      throw new Error(`Delta installation failed: ${installed.stderr.trim() || 'installer failed or output was truncated'}. Check network access, curl, and disk permissions, then retry /delta share or /delta join <link>.`)
+      throw new Error(`Delta installation failed: ${installed.stderr.trim() || 'installer failed or output was truncated'}. Check network access, curl, and disk permissions, then retry /delta-share or /delta-join <link>.`)
     return this.path(installed.stdout)
   }
 
@@ -134,7 +134,7 @@ export class DeltaCli {
       ? /^[a-z]:[\\/]/i.test(path) || /^\\\\[^\\]+\\[^\\]+\\/.test(path)
       : path.startsWith('/')
     if (!absolute || /[\r\n\0]/.test(path))
-      throw new Error('Delta setup did not return an absolute CLI path. Fix the installation and retry /delta share or /delta join <link>.')
+      throw new Error('Delta setup did not return an absolute CLI path. Fix the installation and retry /delta-share or /delta-join <link>.')
     return path
   }
 }
