@@ -717,6 +717,24 @@ describe('setup dialogs and notices', () => {
     fake.expectClean()
   })
 
+  test('/delta setup offers to create an organization when the account has none, and syncs to it', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.organizations = []
+    fake.answerQuestion = (question: any) => {
+      const text = question.questions[0].question
+      const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
+      const answer = text.startsWith('Save this setting') ? 'Save it'
+        : text.startsWith("You aren't in a Delta organization") ? 'Acme'
+        : offered.find((label) => label.startsWith('Private sync'))
+      return { result: { answers: { [text]: answer } } }
+    }
+    await $.session.start(sessionStart)
+    await $.command.run({ ...typedDelta('setup') } as never)
+    expect(fake.commands.filter((argv) => argv.includes('create'))).toEqual([[expect.any(String), '--json', 'org', 'create', '--', 'Acme']])
+    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-created' } })
+    fake.expectClean()
+  })
+
   test('a setup the startup offer opened updates the band once it saves', async ($, on) => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {

@@ -662,6 +662,12 @@ export function fakeThreads(on: On, options: {
       ...e.init?.env?.DELTA_CLI_COMMAND_FORM ? { commandForm: e.init.env.DELTA_CLI_COMMAND_FORM } : {} })
     if (parsed?.positionals[0] === 'org' && argv.includes('--json')) {
       fake.commands.push(argv)
+      // Setup creates a team organization only when the account has none; the name follows `--`.
+      if (parsed.positionals[1] === 'create' && argv.at(-2) === '--' && !(fake.organizations ?? []).length) {
+        const organization = { id: 'org-created', name: parsed.positionals[2]!, current: false }
+        fake.organizations = [organization]
+        return output(JSON.stringify({ operation: 'created', organization, refresh_warning: null }))
+      }
       if (parsed.positionals[1] !== 'list') {
         fake.violations.push(`forbidden command: ${argv.join(' ')}`)
         throw new Error(`forbidden command ${argv.join(' ')}`)
@@ -1060,6 +1066,8 @@ function cliArguments(argv: readonly string[]) {
   const options: Record<string, string | boolean> = {}
   for (let index = 1; index < argv.length; index++) {
     const argument = argv[index]!
+    // As clap reads it, everything after `--` is a positional, even text that starts with dashes.
+    if (argument === '--') { positionals.push(...argv.slice(index + 1)); break }
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
     if (argument === '--json' || argument === '--folder' || argument === '--force' || argument === '--join') { options[argument] = true; continue }

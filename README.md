@@ -139,7 +139,9 @@ organization and explains that syncing stores the conversation and a copy of the
 checkout's code, including uncommitted changes, in DeltaDB. It offers Private
 sync (recommended, `private`), Organization sharing (`organization`), or Manual
 (`manual`), each labelled with what it syncs and who sees it, lists organization
-names from `delta --json org list`, previews
+names from `delta --json org list` (an account with none is offered to create one
+with `delta org create`, named after the checkout or as typed; a failed creation
+is reported and never retried, since it may have succeeded), previews
 the destination path and resulting content, and writes only after confirmation.
 It does not commit the file: committing it applies the policy to everyone who
 opens the repository with the plugin. Cancelling or dismissing any step leaves

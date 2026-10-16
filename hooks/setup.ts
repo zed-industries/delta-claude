@@ -41,6 +41,11 @@ export type SetupEnv = {
   contract(): Promise<ThreadContract | undefined>
   /** Organizations for `thread create`, or a typed rejection when the CLI cannot list them. */
   organizations(): Promise<Organization[]>
+  /**
+   * Create a team organization owned by this account, without selecting it. Never retried: after a
+   * lost response the organization may exist anyway.
+   */
+  createOrganization(name: string): Promise<Organization>
   /** Read a policy file, or undefined when it does not exist. */
   readFile(path: string): Promise<string | undefined>
   /** Write a policy file; the wizard does not commit it. */
@@ -60,6 +65,16 @@ export function organizationsFrom(result: any): Organization[] {
         typeof org.name === 'string' && typeof org.current === 'boolean'))
     throw new Error('Unexpected organization list; use matching CLI and plugin builds')
   return result.organizations.map((org: any) => ({ id: org.id, name: org.name, current: !!org.current }))
+}
+
+/** Validate the parsed body of `delta --json org create`, keeping the CLI's typed error envelope. */
+export function createdOrganizationFrom(result: any): Organization {
+  const failure = commandErrorFromEnvelope(result?.error)
+  if (failure) throw failure
+  const org = result?.organization
+  if (result?.operation !== 'created' || typeof org?.id !== 'string' || !org.id || typeof org.name !== 'string')
+    throw new Error('Unexpected organization creation result; use matching CLI and plugin builds')
+  return { id: org.id, name: org.name, current: !!org.current }
 }
 
 /** What the setup wizard did, for the command's answer and its tests. */
@@ -181,7 +196,22 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     let organizations: Organization[]
     try { organizations = listed ?? await env.organizations() }
     catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta organizations: ${String(error)}` } }
-    if (!organizations.length) return { status: 'failed', text: '/delta-setup found no Delta organization. Sign in with `delta auth login` and try again.' }
+    if (!organizations.length) {
+      // Syncing needs an organization; offer to create one rather than stopping here.
+      const suggested = root.split(/[\\/]/).filter(Boolean).at(-1) || 'My team'
+      const create = `Create "${suggested}"`
+      const answer = await interaction.ask(
+        'You aren\'t in a Delta organization yet, and Delta needs one to sync sessions. Create one now? ' +
+        'Choose the suggested name, or type your own.', { options: [create, 'Cancel'], header: HEADER })
+      const name = answer === create ? suggested : answer.trim()
+      // A typed slash command, entered while the dialog was open, is not a name.
+      if (answer === 'Cancel' || !name || name.startsWith('/')) return CANCELLED
+      let created: Organization
+      try { created = await env.createOrganization(name) }
+      catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the organization "${name}": ${String(error)}. Check /delta-org list before trying again; it may have been created.` } }
+      await interaction.log(`Created the Delta organization "${created.name}".`, 'transcript')
+      organizations = [created]
+    }
     const current = organizations.find((org) => org.current) ?? organizations[0]!
     // Offer the current organization and up to three others; any organization is still reachable by
     // typing its exact name or id, and an unmatched or ambiguous answer asks again.

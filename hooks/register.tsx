@@ -26,7 +26,7 @@ import {
 import { TitleScanner, transcriptRead } from './title'
 import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
 import {
-  HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, offerOnboarding, organizationsFrom, releaseOnboarding, runSetupWizard,
+  HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, offerOnboarding, organizationsFrom, releaseOnboarding, runSetupWizard,
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
@@ -2864,6 +2864,13 @@ let currentOrganizationId: string | undefined
 let organizationDirectory: Promise<void> | undefined
 
 /** The account's organizations from `delta --json org list`, remembering their names for the band. */
+/** Create a team organization through the CLI and remember its name for the band. */
+async function createOrganization($: Runtime, name: string): Promise<Organization> {
+  const created = createdOrganizationFrom(await command($, ['org', 'create', '--', name], 'org create'))
+  organizationNames.set(created.id, created.name)
+  return created
+}
+
 async function listOrganizations($: Runtime, timeoutMs?: number): Promise<Organization[]> {
   const organizations = organizationsFrom(await command($, ['org', 'list'], 'org list', undefined, timeoutMs))
   for (const organization of organizations) organizationNames.set(organization.id, organization.name)
@@ -2899,6 +2906,7 @@ function setupEnv($: Runtime): SetupEnv {
     },
     contract: () => readThreadContract($),
     organizations: () => listOrganizations($),
+    createOrganization: (name) => createOrganization($, name),
     readFile: async (path) => await $.fs.exists(path) ? await $.fs.read(path) : undefined,
     writeFile: (path, text) => $.fs.write(path, text) as Promise<void>,
     // A joined thread is someone else's shared thread; an organization or unlisted one is already

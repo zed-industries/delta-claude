@@ -12,6 +12,7 @@ function harness(options: {
   organizations?: { id: string; name: string; current: boolean }[]
   shared?: boolean
   failWrite?: boolean
+  failCreate?: boolean
 } = {}) {
   const answers = [...options.answers ?? []]
   const asks: { question: string; options: unknown }[] = []
@@ -19,6 +20,7 @@ function harness(options: {
   let file = options.file
   const writes: { path: string; text: string }[] = []
   let shares = 0
+  const creates: string[] = []
   const interaction: Interaction = {
     async ask(question, askOptions) {
       // Claude's `$.ui.ask` shows plain-text options only; anything else cannot be drawn.
@@ -41,6 +43,11 @@ function harness(options: {
     gitCommonDir: async () => options.commonDir,
     contract: async () => ({ operation: 'contract', min: 1, max: options.contractMax ?? 4 }),
     organizations: async () => options.organizations ?? [{ id: 'org-1', name: 'Zed', current: true }],
+    createOrganization: async (name) => {
+      creates.push(name)
+      if (options.failCreate) throw new Error('network error')
+      return { id: `org-${name}`, name, current: false }
+    },
     readFile: async () => file,
     writeFile: async (path, text) => {
       if (options.failWrite) throw new Error('read-only checkout')
@@ -50,7 +57,7 @@ function harness(options: {
     sessionShared: async () => options.shared ?? false,
     shareSession: async () => { shares++; return true },
   }
-  return { env, interaction, asks, logs, writes, current: () => file, shares: () => shares }
+  return { env, interaction, asks, logs, writes, creates, current: () => file, shares: () => shares }
 }
 
 describe('setup wizard', () => {
@@ -93,6 +100,25 @@ describe('setup wizard', () => {
     const already = harness({ answers: ['Organization sharing', 'Save it'], shared: true })
     await runSetupWizard(already.env, already.interaction)
     expect(already.asks.at(-1)?.question).toContain('Save this setting')
+  })
+
+  test('an account with no organization is offered one, named as suggested or as typed', async () => {
+    const cases: { answers: string[]; created: string[]; status: string; failCreate?: boolean }[] = [
+      // The suggestion is the checkout's folder name.
+      { answers: ['Private sync', 'Create "repo"', 'Save it'], created: ['repo'], status: 'wrote' },
+      { answers: ['Organization sharing', 'Acme Team', 'Save it'], created: ['Acme Team'], status: 'wrote' },
+      { answers: ['Private sync', 'Cancel'], created: [], status: 'cancelled' },
+      // A slash command typed while the dialog was open is not a name.
+      { answers: ['Private sync', '/delta-share'], created: [], status: 'cancelled' },
+      // A failed creation is reported once and never retried: the organization may exist anyway.
+      { answers: ['Private sync', 'Acme'], created: ['Acme'], status: 'failed', failCreate: true },
+    ]
+    for (const { answers, created, status, failCreate } of cases) {
+      const h = harness({ answers, organizations: [], failCreate })
+      const outcome = await runSetupWizard(h.env, h.interaction)
+      expect({ status: outcome.status, created: h.creates }).toEqual({ status, created })
+      if (status === 'wrote') expect(JSON.parse(h.current()!).threads.organization).toBe(`org-${created[0]}`)
+    }
   })
 
   test('an automatic mode needs a CLI that records offline', async () => {
