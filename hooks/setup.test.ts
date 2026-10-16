@@ -109,22 +109,22 @@ describe('setup wizard', () => {
   })
 
   test('after saving, only Organization sharing offers to sync this session, and only while it is unshared', async () => {
-    const synced = harness({ answers: ['Organization sharing', 'Sync it'] })
+    const synced = harness({ answers: ['Organization sharing', 'Zed', 'Sync it'] })
     expect((await runSetupWizard(synced.env, synced.interaction)).status).toBe('wrote')
     expect(synced.asks.at(-1)?.question).toContain('Sync this session to Zed')
     expect(synced.shares()).toBe(1)
 
-    const declined = harness({ answers: ['Organization sharing'] })
+    const declined = harness({ answers: ['Organization sharing', 'Zed'] })
     expect((await runSetupWizard(declined.env, declined.interaction)).status).toBe('wrote')
     expect(declined.shares()).toBe(0)
 
     // A share would publish to the organization, which Private sync and Manual did not ask for.
-    for (const answers of [['Private sync'], ['Manual']]) {
+    for (const answers of [['Private sync', 'Zed'], ['Manual']]) {
       const other = harness({ answers })
       expect((await runSetupWizard(other.env, other.interaction)).status).toBe('wrote')
       expect(other.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
     }
-    const already = harness({ answers: ['Organization sharing'], shared: true })
+    const already = harness({ answers: ['Organization sharing', 'Zed'], shared: true })
     await runSetupWizard(already.env, already.interaction)
     expect(already.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
   })
@@ -146,6 +146,26 @@ describe('setup wizard', () => {
       expect({ status: outcome.status, created: h.creates }).toEqual({ status, created })
       if (status === 'wrote') expect(JSON.parse(h.current()!).threads.organization).toBe(`org-${created[0]}`)
     }
+    // The mode question tells such an account that Organization sharing creates one.
+    const labels = (h: ReturnType<typeof harness>) => (h.asks[0]!.options as { options: string[] }).options
+    const none = harness({ organizations: [] })
+    await runSetupWizard(none.env, none.interaction)
+    expect(labels(none)).toContain('Organization sharing (every new session, visible to your organization; setup helps you create one)')
+    const member = harness()
+    await runSetupWizard(member.env, member.interaction)
+    expect(labels(member)).toContain('Organization sharing (every new session, visible to your organization)')
+  })
+
+  test('an account with organizations can still create a new one, or go back to the list', async () => {
+    const created = harness({ answers: ['Organization sharing', 'Create a new organization', 'Acme', 'Not now', 'Not now'] })
+    expect((await runSetupWizard(created.env, created.interaction)).status).toBe('wrote')
+    expect(created.creates).toEqual(['Acme'])
+    expect(JSON.parse(created.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
+    // Cancelling the name asks which organization again, instead of ending setup.
+    const back = harness({ answers: ['Private sync', 'Create a new organization', 'Cancel', 'Zed'] })
+    expect((await runSetupWizard(back.env, back.interaction)).status).toBe('wrote')
+    expect(back.creates).toEqual([])
+    expect(JSON.parse(back.current()!).threads.organization).toBe('org-1')
   })
 
   test('a newly created organization offers to invite teammates by email, and setup continues either way', async () => {
@@ -162,7 +182,7 @@ describe('setup wizard', () => {
     expect((await runSetupWizard(none.env, none.interaction)).status).toBe('wrote')
     expect(none.invites).toEqual([])
     // An existing organization is never offered invitations.
-    const existing = harness({ answers: ['Private sync'] })
+    const existing = harness({ answers: ['Private sync', 'Zed'] })
     await runSetupWizard(existing.env, existing.interaction)
     expect(existing.asks.some((ask) => ask.question.startsWith('Invite teammates'))).toBe(false)
   })
@@ -198,17 +218,17 @@ describe('setup wizard', () => {
     const six = Array.from({ length: 6 }, (_, index) => ({ id: `org-${index}`, name: `Organization ${index}`, current: index === 0 }))
     const twins = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Zed', current: false }]
     const cases: { answers: string[]; organizations?: typeof six; chosen: string; offered?: string[] }[] = [
-      // One organization needs no question.
-      { answers: ['Private sync'], chosen: 'org-1' },
-      // At most four are offered; the rest are reached by typing a name or an id.
+      // Even a single organization is asked about, since a new one is always offered.
+      { answers: ['Private sync', 'Zed'], chosen: 'org-1', offered: ['Zed', 'Create a new organization'] },
+      // At most three are offered, then a new one; the rest are reached by typing a name or an id.
       { answers: ['Private sync', 'Organization 5'], organizations: six, chosen: 'org-5',
-        offered: ['Organization 0', 'Organization 1', 'Organization 2', 'Organization 3'] },
+        offered: ['Organization 0', 'Organization 1', 'Organization 2', 'Create a new organization'] },
       { answers: ['Private sync', 'org-3'], organizations: six, chosen: 'org-3' },
       // An unknown answer asks again instead of guessing.
       { answers: ['Private sync', 'nobody', 'Organization 2'], organizations: six, chosen: 'org-2' },
       // Organizations sharing a name are offered with their ids, so choosing one never loops.
       { answers: ['Private sync', 'Zed (org-2)'], organizations: twins, chosen: 'org-2',
-        offered: ['Zed (org-1)', 'Zed (org-2)'] },
+        offered: ['Zed (org-1)', 'Zed (org-2)', 'Create a new organization'] },
     ]
     for (const { answers, organizations, chosen, offered } of cases) {
       const h = harness({ answers, organizations })
@@ -296,7 +316,7 @@ describe('onboarding', () => {
 
   test('a setup started from the offer reports its outcome', async () => {
     const { backend } = memoryStore()
-    const h = harness({ answers: ['Set it up', 'Private sync'] })
+    const h = harness({ answers: ['Set it up', 'Private sync', 'Zed'] })
     await offerOnboarding(h.env, h.interaction, backend, newSession())
     expect(h.logs.at(-1)).toContain('Saved Private sync with Zed to .delta/settings.json')
   })

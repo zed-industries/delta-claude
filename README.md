@@ -136,11 +136,14 @@ Run `/delta setup` for an interactive wizard. It shows the current mode and
 organization and explains that syncing stores the conversation and a copy of the
 checkout's code, including uncommitted changes, in DeltaDB. It offers Private
 sync (recommended, `private`), Organization sharing (`organization`), or Manual
-(`manual`), each labelled with what it syncs and who sees it, lists organization
-names from `delta --json org list` (an account with none is offered to create one
-with `delta org create`, named after the checkout or as typed; a failed creation
-is reported and never retried, since it may have succeeded, and a created one
-offers to invite teammates by email with `delta org invite`), then saves the
+(`manual`), each labelled with what it syncs and who sees it (for an account with
+no organization, Organization sharing's label says setup helps create one). It
+then asks which organization to use, listing names from `delta --json org list`
+plus "Create a new organization" (an account with none goes straight to creating
+one). A new organization is created with `delta org create`, named after the
+checkout or as typed; a failed creation is reported and never retried, since it
+may have succeeded, and a created one offers to invite teammates by email with
+`delta org invite`. Setup then saves the
 choice without a further confirmation and says what it saved ("Saved Private
 sync with Zed to .delta/settings.json"). Cancelling or dismissing any question leaves
 the file untouched. Print and SDK
@@ -862,7 +865,7 @@ and turns and draining after reconnect, a refused offline append showing the
 Fork & Restore/Discard choice and draining after either, the band's link,
 audience, waiting and uploading state, and share control, the bounded store
 cleanup that never removes a pending or live session, and the organization picker
-for more than four organizations. The test host keeps no rows: a plugin's own `session.append`
+for more than three organizations. The test host keeps no rows: a plugin's own `session.append`
 still fails, and those tests observe each attempted row through its debug log line. The
 host also records every row a plugin passes down to `session.append`, after the plugin's
 own hook rewrote it, which is how the tests check what the model would read; unit tests

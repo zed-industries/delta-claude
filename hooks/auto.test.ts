@@ -702,9 +702,9 @@ describe('setup dialogs and notices', () => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
-      // Choose the private option as the person would, by its offered label.
+      // Choose the private option and the existing organization as the person would, by their offered labels.
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = offered.find((label: string) => label.startsWith('Private sync'))
+      const answer = offered.find((label: string) => label.startsWith('Private sync') || label === 'Zed')
       return { result: { answers: { [text]: answer } } }
     }
     await $.session.start(sessionStart)
