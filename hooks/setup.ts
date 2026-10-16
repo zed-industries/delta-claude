@@ -258,12 +258,13 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
 
   const text = serializeProjectPolicy(file.document, mode, organization)
   await interaction.log(`Delta will save this to ${SETTINGS_FILE}:\n${text}`, 'transcript')
-  if (await interaction.ask(`Use this setting for everyone who works in this repository? Delta saves it in ${SETTINGS_FILE}. ` +
-    'Commit that file so teammates get it.', { options: ['Save it', 'Cancel'], header: HEADER }) !== 'Save it') return CANCELLED
+  if (await interaction.ask(`Save this setting for this repository? Delta saves it in ${SETTINGS_FILE}. ` +
+    'Commit that file to share the setting with everyone who works here, or leave it uncommitted to keep it just for you.',
+    { options: ['Save it', 'Cancel'], header: HEADER }) !== 'Save it') return CANCELLED
 
   try { await env.writeFile(path, text) }
   catch (error) { return { status: 'failed', text: `Delta could not save ${path}: ${String(error)}` } }
-  const saved = `Saved to ${SETTINGS_FILE}. Commit it so teammates use the same setting. New sessions follow it from now on.`
+  const saved = `Saved to ${SETTINGS_FILE}. Commit it to share the setting with your team, or leave it uncommitted to keep it just for you. New sessions follow it from now on.`
   // The setting never applies to the session that saved it. Only Organization sharing offers to sync
   // this one now: sharing it is what that choice asked for, while a share would contradict Private sync
   // (it publishes to the organization) and Manual (sessions are shared by hand).
