@@ -111,8 +111,7 @@ session this plugin created itself also participates while its thread is still
 
 ## Automatic recording and the project policy
 
-A repository opts its collaborators into recording with a shared policy at its
-Git checkout root, `.delta/settings.json`:
+A checkout's Delta setting lives at its Git checkout root, `.delta/settings.json`:
 
 ```json
 { "threads": { "mode": "manual" | "private" | "organization", "organization": "<organization id from `delta --json org list`>" } }
@@ -126,13 +125,12 @@ Git checkout root, `.delta/settings.json`:
   until you share it, and `organization` shares with the organization.
 - A malformed file or an invalid value behaves as `manual`, shows the problem
   once, and is never overwritten without explicit confirmation.
-- A write preserves unknown top-level and nested keys. The file is the
-  repository's shared policy: it belongs in the repository so every collaborator
-  who opens it with the plugin gets it. The wizard writes it but does not commit
-  it; committing it applies the policy to everyone.
-
-The repository setting is sufficient consent for every collaborator who opens
-the checkout with the plugin; no separate personal confirmation is asked.
+- A write preserves unknown top-level and nested keys. The setting is personal:
+  the wizard adds `/.delta/settings.json` to the repository's
+  `$GIT_COMMON_DIR/info/exclude`, as the Delta app keeps its own machine-local
+  `.delta/` directories out of Git, so it is never committed by accident. A file
+  someone already committed stays tracked, and then applies to everyone who opens
+  the repository with the plugin.
 
 Run `/delta setup` for an interactive wizard. It shows the current mode and
 organization and explains that syncing stores the conversation and a copy of the
@@ -143,9 +141,8 @@ names from `delta --json org list` (an account with none is offered to create on
 with `delta org create`, named after the checkout or as typed; a failed creation
 is reported and never retried, since it may have succeeded, and a created one
 offers to invite teammates by email with `delta org invite`), previews
-the destination path and resulting content, and writes only after confirmation.
-It does not commit the file: committing it applies the policy to everyone who
-opens the repository with the plugin. Cancelling or dismissing any step leaves
+the destination path and resulting content, and writes only after confirmation
+("Save this setting to .delta/settings.json?"). Cancelling or dismissing any step leaves
 the file untouched. Print and SDK
 sessions get a clear refusal instead. The policy applies to sessions started
 afterwards, so after saving Organization sharing the wizard offers to sync the

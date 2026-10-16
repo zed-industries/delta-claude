@@ -14,12 +14,15 @@ function harness(options: {
   failWrite?: boolean
   failCreate?: boolean
   failInvite?: string
+  others?: Record<string, string>
 } = {}) {
   const answers = [...options.answers ?? []]
   const asks: { question: string; options: unknown }[] = []
   const logs: string[] = []
   let file = options.file
   const writes: { path: string; text: string }[] = []
+  // Files other than the setting itself, such as the repository's Git exclude list, by path.
+  const others = new Map<string, string>(Object.entries(options.others ?? {}))
   let shares = 0
   const creates: string[] = []
   const invites: { organization: string; emails: string[] }[] = []
@@ -55,8 +58,9 @@ function harness(options: {
       return emails.map((email) => email === options.failInvite
         ? { email, invited: false as const, message: 'already a member' } : { email, invited: true as const })
     },
-    readFile: async () => file,
+    readFile: async (path) => path.endsWith('settings.json') ? file : others.get(path),
     writeFile: async (path, text) => {
+      if (!path.endsWith('settings.json')) { others.set(path, text); return }
       if (options.failWrite) throw new Error('read-only checkout')
       writes.push({ path, text })
       file = text
@@ -64,7 +68,7 @@ function harness(options: {
     sessionShared: async () => options.shared ?? false,
     shareSession: async () => { shares++; return true },
   }
-  return { env, interaction, asks, logs, writes, creates, invites, current: () => file, shares: () => shares }
+  return { env, interaction, asks, logs, writes, creates, invites, others, current: () => file, shares: () => shares }
 }
 
 describe('setup wizard', () => {
@@ -75,6 +79,21 @@ describe('setup wizard', () => {
       expect(h.writes).toEqual([])
       expect(outcome.status === 'wrote').toBe(false)
     }
+  })
+
+  test('a saved setting is kept out of Git through the repository exclude list, once', async () => {
+    const exclude = '/repo/.git/info/exclude'
+    const h = harness({ answers: ['Manual', 'Save it'], commonDir: '/repo/.git', others: { [exclude]: '# local\n/.delta/worktrees/' } })
+    expect((await runSetupWizard(h.env, h.interaction)).status).toBe('wrote')
+    expect(h.others.get(exclude)).toBe('# local\n/.delta/worktrees/\n/.delta/settings.json\n')
+    const again = harness({ answers: ['Manual', 'Save it'], commonDir: '/repo/.git', others: { [exclude]: h.others.get(exclude)! } })
+    await runSetupWizard(again.env, again.interaction)
+    expect(again.others.get(exclude)).toBe(h.others.get(exclude))
+    expect(again.logs.some((log) => log.includes("couldn't keep"))).toBe(false)
+    // Outside a Git repository it can't be excluded; the person is told how instead.
+    const unknown = harness({ answers: ['Manual', 'Save it'] })
+    await runSetupWizard(unknown.env, unknown.interaction)
+    expect(unknown.logs.join('\n')).toContain('add it to .gitignore')
   })
 
   test('a malformed file is replaced only after explicit confirmation', async () => {
@@ -102,11 +121,11 @@ describe('setup wizard', () => {
     for (const answers of [['Private sync', 'Save it'], ['Manual', 'Save it']]) {
       const other = harness({ answers })
       expect((await runSetupWizard(other.env, other.interaction)).status).toBe('wrote')
-      expect(other.asks.at(-1)?.question).toContain('Save this setting for this repository')
+      expect(other.asks.at(-1)?.question).toContain('Save this setting to .delta/settings.json')
     }
     const already = harness({ answers: ['Organization sharing', 'Save it'], shared: true })
     await runSetupWizard(already.env, already.interaction)
-    expect(already.asks.at(-1)?.question).toContain('Save this setting for this repository')
+    expect(already.asks.at(-1)?.question).toContain('Save this setting to .delta/settings.json')
   })
 
   test('an account with no organization is offered one, named as suggested or as typed', async () => {

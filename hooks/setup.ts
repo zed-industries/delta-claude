@@ -127,6 +127,25 @@ const MODE_LABELS: [ThreadMode, string][] = [
 const HEADER = 'Delta sync'
 /** The setting's file, relative to the checkout root, as people see it named. */
 const SETTINGS_FILE = '.delta/settings.json'
+/** The setting's line in the repository-local `info/exclude`, anchored to the checkout root as the app's are. */
+const EXCLUDE_ENTRY = '/.delta/settings.json'
+
+/**
+ * Add `entry` to the repository's `$GIT_COMMON_DIR/info/exclude`, which Git reads in every linked
+ * worktree and never commits, keeping its other lines. False when it could not be written.
+ */
+async function excludeFromGit(env: SetupEnv, entry: string): Promise<boolean> {
+  try {
+    const commonDir = await env.gitCommonDir()
+    if (!commonDir) return false
+    const path = `${commonDir.replace(/[\\/]+$/, '')}/info/exclude`
+    const contents = await env.readFile(path) ?? ''
+    const lines = contents.split(/\r?\n/)
+    if (lines.some((line) => line.trim() === entry)) return true
+    await env.writeFile(path, `${contents}${contents && !contents.endsWith('\n') ? '\n' : ''}${entry}\n`)
+    return true
+  } catch { return false }
+}
 /** `$.ui.ask` takes at most four options; the rest of an organization list is reached by typing. */
 const MAX_ORGANIZATION_OPTIONS = 4
 const CANCELLED: SetupOutcome = { status: 'cancelled', text: 'Left the existing Delta settings untouched.' }
@@ -258,13 +277,16 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
 
   const text = serializeProjectPolicy(file.document, mode, organization)
   await interaction.log(`Delta will save this to ${SETTINGS_FILE}:\n${text}`, 'transcript')
-  if (await interaction.ask(`Save this setting for this repository? Delta saves it in ${SETTINGS_FILE}. ` +
-    'Commit that file to share the setting with everyone who works here, or leave it uncommitted to keep it just for you.',
+  if (await interaction.ask(`Save this setting to ${SETTINGS_FILE}?`,
     { options: ['Save it', 'Cancel'], header: HEADER }) !== 'Save it') return CANCELLED
 
   try { await env.writeFile(path, text) }
   catch (error) { return { status: 'failed', text: `Delta could not save ${path}: ${String(error)}` } }
-  const saved = `Saved to ${SETTINGS_FILE}. Commit it to share the setting with your team, or leave it uncommitted to keep it just for you. New sessions follow it from now on.`
+  // The setting is personal, so it stays out of commits, as the Delta app keeps its own `.delta/`
+  // files out. A file that is already committed keeps being tracked; excluding it changes nothing.
+  if (!await excludeFromGit(env, EXCLUDE_ENTRY))
+    await interaction.log(`Delta couldn't keep ${SETTINGS_FILE} out of Git; add it to .gitignore if you don't want to commit it.`, 'transcript')
+  const saved = `Saved to ${SETTINGS_FILE}. New sessions follow it from now on.`
   // The setting never applies to the session that saved it. Only Organization sharing offers to sync
   // this one now: sharing it is what that choice asked for, while a share would contradict Private sync
   // (it publishes to the organization) and Manual (sessions are shared by hand).

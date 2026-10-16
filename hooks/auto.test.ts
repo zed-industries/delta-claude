@@ -704,7 +704,7 @@ describe('setup dialogs and notices', () => {
       const text = question.questions[0].question
       // Choose the private option as the person would, by its offered label.
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith('Save this setting for this repository') ? 'Save it' : offered.find((label: string) => label.startsWith('Private sync'))
+      const answer = text.startsWith('Save this setting to') ? 'Save it' : offered.find((label: string) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
     }
     await $.session.start(sessionStart)
@@ -723,7 +723,7 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith('Save this setting for this repository') ? 'Save it'
+      const answer = text.startsWith('Save this setting to') ? 'Save it'
         : text.startsWith("You aren't in a Delta organization") ? 'Acme'
         : text.startsWith('Invite teammates') ? 'Not now'
         : offered.find((label) => label.startsWith('Private sync'))
@@ -742,7 +742,7 @@ describe('setup dialogs and notices', () => {
       const text = question.questions[0].question
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
       const answer = text.startsWith('Set up Delta syncing') ? 'Set it up'
-        : text.startsWith('Save this setting for this repository') ? 'Save it' : offered.find((label: string) => label.startsWith('Manual'))
+        : text.startsWith('Save this setting to') ? 'Save it' : offered.find((label: string) => label.startsWith('Manual'))
       return { result: { answers: { [text]: answer } } }
     }
     await startAuto($, fake)
