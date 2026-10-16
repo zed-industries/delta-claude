@@ -13,6 +13,8 @@ export type StatusState = {
   connection: 'stopped' | 'connecting' | 'live' | 'retrying'
   /** This session's conversation and checkout are being captured for Delta, uploaded or still queued. */
   recording?: boolean
+  /** A session Delta does not sync: what the band says instead, and the command that changes it. */
+  reminder?: { text: string; command: string }
   /** A dropped watch that outlasted its grace; within it the band is told the watch is live. */
   reconnecting?: boolean
   turn: TurnStatus
@@ -49,7 +51,10 @@ export type StatusState = {
 export type BandView = {
   tone: 'error' | 'live' | 'pending' | 'quiet'
   mark: StatusSegment
-  /** The name beside the mark, which says `Syncing` while the session is captured; it never gives way. */
+  /**
+   * The name beside the mark, which says `Syncing` while the session is captured, or a session's
+   * reminder and its command while it is not; it never gives way.
+   */
   label: StatusSegment[]
   /**
    * The link: `text` shows it, on the row or on its own row below (`ownRow`), or nowhere when no
@@ -276,7 +281,10 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     error: { text: '✕', color: 'red' }, pending: { text: '◌', color: 'yellow' },
     live: { text: '●', color: 'green' }, quiet: { text: '○', dim: true },
   } as const)[tone]
-  const label: StatusSegment[] = [{ text: ' Delta', dim: true }, ...state.recording ? [{ text: ' · ', dim: true }, { text: 'Syncing' }] : []]
+  const label: StatusSegment[] = [{ text: ' Delta', dim: true },
+    ...state.recording ? [{ text: ' · ', dim: true }, { text: 'Syncing' }]
+      : state.reminder ? [{ text: ' · ', dim: true }, { text: state.reminder.text }, { text: `  ${state.reminder.command}`, dim: true }]
+      : []]
   const detail = failure ? [{ text: failure, color: 'red' }]
     : state.retryReason ? [{ text: `Retrying: ${state.retryReason}`, color: 'yellow' }] : undefined
   const frame = SPINNER_FRAMES[state.spinner?.frame ?? 0]!

@@ -163,16 +163,15 @@ stays consumed until the marker is cleared. It is never offered in a joined
 session, during a join, or headless, and it never delays a prompt beyond the
 dialog.
 
-Each session shows one Delta indicator, never two. A synced session (automatic,
-shared with `/delta share`, or joined) has the status band above the prompt, which
-reads `Delta · Syncing` and who can see the session, and updates live. An
-interactive session that Delta does not sync instead opens, when it starts,
-resumes, or is cleared, with a one-line reminder in the transcript: a Manual
-checkout points to `/delta-share`, and one that was never set up to
-`/delta-setup`. No reminder is shown after a compaction, in a headless session,
-while a join or Desktop hand-off is still in progress, in an automatic session
-Delta refused, or when the checkout's policy file cannot be read (that problem is
-reported instead).
+The status band above the prompt is Delta's one indicator, and it always shows
+the current state. A synced session (automatic, shared with `/delta share`, or
+joined) reads `Delta · Syncing` with who can see it. An interactive session in a
+checkout Delta does not sync reads `○ Delta · Not syncing  /delta-share` for a
+Manual checkout, or `○ Delta · Not set up  /delta-setup` for one never set up,
+and switches to `Syncing` as soon as the session is shared. A running share or
+join, a failure, or an unfinished join takes the reminder's place. Nothing is
+written to the transcript, so no line goes stale. A headless session, a checkout
+that syncs automatically, and a session outside a Git checkout show no reminder.
 
 Automatic activation applies only to new sessions — `classic.SessionStart` with
 source `startup` or `clear`, never `resume`, `compact`, or `fork`, and never a

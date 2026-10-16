@@ -237,6 +237,8 @@ type SessionState = {
   offered?: Handoff
   /** A session that started in a hand-off's folder, joining it before its first prompt. */
   handoffClaim?: Promise<void>
+  /** What the band reminds an interactive session Delta does not sync, decided when the session starts. */
+  reminder?: SyncReminder
   /**
    * The hand-off's opening line, turned into a one-word turn that is left out of the thread:
    * entering until its turn starts, then that turn's ID.
@@ -801,9 +803,30 @@ function clearProgress($: Runtime) {
   $.ui.invalidate('ui.render')
 }
 
-/** Whether the band has a Delta status to draw: a live watch, a share or join step, or a failure. */
+/**
+ * Whether the band has a Delta status to draw: a live watch, a share or join step, a failure, or the
+ * reminder of a session Delta does not sync.
+ */
 function statusShown(): boolean {
-  return !!feed.session || !!feed.progress || !!feed.error
+  return !!feed.session || !!feed.progress || !!feed.error || !!activeReminder()
+}
+
+/** How the band reminds a session Delta does not sync, by the checkout's setting. */
+type SyncReminder = 'manual' | 'not set up'
+const REMINDERS: Record<SyncReminder, { text: string; command: string }> = {
+  manual: { text: 'Not syncing', command: '/delta-share' },
+  'not set up': { text: 'Not set up', command: '/delta-setup' },
+}
+
+/**
+ * The active session's reminder, while the band has nothing else to say. A running share or join,
+ * a failure, or an unfinished join takes its place, and a syncing session's band says `Syncing`
+ * instead, so the band always shows the current state.
+ */
+function activeReminder(): { text: string; command: string } | undefined {
+  const runtime = sessions.get(active)
+  if (!runtime?.reminder || currentProgress() || feed.error || runtime.binding?.joinTransition) return
+  return REMINDERS[runtime.reminder]
 }
 
 /**
@@ -845,6 +868,7 @@ async function statusView($: Runtime): Promise<StatusState> {
     ...feed,
     // A staged automatic session records before its watch starts, while the band shows its connection step.
     recording: !!sessions.get(feed.session ?? active)?.binding?.snapshot,
+    reminder: activeReminder(),
     // Within the grace after a drop, the band carries on as if the watch were live.
     connection: feed.reconnectTimer ? 'live' : feed.connection,
     deliveryPause: state?.pauses.get('delivery') ?? state?.pauses.get('verification'),
@@ -2979,11 +3003,10 @@ async function startSession($: Runtime, session: string) {
     // Nothing below records, so the session's activity never waits on the setup offer's dialog.
     decideCapture(session)
   }
-  // Headless sessions get no notice and are never offered setup; only an interactive surface shows them.
+  // Headless sessions get no reminder and are never offered setup; only an interactive surface shows them.
   if (!hasInteractiveSurface(await $.session.surfaces())) return
-  const notice = active === session && sessionSources.get(session) !== 'compact'
-    ? startupNotice(stateFor(session), policy) : undefined
-  if (notice) await $.ui.log(notice, { to: 'transcript' })
+  stateFor(session).reminder = syncReminder(policy)
+  $.ui.invalidate('ui.render')
   try {
     await offerOnboarding(env, claudeInteraction($), onboardingStore($), {
       root, configured: policy.configured, newSession, joined: !!stateFor(session).binding?.joined, joining: !!joining,
@@ -3004,18 +3027,14 @@ function onboardingStore($: Runtime): OnboardingStore {
 }
 
 /**
- * The reminder a session that Delta does not sync opens with, saying how to sync it. A syncing
- * session, joined ones included, gets none: the status band above the prompt says so, live, and
- * names who can see it. A session that is still joining, and an automatic one that could not start,
- * already explain themselves, so they get none either.
+ * The band's reminder for a checkout's sessions that Delta does not sync: Manual points to
+ * /delta-share, and a checkout never set up to /delta-setup. A checkout that syncs automatically gets
+ * none: its sessions sync, and one that could not start already reports why on the band.
  */
-function startupNotice(runtime: SessionState, policy: ProjectPolicy): string | undefined {
-  const binding = runtime.binding
-  if (binding?.snapshot || binding?.joinTransition || joining || runtime.handoffClaim) return undefined
+function syncReminder(policy: ProjectPolicy): SyncReminder | undefined {
   if (recordsAutomatically(policy)) return undefined
   // Someone who chose Manual is not nudged toward setup every session.
-  if (policy.configured) return 'Not syncing this session. Run /delta-share to share it.'
-  return 'Delta isn\'t set up here. Run /delta-setup to choose what syncs.'
+  return policy.configured ? 'manual' : 'not set up'
 }
 
 /** Auto-activations already running in this process, so a repeated startup hook cannot create twice. */
@@ -3708,6 +3727,7 @@ export function register(on: On) {
     runtime.uploadRefreshAttempts = 0
     runtime.currentTurnId = undefined
     runtime.promptEntering = false
+    runtime.reminder = undefined
     if (feed.session === e.sessionId) await stopConversation()
     // A resumed session re-checks the CLI's contract, as a fresh process's first participation does.
     contractVerified.delete(e.sessionId)

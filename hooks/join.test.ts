@@ -204,7 +204,6 @@ describe('joining', () => {
     const offer = await offerFromDesktopTab($, fake)
     let release!: () => void
     fake.holdRun = (operation) => operation === 'mount' ? new Promise<void>((resolve) => { release = resolve }) : undefined
-    const earlierLogs = fake.logs.length
     const starting = startInThreadFolder($, fake, offer.folder)
     await fake.clock.settle()
     // Claude raises its classic startup hook too, while the hand-off's mount is still running.
@@ -212,7 +211,7 @@ describe('joining', () => {
     await fake.clock.settle()
     await fake.clock.advance(0)
     await fake.clock.settle()
-    expect(fake.logs.slice(earlierLogs).some((log) => log.includes("Delta isn't set up here") || log.includes('Not syncing'))).toBe(false)
+    expect(await bandText($)).not.toMatch(/Not set up|Not syncing/)
     release()
     await starting
     await $.session.end(sessionEnd(fake.session))

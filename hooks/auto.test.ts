@@ -1,7 +1,7 @@
 import { describe, expect, test as kitTest, tier } from 'claude-code/testing'
 import type { Engine } from 'claude-code'
 import {
-  CHECKOUT, abovePrompt, fakeThreads, prompt, sessionEnd, sessionStart, testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
+  CHECKOUT, abovePrompt, fakeThreads, prompt, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
 } from './fake-thread-commands'
 
 tier('user')
@@ -27,14 +27,13 @@ function seedEnded(store: Map<string, unknown>, id: string, overrides: Record<st
   store.set(`appended:${id}`, { thread: 't', items: {} })
 }
 
-type NoticeKind = 'manual' | 'not set up' | 'none'
+type ReminderKind = 'manual' | 'not set up' | 'none'
 
-/** The startup reminders in `logs`, by what each tells the person rather than its exact words. */
-function noticeKinds(logs: string[]): NoticeKind[] {
-  return logs.flatMap((log): NoticeKind[] => {
-    if (log.includes('Not syncing this session')) return ['manual']
-    return log.includes("Delta isn't set up here") ? ['not set up'] : []
-  })
+/** The reminder the band shows a session Delta does not sync, by what it tells the person. */
+async function reminderKind($: Engine): Promise<ReminderKind> {
+  const band = await drawn($)
+  if (band.includes('Not syncing') && band.includes('/delta-share')) return 'manual'
+  return band.includes('Not set up') && band.includes('/delta-setup') ? 'not set up' : 'none'
 }
 
 /** Store a recorded session for the fixture's session to resume; `overrides` change any binding field. */
@@ -197,36 +196,43 @@ describe('automatic activation', () => {
     expect(fake.store.get(offered)).toBe(false)
   })
 
-  const noticeCases: { name: string; source?: string; expected: NoticeKind; arrange?: (fake: ReturnType<typeof fakeThreads>) => void }[] = [
+  const reminderCases: { name: string; source?: string; expected: ReminderKind; arrange?: (fake: ReturnType<typeof fakeThreads>) => void }[] = [
     { name: 'an unconfigured checkout is told how to set up', expected: 'not set up' },
     { name: 'a Manual checkout is told how to share, not to set up', expected: 'manual',
       arrange: (fake) => { fake.files.set(POLICY, policy('manual')) } },
-    { name: 'a compaction gets none', source: 'compact', expected: 'none' },
     { name: 'a headless session gets none', expected: 'none', arrange: (fake) => { fake.surfaces = [] } },
     { name: 'an automatic session Delta refused gets none', expected: 'none',
       arrange: (fake) => { fake.files.set(POLICY, policy('private', 'org-1')); fake.contractRange = { min: 1, max: 2 } } },
     { name: 'a session with an unfinished join gets none', source: 'resume', expected: 'none',
       arrange: (fake) => { seedResumed(fake, { snapshot: false, joinTransition: { locator: 'x' } }) } },
   ]
-  for (const { name, source, expected, arrange } of noticeCases) test(`startup notice: ${name}`, async ($, on) => {
+  for (const { name, source, expected, arrange } of reminderCases) test(`band reminder: ${name}`, async ($, on) => {
     const fake = fakeThreads(on)
     fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }]
     fake.answerQuestion = async () => ({ result: { answers: {} } })
     arrange?.(fake)
     await startAuto($, fake, source)
-    expect(noticeKinds(fake.logs)).toEqual(expected === 'none' ? [] : [expected])
+    expect(await reminderKind($)).toBe(expected)
+    // The reminder lives on the band; the transcript never carries a line that a later share makes stale.
+    expect(fake.logs.some((log) => log.includes('Not syncing') || log.includes('Not set up'))).toBe(false)
   })
 
-  test('a session shared since it began resumes with no reminder, because the band says it is syncing', async ($, on) => {
+  test('the band switches from its reminder to Syncing as soon as the session is shared, and stays so on resume', async ($, on) => {
     const fake = fakeThreads(on)
     fake.answerQuestion = async () => ({ result: { answers: {} } })
     await startAuto($, fake)
-    expect(noticeKinds(fake.logs)).toEqual(['not set up'])
-    await fake.share($)
+    expect(await reminderKind($)).toBe('not set up')
+    // While the share runs, its progress takes the reminder's place.
+    await $.command.run(shareCommand)
+    expect(await reminderKind($)).toBe('none')
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(await reminderKind($)).toBe('none')
+    expect(await drawn($)).toContain('Syncing')
     await $.session.end(sessionEnd(fake.session))
-    const earlierLogs = fake.logs.length
     await startAuto($, fake, 'resume')
-    expect(noticeKinds(fake.logs.slice(earlierLogs))).toEqual([])
+    expect(await reminderKind($)).toBe('none')
     expect(await drawn($)).toContain('Syncing')
   })
 
