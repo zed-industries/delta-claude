@@ -28,8 +28,21 @@ export type Interaction = {
   log(text: string, to?: 'transcript' | 'debug'): Promise<void>
 }
 
-/** One organization from `delta --json org list`. */
-export type Organization = { id: string; name: string; current: boolean }
+/**
+ * One organization from `delta --json org list`. `personal` is absent from CLIs that do not report
+ * it yet; see `isPersonalOrganization`.
+ */
+export type Organization = { id: string; name: string; current: boolean; personal?: boolean }
+
+/**
+ * Whether an organization is the account's personal one, which has no other members and cannot
+ * invite any. The CLI's `personal` flag decides when present. Otherwise the name decides: Delta names
+ * a personal organization `<GitHub login>'s Organization` when the account is created, and personal
+ * organizations cannot be renamed. A team someone named exactly that way is the one misreading.
+ */
+export function isPersonalOrganization(organization: Organization, login: string | undefined): boolean {
+  return organization.personal ?? (!!login && organization.name === `${login}'s Organization`)
+}
 
 /** Everything the wizard and onboarding need from the host, injected for testability. */
 export type SetupEnv = {
@@ -41,6 +54,8 @@ export type SetupEnv = {
   contract(): Promise<ThreadContract | undefined>
   /** Organizations for `thread create`, or a typed rejection when the CLI cannot list them. */
   organizations(): Promise<Organization[]>
+  /** The signed-in account's GitHub login, or undefined when it cannot be read. */
+  login(): Promise<string | undefined>
   /**
    * Create a team organization owned by this account, without selecting it. Never retried: after a
    * lost response the organization may exist anyway.
@@ -66,7 +81,10 @@ export function organizationsFrom(result: any): Organization[] {
       !result.organizations.every((org: any) => typeof org?.id === 'string' && org.id &&
         typeof org.name === 'string' && typeof org.current === 'boolean'))
     throw new Error('Unexpected organization list; use matching CLI and plugin builds')
-  return result.organizations.map((org: any) => ({ id: org.id, name: org.name, current: !!org.current }))
+  return result.organizations.map((org: any) => ({
+    id: org.id, name: org.name, current: !!org.current,
+    ...typeof org.personal === 'boolean' ? { personal: org.personal } : {},
+  }))
 }
 
 /** Validate the parsed body of `delta --json org create`, keeping the CLI's typed error envelope. */
@@ -116,17 +134,20 @@ export type SetupOutcome = {
 const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Private sync', organization: 'Organization sharing' }
 /**
  * Each mode's answer in the setup question, recommended one first. `$.ui.ask` shows no per-option
- * description, so the label carries its own short explanation.
+ * description, so the label carries its own short explanation. A personal organization has nobody
+ * to share with, so it is offered no Organization sharing.
  */
-const MODE_LABELS: [ThreadMode, string][] = [
-  ['private', 'Private sync (Recommended) (every new session, visible only to you)'],
-  ['organization', 'Organization sharing (every new session, visible to your organization)'],
-  ['manual', 'Manual (only sessions you share with /delta-share)'],
-]
-/** Organization sharing's label for an account with no organization, which setup creates next. */
-const ORGANIZATION_LABEL_TO_CREATE = 'Organization sharing (every new session, visible to your organization; setup helps you create one)'
-/** The organization picker's last option, offered alongside every existing organization. */
+function modeLabels(organization: Organization | undefined, personal: boolean): [ThreadMode, string][] {
+  return [
+    ['private', 'Private sync (Recommended) (every new session, only you see it until you share)'],
+    ...personal ? [] : [['organization', `Organization sharing (every new session, visible to ${organization?.name ?? 'your organization'})`] as [ThreadMode, string]],
+    ['manual', 'Manual (only sessions you share with /delta-share)'],
+  ]
+}
+/** The organization picker's last option, offered alongside every existing team. */
 const CREATE_ORGANIZATION = 'Create a new organization'
+/** The team question's alternative for an account with only a personal organization. */
+const KEEP_PERSONAL = 'Skip: keep sessions in my personal organization, where no team can see them'
 /** The tag above each setup question; Claude Code allows at most 12 characters. */
 const HEADER = 'Delta sync'
 /** The setting's file, relative to the checkout root, as people see it named. */
@@ -222,25 +243,56 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     if (await interaction.ask(`Replace the unreadable Delta settings at ${path}?`, { options: ['Replace it', 'Cancel'], header: HEADER }) !== 'Replace it') return CANCELLED
   }
 
-  // The organizations shape the first question, and a policy that records to an organization this
-  // account isn't in records nothing for it, which is said before asking. An unreadable list skips
-  // both; the organization step lists them again and reports the failure.
-  let listed: Organization[] | undefined
-  try { listed = await env.organizations() } catch {}
-  if (recordsAutomatically(file.policy) && file.policy.organization &&
-      listed?.length && !listed.some((org) => org.id === file.policy.organization))
+  let organizations: Organization[]
+  try { organizations = await env.organizations() }
+  catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta organizations: ${String(error)}` } }
+  // A policy that records to an organization this account isn't in records nothing for it; say so
+  // before asking, so the person can see why.
+  if (recordsAutomatically(file.policy) && file.policy.organization && organizations.length &&
+      !organizations.some((org) => org.id === file.policy.organization))
     await interaction.log(`This repository syncs to ${file.policy.organization}, which your Delta account isn't a member of, so its sessions don't sync for you. Choose an organization you're in, or cancel to leave it unchanged.`, 'transcript')
 
+  // The team comes first, so sessions land in an organization they can later be shared from: a
+  // thread's organization never changes once it syncs, and a personal one has nobody to share with.
+  const login = await env.login().catch(() => undefined)
+  const teams = organizations.filter((org) => !isPersonalOrganization(org, login))
+  const personalOrganization = organizations.find((org) => isPersonalOrganization(org, login))
+  let chosen: Organization | SetupOutcome | 'declined' | undefined
+  if (teams.length === 1) {
+    chosen = teams[0]!
+    await interaction.log(`Delta will use ${chosen.name}.`, 'transcript')
+  } else if (!teams.length) {
+    chosen = await offerNewOrganization(env, interaction, root,
+      'Delta syncs your sessions into a team, so you can share them later; only you see them until you do. ' +
+      'Create your team? Choose the suggested name, or type your own.', personalOrganization ? KEEP_PERSONAL : 'Cancel')
+    if (chosen === 'declined' && personalOrganization) chosen = personalOrganization
+    else if (!chosen || chosen === 'declined') return CANCELLED
+  }
+  const current = teams.find((org) => org.current) ?? teams[0]
+  // Offer the current team and up to two others, then a new one; any organization is still reachable
+  // by typing its exact name or id, and an unmatched or ambiguous answer asks again. Cancelling a new
+  // team's name returns here.
+  const offered = current ? [current, ...teams.filter((org) => org !== current)].slice(0, MAX_ORGANIZATION_OPTIONS) : []
+  while (!chosen || chosen === 'declined') {
+    const answer = await interaction.ask(
+      'Which team should this checkout sync to? Choose one, create a new one, or type an exact organization name or id.',
+      { options: [...offered.map((org) => organizationLabel(org, organizations)), CREATE_ORGANIZATION], header: 'Team' })
+    chosen = answer === CREATE_ORGANIZATION
+      ? await offerNewOrganization(env, interaction, root, 'Name the new team. Choose the suggested name, or type your own.', 'Cancel')
+      : matchOrganization(answer, organizations)
+  }
+  if ('status' in chosen) return chosen
+  const team = chosen
+
   const contract = await env.contract()
-  const modeLabels = MODE_LABELS.map(([candidate, label]): [ThreadMode, string] =>
-    [candidate, candidate === 'organization' && listed?.length === 0 ? ORGANIZATION_LABEL_TO_CREATE : label])
+  const labels = modeLabels(team, isPersonalOrganization(team, login))
   const answer = await interaction.ask(
     `${currentPolicy(file.policy)} When Delta syncs a Claude Code session, it stores the conversation and ` +
     'a copy of this checkout\'s code, including uncommitted changes, in DeltaDB. This applies to new ' +
     'sessions, not this one. Which sessions should Delta sync?',
-    { options: modeLabels.map(([, label]) => label), header: HEADER })
+    { options: labels.map(([, label]) => label), header: HEADER })
   // A typed answer may name a mode by its short name instead of choosing its label.
-  const mode = modeLabels.find(([candidate, label]) =>
+  const mode = labels.find(([candidate, label]) =>
     answer === label || answer.trim().toLowerCase() === MODE_NAMES[candidate].toLowerCase())?.[0]
   if (!mode) return CANCELLED
 
@@ -251,33 +303,8 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
       await interaction.log(UPDATE_NOTICE, 'transcript')
       return { status: 'needs-update', text: UPDATE_NOTICE }
     }
-    let organizations: Organization[]
-    try { organizations = listed ?? await env.organizations() }
-    catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta organizations: ${String(error)}` } }
-    // Syncing needs an organization; with none, offer to create one rather than stopping here.
-    let chosen: Organization | SetupOutcome | undefined
-    if (!organizations.length) {
-      chosen = await offerNewOrganization(env, interaction, root,
-        'You aren\'t in a Delta organization yet, and Delta needs one to sync sessions. Create one now? ' +
-        'Choose the suggested name, or type your own.')
-      if (!chosen) return CANCELLED
-    }
-    const current = organizations.find((org) => org.current) ?? organizations[0]
-    // Offer the current organization and up to two others, then a new one; any organization is still
-    // reachable by typing its exact name or id, and an unmatched or ambiguous answer asks again.
-    // Cancelling a new organization's name returns here.
-    const offered = current ? [current, ...organizations.filter((org) => org !== current)].slice(0, MAX_ORGANIZATION_OPTIONS) : []
-    while (!chosen) {
-      const answer = await interaction.ask(
-        'Which organization should this checkout sync to? Choose one, create a new one, or type an exact organization name or id.',
-        { options: [...offered.map((org) => organizationLabel(org, organizations)), CREATE_ORGANIZATION], header: 'Organization' })
-      chosen = answer === CREATE_ORGANIZATION
-        ? await offerNewOrganization(env, interaction, root, 'Name the new Delta organization. Choose the suggested name, or type your own.')
-        : matchOrganization(answer, organizations)
-    }
-    if ('status' in chosen) return chosen
-    organization = chosen.id
-    organizationName = chosen.name
+    organization = team.id
+    organizationName = team.name
   }
 
   const text = serializeProjectPolicy(file.document, mode, organization)
@@ -288,8 +315,8 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   // files out. A file that is already committed keeps being tracked; excluding it changes nothing.
   if (!await excludeFromGit(env, EXCLUDE_ENTRY))
     await interaction.log(`Delta couldn't keep ${SETTINGS_FILE} out of Git; add it to .gitignore if you don't want to commit it.`, 'transcript')
-  const chosen = `${MODE_NAMES[mode]}${organizationName ? ` with ${organizationName}` : ''}`
-  const saved = `Saved ${chosen} to ${SETTINGS_FILE}. New sessions follow it from now on; run /delta-setup to change it.`
+  const summary = `${MODE_NAMES[mode]}${organizationName ? ` with ${organizationName}` : ''}`
+  const saved = `Saved ${summary} to ${SETTINGS_FILE}. New sessions follow it from now on; run /delta-setup to change it.`
   // The setting never applies to the session that saved it. Only Organization sharing offers to sync
   // this one now: sharing it is what that choice asked for, while a share would contradict Private sync
   // (it publishes to the organization) and Manual (sessions are shared by hand).
@@ -310,16 +337,18 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
 }
 
 /**
- * Ask for a new organization's name, suggesting the checkout's folder name, then create it and offer
- * invitations. Undefined when the person cancels; a failed creation is the setup's outcome.
+ * Ask for a new team's name, suggesting the checkout's folder name, then create it and offer
+ * invitations. `declined` when the person chooses `decline`, undefined when they type something that
+ * is not a name; a failed creation is the setup's outcome.
  */
-async function offerNewOrganization(env: SetupEnv, interaction: Interaction, root: string, question: string): Promise<Organization | SetupOutcome | undefined> {
+async function offerNewOrganization(env: SetupEnv, interaction: Interaction, root: string, question: string, decline: string): Promise<Organization | SetupOutcome | 'declined' | undefined> {
   const suggested = root.split(/[\\/]/).filter(Boolean).at(-1) || 'My team'
-  const create = `Create "${suggested}"`
-  const answer = await interaction.ask(question, { options: [create, 'Cancel'], header: HEADER })
+  const create = `Create "${suggested}"${decline === KEEP_PERSONAL ? ' (Recommended)' : ''}`
+  const answer = await interaction.ask(question, { options: [create, decline], header: HEADER })
+  if (answer === decline) return 'declined'
   const name = answer === create ? suggested : answer.trim()
   // A typed slash command, entered while the dialog was open, is not a name.
-  if (answer === 'Cancel' || !name || name.startsWith('/')) return undefined
+  if (!name || name.startsWith('/')) return undefined
   let created: Organization
   try { created = await env.createOrganization(name) }
   catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the organization "${name}": ${String(error)}. Check /delta-org list before trying again; it may have been created.` } }

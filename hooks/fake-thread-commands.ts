@@ -662,6 +662,9 @@ export function fakeThreads(on: On, options: {
     const operation = parsed?.positionals[1]
     if (operation) fake.cliIntegrations.push({ operation, integration: e.init?.env?.DELTA_CLI_INTEGRATION,
       ...e.init?.env?.DELTA_CLI_COMMAND_FORM ? { commandForm: e.init.env.DELTA_CLI_COMMAND_FORM } : {} })
+    // Setup reads the account's login to recognise its personal organization; the read changes nothing.
+    if (parsed?.positionals[0] === 'auth' && operation === 'status' && argv.includes('--json'))
+      return output(JSON.stringify({ status: 'signed_in', account: { account_id: 'user', login: 'tester' } }))
     if (parsed?.positionals[0] === 'org' && argv.includes('--json')) {
       fake.commands.push(argv)
       // Setup creates a team organization only when the account has none; the name follows `--`.

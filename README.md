@@ -132,18 +132,23 @@ A checkout's Delta setting lives at its Git checkout root, `.delta/settings.json
   someone already committed stays tracked, and then applies to everyone who opens
   the repository with the plugin.
 
-Run `/delta setup` for an interactive wizard. It shows the current mode and
-organization and explains that syncing stores the conversation and a copy of the
-checkout's code, including uncommitted changes, in DeltaDB. It offers Private
-sync (recommended, `private`), Organization sharing (`organization`), or Manual
-(`manual`), each labelled with what it syncs and who sees it (for an account with
-no organization, Organization sharing's label says setup helps create one). It
-then asks which organization to use, listing names from `delta --json org list`
-plus "Create a new organization" (an account with none goes straight to creating
-one). A new organization is created with `delta org create`, named after the
-checkout or as typed; a failed creation is reported and never retried, since it
-may have succeeded, and a created one offers to invite teammates by email with
-`delta org invite`. Setup then saves the
+Run `/delta setup` for an interactive wizard. It settles the team first, because
+a thread's organization never changes once it syncs and a personal organization
+has nobody to share with. A single team is used without a question; several are
+offered by name from `delta --json org list` plus "Create a new organization";
+an account with only its personal organization is recommended to create a team,
+or may skip and keep its sessions personal. A personal organization is the one
+the CLI flags `personal`, or, from CLIs that don't report it, the one named
+`<login>'s Organization` after `delta auth status`'s login, as Delta names it and
+never lets it be renamed. A new team is created with `delta org create`, named
+after the checkout or as typed; a failed creation is reported and never retried,
+since it may have succeeded, and a created one offers to invite teammates by
+email with `delta org invite`. Setup then shows the current mode, explains that
+syncing stores the conversation and a copy of the checkout's code, including
+uncommitted changes, in DeltaDB, and offers Private sync (recommended,
+`private`), Organization sharing (`organization`, not offered for a personal
+organization), or Manual (`manual`), each labelled with what it syncs and who
+sees it. Manual saves no organization. Setup then saves the
 choice without a further confirmation and says what it saved ("Saved Private
 sync with Zed to .delta/settings.json"). Cancelling or dismissing any question leaves
 the file untouched. Print and SDK

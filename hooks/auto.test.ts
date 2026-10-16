@@ -705,9 +705,9 @@ describe('setup dialogs and notices', () => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
-      // Choose the private option and the existing organization as the person would, by their offered labels.
+      // Choose the private option as the person would, by its offered label.
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = offered.find((label: string) => label.startsWith('Private sync') || label === 'Zed')
+      const answer = offered.find((label: string) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
     }
     await $.session.start(sessionStart)
@@ -726,7 +726,7 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith("You aren't in a Delta organization") ? 'Acme'
+      const answer = text.startsWith('Delta syncs your sessions into a team') ? 'Acme'
         : text.startsWith('Invite teammates') ? 'Not now'
         : offered.find((label) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }

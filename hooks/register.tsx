@@ -2922,6 +2922,10 @@ function setupEnv($: Runtime): SetupEnv {
     },
     contract: () => readThreadContract($),
     organizations: () => listOrganizations($),
+    login: async () => {
+      const status = await command($, ['auth', 'status'], 'auth status')
+      return typeof status?.account?.login === 'string' ? status.account.login : undefined
+    },
     createOrganization: (name) => createOrganization($, name),
     inviteMembers: async (organization, emails) =>
       inviteResultsFrom(await command($, ['org', 'invite', '--org', organization, '--', ...emails], 'org invite')),
