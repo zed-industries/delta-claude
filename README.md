@@ -166,12 +166,13 @@ dialog.
 The status band above the prompt is Delta's one indicator, and it always shows
 the current state. A synced session (automatic, shared with `/delta share`, or
 joined) reads `Delta · Syncing` with who can see it. An interactive session in a
-checkout Delta does not sync reads `○ Delta · Not syncing  /delta-share` for a
-Manual checkout, or `○ Delta · Not set up  /delta-setup` for one never set up,
-and switches to `Syncing` as soon as the session is shared. A running share or
-join, a failure, or an unfinished join takes the reminder's place. Nothing is
-written to the transcript, so no line goes stale. A headless session, a checkout
-that syncs automatically, and a session outside a Git checkout show no reminder.
+session Delta does not sync reads `○ Delta · Not syncing  /delta-share` in a
+checkout with any setting, or `○ Delta · Not set up  /delta-setup` in one never
+set up. It switches to `Not syncing` as soon as a setup saves a setting (which
+applies from the next session), and to `Syncing` as soon as the session is
+shared. A running share or join, a failure, or an unfinished join takes the
+reminder's place. Nothing is written to the transcript, so no line goes stale. A
+headless session and a session outside a Git checkout show no reminder.
 
 Automatic activation applies only to new sessions — `classic.SessionStart` with
 source `startup` or `clear`, never `resume`, `compact`, or `fork`, and never a

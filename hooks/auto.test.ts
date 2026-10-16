@@ -201,7 +201,8 @@ describe('automatic activation', () => {
     { name: 'a Manual checkout is told how to share, not to set up', expected: 'manual',
       arrange: (fake) => { fake.files.set(POLICY, policy('manual')) } },
     { name: 'a headless session gets none', expected: 'none', arrange: (fake) => { fake.surfaces = [] } },
-    { name: 'an automatic session Delta refused gets none', expected: 'none',
+    // A Delta too old to sync automatically leaves the session unsynced; /delta-share still works.
+    { name: 'an automatic session Delta could not start is told how to share', expected: 'manual',
       arrange: (fake) => { fake.files.set(POLICY, policy('private', 'org-1')); fake.contractRange = { min: 1, max: 2 } } },
     { name: 'a session with an unfinished join gets none', source: 'resume', expected: 'none',
       arrange: (fake) => { seedResumed(fake, { snapshot: false, joinTransition: { locator: 'x' } }) } },
@@ -709,9 +710,25 @@ describe('setup dialogs and notices', () => {
     await $.session.start(sessionStart)
     await $.command.run({ ...typedDelta('setup') } as never)
     expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-1' } })
+    // The setting starts with the next session, so the band now says this one isn't syncing.
+    expect(await reminderKind($)).toBe('manual')
     // The person sees exactly what will be written before confirming it.
     expect(fake.logs.join('\n')).toContain('Delta will save this to .delta/settings.json')
     fake.expectClean()
+  })
+
+  test('a setup the startup offer opened updates the band once it saves', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = (question: any) => {
+      const text = question.questions[0].question
+      const offered = question.questions[0].options.map((option: { label: string }) => option.label)
+      const answer = text.startsWith('Set up Delta syncing') ? 'Set it up'
+        : text.startsWith('Save this setting') ? 'Save it' : offered.find((label: string) => label.startsWith('Manual'))
+      return { result: { answers: { [text]: answer } } }
+    }
+    await startAuto($, fake)
+    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'manual' } })
+    expect(await reminderKind($)).toBe('manual')
   })
 
   test('the onboarding offer is shown once per repository, then never again', async ($, on) => {

@@ -3014,6 +3014,17 @@ async function startSession($: Runtime, session: string) {
   } finally {
     openOnboarding.delete(session)
   }
+  // A setup the offer opened may have saved a setting; the band follows it.
+  await refreshReminder($, session)
+}
+
+/** Re-read the checkout's setting after a setup, so the band's reminder follows what was saved. */
+async function refreshReminder($: Runtime, session: string) {
+  try {
+    const root = await checkoutRoot($)
+    stateFor(session).reminder = syncReminder(readProjectPolicy(await setupEnv($).readFile(policyPath(root))).policy)
+  } catch { /* outside a checkout or unreadable: the band keeps what it had */ }
+  $.ui.invalidate('ui.render')
 }
 
 /** The onboarding marker each session's still-open setup offer holds, cleared if the session ends first. */
@@ -3027,13 +3038,13 @@ function onboardingStore($: Runtime): OnboardingStore {
 }
 
 /**
- * The band's reminder for a checkout's sessions that Delta does not sync: Manual points to
- * /delta-share, and a checkout never set up to /delta-setup. A checkout that syncs automatically gets
- * none: its sessions sync, and one that could not start already reports why on the band.
+ * The band's reminder for a session while Delta does not sync it: a checkout with any setting points
+ * to /delta-share, and one never set up to /delta-setup. A syncing session's band says `Syncing`
+ * instead, so an automatic checkout's sessions show this only when they are not syncing, as a session
+ * started before the setting was saved, or one Delta could not start.
  */
-function syncReminder(policy: ProjectPolicy): SyncReminder | undefined {
-  if (recordsAutomatically(policy)) return undefined
-  // Someone who chose Manual is not nudged toward setup every session.
+function syncReminder(policy: ProjectPolicy): SyncReminder {
+  // Someone who chose a setting is not nudged toward setup every session.
   return policy.configured ? 'manual' : 'not set up'
 }
 
@@ -3314,7 +3325,7 @@ async function reportRefusal($: Runtime, session: string, error: unknown) {
 async function setupCommand($: Runtime): Promise<string> {
   if (!hasInteractiveSurface(await $.session.surfaces())) return HEADLESS_REFUSAL
   const outcome = await runSetupWizard(setupEnv($), claudeInteraction($))
-  if (outcome.status === 'wrote') $.ui.invalidate('ui.render')
+  if (outcome.status === 'wrote') await refreshReminder($, await $.session.id())
   return outcome.text
 }
 
