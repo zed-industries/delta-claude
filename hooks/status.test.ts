@@ -180,7 +180,7 @@ test('children report independently of an idle parent, with distinct statuses an
 })
 
 test('a named running child does not hide siblings in the same state when other states exist', () => {
-  const child = { thread_id: 'first', kind: 'subagent' as const, name: 'First', status: 'running' }
+  const child = { thread_id: 'first', reference: 'thread#s=first', kind: 'subagent' as const, name: 'First', status: 'running' }
   const band = renderBand({ ...live, children: [
     child,
     { ...child, thread_id: 'second', name: 'Second' },
@@ -191,8 +191,8 @@ test('a named running child does not hide siblings in the same state when other 
 
 test('mixed failed and running children retain both states in compact terminal and desktop bands', () => {
   const children = [
-    { thread_id: 'failed', kind: 'subagent' as const, name: 'Old\n\u0007failure', status: 'failed' },
-    { thread_id: 'running', kind: 'subthread' as const, name: 'Current', status: 'running' },
+    { thread_id: 'failed', reference: 'thread#s=failed', kind: 'subagent' as const, name: 'Old\n\u0007failure', status: 'failed' },
+    { thread_id: 'running', reference: 'thread#s=running', kind: 'subthread' as const, name: 'Current', status: 'running' },
   ]
   const state = { ...live, children }
   const wide = renderBand(state, { ...WIDE, rows: 2 })
@@ -207,8 +207,8 @@ test('mixed failed and running children retain both states in compact terminal a
     expect(bandWidth(narrow, terminal)).toBeLessThanOrEqual(48)
     const four = renderBand({ ...state, children: [
       ...children,
-      { thread_id: 'syncing', kind: 'subagent' as const, name: 'Sync', status: 'waiting_for_synchronization' },
-      { thread_id: 'queued', kind: 'subagent' as const, name: 'Later', status: 'queued' },
+      { thread_id: 'syncing', reference: 'thread#s=syncing', kind: 'subagent' as const, name: 'Sync', status: 'waiting_for_synchronization' },
+      { thread_id: 'queued', reference: 'thread#s=queued', kind: 'subagent' as const, name: 'Later', status: 'queued' },
     ] }, { columns: 48, terminal, rows: 1 })
     expect(text(four.right)).toMatch(/fail.*run.*sync.*queu/)
     expect(bandWidth(four, terminal)).toBeLessThanOrEqual(48)

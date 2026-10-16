@@ -109,13 +109,13 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
-  test('a CLI that speaks only contract 2 disables auto mode with a notice', async ($, on) => {
+  test('a CLI this plugin cannot record against leaves auto mode off and says which to update', async ($, on) => {
     const fake = fakeThreads(on)
-    fake.contractRange = { min: 1, max: 2 }
+    fake.contractRange = { min: 1, max: 3 }
     fake.files.set(POLICY, policy('private', 'org-1'))
     await startAuto($, fake)
     expect(fake.server.thread).toBeUndefined()
-    expect(fake.logs.join('\n')).toContain('Update Delta to sync sessions automatically')
+    expect(fake.logs.join('\n')).toContain("This session isn't syncing: This Delta is too old for this plugin. Update Delta to continue.")
     expect(binding(fake)).toBeUndefined()
     fake.expectClean()
   })
@@ -201,9 +201,6 @@ describe('automatic activation', () => {
     { name: 'a Manual checkout is told how to share, not to set up', expected: 'manual',
       arrange: (fake) => { fake.files.set(POLICY, policy('manual')) } },
     { name: 'a headless session gets none', expected: 'none', arrange: (fake) => { fake.surfaces = [] } },
-    // A Delta too old to sync automatically leaves the session unsynced; /delta-share still works.
-    { name: 'an automatic session Delta could not start is told how to share', expected: 'manual',
-      arrange: (fake) => { fake.files.set(POLICY, policy('private', 'org-1')); fake.contractRange = { min: 1, max: 2 } } },
     { name: 'a session with an unfinished join gets none', source: 'resume', expected: 'none',
       arrange: (fake) => { seedResumed(fake, { snapshot: false, joinTransition: { locator: 'x' } }) } },
   ]

@@ -2,7 +2,7 @@ import { describe, expect, test, tier } from 'claude-code/testing'
 import { cliFixture } from './cli-fixtures'
 import {
   DeltaCommandError, JoinNotReadyError, appendFailure, classifyCommandFailure, contractRefusal, contractVersion, parseAppendReceipt,
-  parseThreadContract, parseThreadFork, parseThreadMount, permanentFailureAdvice, PLUGIN_CONTRACT_VERSION,
+  parseThreadContract, parseThreadFork, parseThreadMount, permanentFailureAdvice,
   parseWatchEvent, parseThreadStatus, validateJoinedMounts,
   validateThreadFrontier, validateThreadCheckout, type ThreadReady, type ThreadStatus,
 } from './thread-commands'
@@ -48,14 +48,13 @@ describe('thread watch', () => {
   })
 
   test('decodes child snapshots and updates with future kinds and statuses but rejects malformed children', () => {
-    const child = { thread_id: 'child-1', kind: 'future_kind', name: 'Explore tests', status: 'future_status' }
+    const child = { thread_id: 'child-1', reference: 'opaque-child-reference', kind: 'future_kind', name: 'Explore tests', status: 'future_status' }
     expect(parseWatchEvent(JSON.stringify({ type: 'children', children: [child], extra: true })))
       .toEqual({ type: 'children', children: [child] })
-    const addressed = { ...child, reference: 'opaque-child-reference' }
-    expect(parseWatchEvent(JSON.stringify({ type: 'child', child: addressed })))
-      .toEqual({ type: 'child', child: addressed })
+    expect(parseWatchEvent(JSON.stringify({ type: 'child', child }))).toEqual({ type: 'child', child })
+    const { reference: _reference, ...unaddressed } = child
     for (const malformed of [{ ...child, thread_id: '' }, { ...child, kind: '' },
-      { ...child, name: null }, { ...child, status: null }, { ...child, reference: '' }]) {
+      { ...child, name: null }, { ...child, status: null }, { ...child, reference: '' }, unaddressed]) {
       expect(() => parseWatchEvent(JSON.stringify({ type: 'child', child: malformed }))).toThrow()
     }
     expect(() => parseWatchEvent(JSON.stringify({ type: 'children', children: [{ ...child, kind: '' }] }))).toThrow()
@@ -98,10 +97,11 @@ describe('thread watch', () => {
     const local = { ...status(), producer: null, url: null,
       access: { state: 'local_only' as const, is_owner: null }, worktrees: { status: 'available' as const, items: [] } }
     expect(parseThreadStatus(JSON.stringify(local))).toEqual(local)
-    expect(() => validateThreadCheckout({ ...local, url: status().url }, { checkout: '/repo' })).toThrow('/delta-share')
+    const binding = { checkout: '/repo', checkoutReference: 'history#t=0' }
+    expect(() => validateThreadCheckout({ ...local, url: status().url }, binding)).toThrow('/delta-share')
     for (const is_owner of [false, null]) {
       const state = { ...status(), access: { state: 'granted' as const, is_owner }, url: null }
-      expect(validateThreadCheckout(state, { checkout: '/repo' }))
+      expect(validateThreadCheckout(state, binding))
         .toEqual({ directory: '/repo', reference: 'history#t=0' })
     }
   })
@@ -139,20 +139,6 @@ describe('thread watch', () => {
     expect(binding).toEqual({ checkout: '/repo', checkoutReference: 'history#t=0' })
   })
 
-  test('legacy directory-only selection requires exactly one attached checkout', () => {
-    const binding = { checkout: '/repo' }
-    expect(validateThreadCheckout(status(), binding)).toEqual({ directory: '/repo', reference: 'history#t=0' })
-    for (const state of ['inactive', 'detached', 'missing'] as const)
-      expect(() => validateThreadCheckout({
-        ...status(), worktrees: { status: 'available', items: [{ reference: 'history#t=0', checkouts: [{ directory: '/repo', state }] }] },
-      }, binding)).toThrow('/delta-share')
-    const worktrees = status().worktrees
-    if (worktrees.status !== 'available') throw new Error('Expected available status fixture')
-    expect(() => validateThreadCheckout({
-      ...status(), worktrees: { status: 'available', items: [...worktrees.items, ...worktrees.items] },
-    }, binding)).toThrow('ambiguous')
-  })
-
   test('Windows separator equivalence preserves checkout identity and readiness requirements', () => {
     const directory = String.raw`C:\Workspace\zed\delta\.delta\worktrees\rn4eercbxvfw\delta`
     const reported = String.raw`C:\Workspace\zed\delta\.delta\worktrees\rn4eercbxvfw/delta`
@@ -185,25 +171,24 @@ describe('thread watch', () => {
     }
   })
 
-  test('decodes the worktrees event and tolerates what a newer CLI adds to it', () => {
+  test('decodes the worktrees event, requiring each worktree name, and tolerates what a newer CLI adds', () => {
     expect(parseWatchEvent(JSON.stringify({ type: 'worktrees', worktrees: [] }))).toEqual({ type: 'worktrees', worktrees: [] })
-    expect(parseWatchEvent(JSON.stringify({ type: 'worktrees', worktrees: [
-      { reference: 'a#t=0', name: 'delta', directory: '/ignored' }, { reference: 'b#t=0' }] })))
-      .toEqual({ type: 'worktrees', worktrees: [{ reference: 'a#t=0', name: 'delta' }, { reference: 'b#t=0', name: 'b#t=0' }] })
-    for (const event of [{ type: 'worktrees' }, { type: 'worktrees', worktrees: [{ name: 'delta' }] }])
+    expect(parseWatchEvent(JSON.stringify({ type: 'worktrees', worktrees: [{ reference: 'a#t=0', name: 'delta', directory: '/ignored' }] })))
+      .toEqual({ type: 'worktrees', worktrees: [{ reference: 'a#t=0', name: 'delta' }] })
+    for (const event of [{ type: 'worktrees' }, { type: 'worktrees', worktrees: [{ name: 'delta' }] }, { type: 'worktrees', worktrees: [{ reference: 'b#t=0' }] }])
       expect(() => parseWatchEvent(JSON.stringify(event))).toThrow()
   })
 
   test('a mount result names every worktree checkout, and a joined check names the one that is not ready', () => {
     const mounted = { operation: 'mounted', thread_id: 'thread', owner: 'session', directory: '/folder',
       worktrees: [{ reference: 'a#t=0', name: 'delta', directory: '/a', state: 'mounted' },
-        { reference: 'b#t=0', directory: '/folders/web', state: 'mounted' }] }
+        { reference: 'b#t=0', name: 'web', directory: '/folders/web', state: 'mounted' }] }
     expect(parseThreadMount(JSON.stringify(mounted), 'session')).toEqual({
       thread_id: 'thread', owner: 'session', directory: '/folder',
       worktrees: [{ reference: 'a#t=0', name: 'delta', directory: '/a', state: 'mounted' },
         { reference: 'b#t=0', name: 'web', directory: '/folders/web', state: 'mounted' }] })
     expect(parseThreadMount(JSON.stringify({ ...mounted, worktrees: [] }), 'session').worktrees).toEqual([])
-    for (const bad of [{ operation: 'unmounted' }, { owner: 'other' }, { directory: '' }, { worktrees: [{ reference: 'a#t=0' }] }])
+    for (const bad of [{ operation: 'unmounted' }, { owner: 'other' }, { directory: '' }, { worktrees: [{ reference: 'a#t=0', directory: '/a', state: 'mounted' }] }])
       expect(() => parseThreadMount(JSON.stringify({ ...mounted, ...bad }), 'session')).toThrow('Unexpected thread mount result')
     expect(() => parseThreadMount(JSON.stringify({ error: { code: 'not_visible', message: 'no access' } }), 'session'))
       .toThrow(DeltaCommandError)
@@ -411,14 +396,13 @@ describe('recording contract', () => {
     expect(() => parseThreadContract('{"error":{"code":"incompatible_app","message":"old"}}')).toThrow(DeltaCommandError)
   })
 
-  test('refuses a CLI older or newer than this plugin, and one that predates the command', () => {
+  test('records only against a CLI whose range covers the current contract', () => {
     const at = (min: number, max: number) => ({ operation: 'contract' as const, min, max })
-    for (const range of [at(1, 1), at(1, 2), at(0, 3), at(2, 2), at(3, 4)]) expect(contractRefusal(range)).toBeUndefined()
-    expect(contractRefusal(at(0, 0))).toContain('Update Delta')
-    expect(contractRefusal(undefined)).toContain('Update Delta')
+    for (const range of [at(4, 4), at(1, 4), at(3, 5)]) expect(contractRefusal(range)).toBeUndefined()
+    for (const range of [at(1, 3), undefined]) expect(contractRefusal(range)).toContain('Update Delta')
     expect(contractRefusal(at(5, 6))).toContain('Update the Delta plugin')
-    expect([at(1, 1), at(1, 2), at(1, 5)].map(contractVersion)).toEqual([1, 2, 4])
-    expect(PLUGIN_CONTRACT_VERSION).toBe(1)
+    // A later capability is gated on the version both sides speak.
+    expect(contractVersion(at(3, 9))).toBe(4)
   })
 })
 

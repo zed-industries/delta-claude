@@ -3,13 +3,13 @@ import { samePath } from './paths'
 export type ThreadState = {
   thread_id: string
   url: string | null
-  /** The thread's display name; absent from a Delta build that predates it. */
-  title?: string | null
+  /** The thread's display name, or null when unnamed. */
+  title: string | null
   access: { state: 'local_only' | 'granted'; is_owner: boolean | null }
-  /** The thread's audience once a cloud record exists; null or absent before one does. */
-  visibility?: 'private' | 'organization' | 'unlisted' | null
-  /** Delta's background upload of this thread, once an upload intent exists. */
-  upload?: ThreadUpload | null
+  /** The thread's audience once a cloud record exists; null before one does. */
+  visibility: 'private' | 'organization' | 'unlisted' | null
+  /** Delta's background upload of this thread, or null with neither an upload intent nor a cloud record. */
+  upload: ThreadUpload | null
   worktrees: {
     status: 'available'
     items: {
@@ -45,8 +45,8 @@ export type ThreadUser = { user_id: string | null; name: string | null }
 /** Child kinds and statuses are open-ended so newer CLI values remain visible. */
 export type WatchChild = {
   thread_id: string
-  /** Opaque command locator; older CLI builds report only the identity. */
-  reference?: string
+  /** Opaque command locator. */
+  reference: string
   kind: string
   name: string
   status: string
@@ -256,10 +256,8 @@ export function parseWatchEvent(line: string): WatchEvent | undefined {
       if (nonempty(event.thread_id)) return { type: 'child.remove', thread_id: event.thread_id }
       break
     case 'worktrees':
-      if (Array.isArray(event.worktrees) && event.worktrees.every((tree: any) => nonempty(tree?.reference)))
-        return { type: 'worktrees', worktrees: event.worktrees.map((tree: any) => ({
-          reference: tree.reference, name: typeof tree.name === 'string' ? tree.name : tree.reference,
-        })) }
+      if (Array.isArray(event.worktrees) && event.worktrees.every((tree: any) => nonempty(tree?.reference) && typeof tree.name === 'string'))
+        return { type: 'worktrees', worktrees: event.worktrees.map((tree: any) => ({ reference: tree.reference, name: tree.name })) }
       break
     case 'comment':
       if (validComment(event.comment)) return { type: 'comment', comment: event.comment }
@@ -275,15 +273,11 @@ export function parseWatchEvent(line: string): WatchEvent | undefined {
 
 function validChild(child: any): child is WatchChild {
   return nonempty(child?.thread_id) && nonempty(child.kind) &&
-    typeof child.name === 'string' && nonempty(child.status) &&
-    (child.reference === undefined || nonempty(child.reference))
+    typeof child.name === 'string' && nonempty(child.status) && nonempty(child.reference)
 }
 
 function watchChild(child: WatchChild): WatchChild {
-  return {
-    thread_id: child.thread_id, kind: child.kind, name: child.name, status: child.status,
-    ...child.reference === undefined ? {} : { reference: child.reference },
-  }
+  return { thread_id: child.thread_id, reference: child.reference, kind: child.kind, name: child.name, status: child.status }
 }
 
 function validComment(comment: any): comment is WatchComment {
@@ -330,11 +324,11 @@ export function parseThreadStatus(line: string): ThreadStatus {
 
 function validBinding(frame: any): boolean {
   return nonempty(frame.thread_id) && (frame.url === null || nonempty(frame.url)) &&
+    (frame.title === null || typeof frame.title === 'string') &&
     ['local_only', 'granted'].includes(frame.access?.state) &&
     (frame.access.is_owner === null || typeof frame.access.is_owner === 'boolean') &&
-    (frame.visibility === undefined || frame.visibility === null ||
-      ['private', 'organization', 'unlisted'].includes(frame.visibility)) &&
-    (frame.upload === undefined || frame.upload === null || validUpload(frame.upload)) &&
+    (frame.visibility === null || ['private', 'organization', 'unlisted'].includes(frame.visibility)) &&
+    (frame.upload === null || validUpload(frame.upload)) &&
     validWorktrees(frame.worktrees) && validProducer(frame.producer)
 }
 
@@ -369,19 +363,17 @@ function inspectionUnavailableMessage(error: { code: string; reason?: string; me
   return `Delta checkout inspection unavailable (${label}): ${error.message}. Resolve the inspection failure and retry; the existing binding and queued messages were preserved.`
 }
 
-/** The oldest recording-output contract version this plugin speaks. */
-export const PLUGIN_CONTRACT_VERSION = 1
-/** The newest recording-output contract version this plugin speaks. */
-export const PLUGIN_CONTRACT_MAX = 4
-/** The first contract version whose `append` accepts `session_info_update`, which carries a title. */
-export const TITLE_CONTRACT_VERSION = 2
 /**
- * The first contract version that records offline: `append --acknowledge local` answers from local
- * state, so a session this plugin created keeps working without the server.
+ * The oldest recording-output contract version this plugin speaks. Neither the plugin nor the CLI
+ * has shipped, so nothing older is supported; raise this rather than keep a gate for an old CLI.
  */
-export const OFFLINE_CONTRACT_VERSION = 4
-/** The first contract whose mount command accepts an explicit join-intent flag. */
-export const JOIN_INTENT_CONTRACT_VERSION = 3
+export const PLUGIN_CONTRACT_MIN = 4
+/**
+ * The newest recording-output contract version this plugin speaks. A capability added by a later
+ * version is gated on the session's negotiated version (`contractVersion`) until `PLUGIN_CONTRACT_MIN`
+ * reaches it.
+ */
+export const PLUGIN_CONTRACT_MAX = 4
 
 /** The range of recording-output contract versions a CLI build speaks. */
 export type ThreadContract = { operation: 'contract'; min: number; max: number }
@@ -415,16 +407,17 @@ export function parseThreadFork(stdout: string): ForkedThread {
   return { thread_id: result.thread_id }
 }
 
+/** This plugin cannot record against the selected Delta CLI; the message says which to update. */
+export class ContractRefusalError extends Error {}
+
 /**
  * Why this plugin may not record against a CLI's contract range, or undefined when it may. An
  * `undefined` range means the CLI predates `thread contract`, so it is older than this plugin.
  */
 export function contractRefusal(range: ThreadContract | undefined): string | undefined {
-  if (!range)
-    return 'This Delta CLI does not recognize `thread contract`, so it is too old for this plugin. Update Delta to continue'
-  if (PLUGIN_CONTRACT_VERSION > range.max)
+  if (!range || range.max < PLUGIN_CONTRACT_MIN)
     return 'This Delta is too old for this plugin. Update Delta to continue'
-  if (PLUGIN_CONTRACT_MAX < range.min)
+  if (range.min > PLUGIN_CONTRACT_MAX)
     return 'This Delta is newer than this plugin. Update the Delta plugin to continue'
 }
 
@@ -449,7 +442,7 @@ export function validateThreadCheckout(
     throw new DeltaCommandError(state.worktrees.error.code, inspectionUnavailableMessage(state.worktrees.error), {}, state.worktrees.error.reason)
   const matches = state.worktrees.items.flatMap((worktree) => worktree.checkouts
     .filter((checkout) => binding.checkout !== undefined && samePath(checkout.directory, binding.checkout) &&
-      (binding.checkoutReference === undefined || worktree.reference === binding.checkoutReference) &&
+      worktree.reference === binding.checkoutReference &&
       checkout.state === 'attached' && checkout.active !== false)
     .map((checkout) => ({ directory: checkout.directory, reference: worktree.reference })))
   if (matches.length !== 1)
@@ -474,14 +467,11 @@ export function parseThreadMount(line: string, owner: string): MountedThread {
   if (failure) throw failure
   if (result?.operation !== 'mounted' || !nonempty(result.thread_id) || result.owner !== owner ||
       !nonempty(result.directory) || !Array.isArray(result.worktrees) ||
-      !result.worktrees.every((tree: any) => nonempty(tree?.reference) && nonempty(tree.directory) && nonempty(tree.state)))
+      !result.worktrees.every((tree: any) => nonempty(tree?.reference) && nonempty(tree.name) && nonempty(tree.directory) && nonempty(tree.state)))
     throw new Error('Unexpected thread mount result; use matching CLI and plugin builds')
   return {
     thread_id: result.thread_id, owner, directory: result.directory,
-    worktrees: result.worktrees.map((tree: any) => ({
-      reference: tree.reference, directory: tree.directory, state: tree.state,
-      name: nonempty(tree.name) ? tree.name : tree.directory.split('/').filter(Boolean).pop() ?? tree.reference,
-    })),
+    worktrees: result.worktrees.map((tree: any) => ({ reference: tree.reference, name: tree.name, directory: tree.directory, state: tree.state })),
   }
 }
 

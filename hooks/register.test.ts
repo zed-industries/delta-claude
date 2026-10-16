@@ -729,41 +729,6 @@ describe('thread commands', () => {
       fake.expectClean()
     })
 
-  test('legacy checkout adoption is unique within the thread and preserves the pending producer frontier', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('pending')] })
-    await $.session.start(sessionStart)
-    fake.appendOffline = true
-    expect(await fake.share($)).toContain('failed')
-    await $.session.end(sessionEnd(fake.session))
-    const saved = structuredClone(fake.store.get(`session:${fake.session}`) as any)
-    delete saved.checkoutReference
-    // A resume clears the end marker, so it is not part of the preserved binding.
-    delete saved.endedAt
-    fake.store.set(`session:${fake.session}`, saved)
-    const worktrees = [
-      { reference: 'other#t=0', checkouts: [
-        { directory: '/other', state: 'attached' }, { directory: CHECKOUT, state: 'inactive' },
-      ] },
-      ...fake.state().worktrees.items,
-    ]
-    fake.statusPatch = { worktrees: { status: 'available', items: [...worktrees].reverse() } }
-    let release!: () => void
-    fake.holdAppend = new Promise<void>((resolve) => { release = resolve })
-    fake.appendOffline = false
-    const commands = fake.operations().length
-    await $.session.start(sessionStart)
-    await fake.clock.settle()
-    expect(fake.store.get(`session:${fake.session}`)).toEqual({
-      ...saved, checkoutReference: fake.server.mount!.reference,
-    })
-    expect(fake.records()).toEqual([])
-    expectNoSetupCommands(fake, commands)
-    release()
-    await fake.clock.settle()
-    expect(fake.records()).toMatchObject([{ sequence: 1, update: { content: [{ text: 'pending' }] } }])
-    fake.expectClean()
-  })
-
   test('unavailable inspection pauses participation and preserves binding and pending files across resume', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
@@ -1088,7 +1053,6 @@ describe('thread commands', () => {
 
   test('a shared session records each new title once, a rename over Claude\'s own', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
-    fake.contractRange = { min: 1, max: 2 }
     await $.session.start(sessionStart)
     await fake.share($)
     const transcript = '/config/projects/repo/session.jsonl'
@@ -1122,7 +1086,6 @@ describe('thread commands', () => {
 
   test('a title still arrives when reading from an offset fails, and a missing transcript fails nothing', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
-    fake.contractRange = { min: 1, max: 2 }
     await $.session.start(sessionStart)
     await fake.share($)
     const transcript = '/config/projects/repo/session.jsonl'
@@ -1146,20 +1109,6 @@ describe('thread commands', () => {
     expect(fake.commands.filter((argv) => argv[0] === 'tail')).toHaveLength(tries)
     expect(fake.logs.join('\n')).not.toContain('title')
     expect((await $.prompt.submit(prompt('still sharing'))).drop).toBeUndefined()
-    fake.expectClean()
-  })
-
-  test('a CLI whose contract predates titles is never sent one', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('initial')] })
-    fake.contractRange = { min: 1, max: 1 }
-    await $.session.start(sessionStart)
-    await fake.share($)
-    const transcript = '/config/projects/repo/session.jsonl'
-    fake.files.set(transcript, JSON.stringify({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session }) + '\n')
-    await $.classic.Stop({ transcript_path: transcript, stop_hook_active: false } as any)
-    await fake.clock.settle()
-    expect(fake.records().some((record) => record.update?.sessionUpdate === 'session_info_update')).toBe(false)
-    expect(fake.commands.some((argv) => argv[0] === 'tail')).toBe(false)
     fake.expectClean()
   })
 
@@ -1676,21 +1625,6 @@ describe('remote activity', () => {
   })
 
 
-  test('malformed watch output surfaces failure and reconnects', async ($, on) => {
-    const fake = fakeThreads(on)
-    // Contract 2 keeps this test on the server-confirmed path: a prompt waits for the watcher.
-    fake.contractRange = { min: 1, max: 2 }
-    await $.session.start(sessionStart)
-    await fake.share($)
-    fake.live()!.write('{"type":"item","item":{"id":""}}\n')
-    await fake.clock.settle()
-    expect(fake.logs.some((log) => log.startsWith('Connection interrupted'))).toBe(true)
-    expect((await $.prompt.submit(prompt('invalid'))).drop).toBeDefined()
-    await fake.clock.advance(1000)
-    expect((await $.prompt.submit(prompt('ready after automatic reconnect'))).drop).toBeUndefined()
-    fake.expectClean()
-  })
-
   test('incoming activity never executes or starts a turn, and the band shows only status', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
@@ -2160,56 +2094,6 @@ describe('native turns', () => {
     fake.expectClean()
   })
 
-  test('old mixed pending records translate without sequence reset across partial receipts and restart', async ($, on) => {
-    const fake = fakeThreads(on)
-    await $.session.start(sessionStart)
-    await fake.share($)
-    await $.session.end(sessionEnd(fake.session))
-    const records = [
-      { schemaVersion: 1, sequence: 1, update: { sessionUpdate: 'state_update', state: 'idle' } },
-      { schemaVersion: 1, sequence: 2, turn: { action: 'claim' } },
-      { schemaVersion: 1, sequence: 3, claim: 2, update: { sessionUpdate: 'agent_message', messageId: 'first', content: [{ type: 'text', text: 'first' }] } },
-      { schemaVersion: 1, sequence: 4, claim: 2, update: { sessionUpdate: 'agent_message', messageId: 'second', content: [{ type: 'text', text: 'second' }] } },
-      { schemaVersion: 1, sequence: 5, turn: { action: 'end', claim: 2 } },
-      { schemaVersion: 1, sequence: 6, claim: 2, update: { sessionUpdate: 'agent_message', content: [{ type: 'text', text: 'late' }] } },
-    ]
-    await seedPending(fake, records, { claim: 2, endSequence: 5 })
-    const immutable = new Map(fake.files)
-    fake.appendFaults.push({ accept: 3, exitCode: 1, stderr: 'partial content' })
-    await $.session.start(sessionStart)
-    await fake.clock.settle()
-    let saved = fake.store.get(`session:${fake.session}`) as any
-    expect(saved.pending.map((entry: any) => entry.sequence)).toEqual([4, 5, 6])
-    expect(saved.execution).toBeUndefined()
-    expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
-    expect(fake.finishes()).toEqual([])
-    for (const entry of saved.pending)
-      for (const file of entry.files) expect(fake.files.get(file)).toBe(immutable.get(file))
-
-    fake.appendFaults.push({ throwAfterAccept: true })
-    expect(await fake.share($)).toContain('failed')
-    saved = fake.store.get(`session:${fake.session}`) as any
-    expect(saved.pending.map((entry: any) => entry.sequence)).toEqual([4, 5, 6])
-    expect(saved.execution).toBeUndefined()
-    expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3, 4, 5, 6])
-    await $.session.end(sessionEnd(fake.session))
-    await $.session.start(sessionStart)
-    await fake.clock.settle()
-    saved = fake.store.get(`session:${fake.session}`) as any
-    expect(saved).toMatchObject({ next: 7, pending: [] })
-    expect(saved.execution).toBeUndefined()
-    expect(fake.records()[0]).toEqual(records[0])
-    expect(fake.records()[1]).toEqual({
-      schemaVersion: 1, sequence: 2, turnSequence: 2, update: { sessionUpdate: 'state_update', state: 'running' },
-    })
-    expect(fake.records()[2]).toMatchObject({ sequence: 3, turnSequence: 2, update: records[2]!.update })
-    expect(fake.starts()).toEqual([2])
-    expect(fake.finishes()).toEqual([2])
-    expect(fake.records().find((record) => record.sequence === 6)?.turnSequence).toBe(2)
-    expect(fake.entered).toEqual([])
-    fake.expectClean()
-  })
-
   test('a malformed lifecycle receipt leaves its pending start unchanged without blocking entry', async ($, on) => {
     const fake = fakeThreads(on)
     await $.session.start(sessionStart)
@@ -2359,29 +2243,6 @@ describe('native turns', () => {
     fake.expectClean()
   })
 
-  test('queued lifecycle survives disconnect and reconnect without replaying a prompt', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('one')] })
-    // Contract 2 aborts a turn the watcher's loss orphans; offline recording does not.
-    fake.contractRange = { min: 1, max: 2 }
-    await $.session.start(sessionStart)
-    await fake.share($)
-    fake.appendOffline = true
-    expect((await $.prompt.submit(prompt('offline'))).drop).toBeUndefined()
-    await $.turn.start(turnStart('native-offline'))
-    fake.live()!.exit(1)
-    await fake.clock.settle()
-    expect(fake.aborts).toEqual(['native-offline'])
-    // Observing turn.abort does not mean its asynchronous finish is persisted.
-    // The host's aborted completion provides the durable lifecycle boundary.
-    await $.turn.complete(turnComplete('native-offline', 'aborted'))
-    expect((fake.store.get(`session:${fake.session}`) as any).pending).toHaveLength(2)
-    fake.appendOffline = false
-    await fake.clock.advance(60_000)
-    expect(fake.finishes()).toEqual(fake.starts())
-    expect(fake.entered).toHaveLength(1)
-    fake.expectClean()
-  })
-
   test('ownership loss aborts exactly the bound native turn and fences its later output', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
@@ -2493,41 +2354,6 @@ describe('native turns', () => {
     fake.expectClean()
   })
 
-  test('a disconnected observer held in abort cannot corrupt a restarted live observer or its ready gate', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('one')] })
-    // Contract 2 aborts the orphaned turn; offline recording leaves it running.
-    fake.contractRange = { min: 1, max: 2 }
-    await $.session.start(sessionStart)
-    await fake.share($)
-    await $.prompt.submit(prompt('owned'))
-    await $.turn.start(turnStart('native-held-abort', 'owned'))
-    let release!: () => void
-    fake.holdAbort = new Promise<void>((resolve) => { release = resolve })
-    fake.live()!.exit(1)
-    await fake.clock.settle()
-    expect(fake.aborts).toEqual(['native-held-abort'])
-    // The old abort is still held, but completion and a new observer can proceed.
-    fake.holdAbort = undefined
-    await $.turn.complete(turnComplete('native-held-abort', 'aborted'))
-    await $.session.end(sessionEnd(fake.session))
-    fake.server.items.set('fresh', remoteItem('New observer live snapshot', { id: 'fresh' }))
-    await $.session.start(sessionStart)
-    await fake.clock.settle()
-    await redraw($)
-    const live = fake.live()!
-    // A press handle is new with every draw; the band is otherwise the same.
-    const drawnBand = async () => JSON.stringify(await $.ui.render(abovePrompt)).replace(/"handle":\d+/g, '')
-    const band = await drawnBand()
-    expect(band).toContain(LIVE)
-    release()
-    await fake.clock.settle()
-    await redraw($)
-    expect(await drawnBand()).toBe(band)
-    expect((await $.prompt.submit(prompt('new observer still ready'))).drop).toBeUndefined()
-    expect(fake.live()).toBe(live)
-    fake.expectClean()
-  })
-
   test('an observer loss queued across session end cannot write or abort the restarted execution', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
@@ -2634,19 +2460,19 @@ describe('the status band', () => {
   test('child updates preserve siblings and reconnect replaces the inventory while the parent is idle', async ($, on) => {
     const fake = fakeThreads(on)
     fake.server.children = [
-      { thread_id: 'child-one', kind: 'subagent', name: 'Scout', status: 'queued' },
-      { thread_id: 'sibling', kind: 'subthread', name: 'Sibling', status: 'inactive' },
+      { thread_id: 'child-one', reference: 'thread#s=child-one', kind: 'subagent', name: 'Scout', status: 'queued' },
+      { thread_id: 'sibling', reference: 'thread#s=sibling', kind: 'subthread', name: 'Sibling', status: 'inactive' },
     ]
     await $.session.start(sessionStart)
     await fake.share($)
     await fake.clock.settle()
     expect(await drawn($)).toContain('queued')
-    fake.child({ thread_id: 'child-one', kind: 'subagent', name: 'Scout', status: 'running' })
+    fake.child({ thread_id: 'child-one', reference: 'thread#s=child-one', kind: 'subagent', name: 'Scout', status: 'running' })
     await fake.clock.settle()
     expect(await drawn($)).toContain('running')
     expect(await drawn($)).toContain('1 inactive')
     expect(await drawn($)).not.toContain('queued')
-    fake.child({ thread_id: 'new-child', kind: 'future_kind', name: 'New', status: 'running' })
+    fake.child({ thread_id: 'new-child', reference: 'thread#s=new-child', kind: 'future_kind', name: 'New', status: 'running' })
     await fake.clock.settle()
     expect(await drawn($)).toContain('+1 running')
     fake.removeChild('child-one')
@@ -2659,7 +2485,7 @@ describe('the status band', () => {
     expect(await drawn($)).toContain('unknown')
     let releaseChildren!: () => void
     fake.holdChildren = new Promise<void>((resolve) => { releaseChildren = resolve })
-    fake.server.children = [{ thread_id: 'child-two', kind: 'subthread', name: 'Review', status: 'failed' }]
+    fake.server.children = [{ thread_id: 'child-two', reference: 'thread#s=child-two', kind: 'subthread', name: 'Review', status: 'failed' }]
     await fake.clock.advance(1000)
     // Readiness clears the previous connection's inventory even when discovery is delayed.
     expect(await drawn($)).not.toContain('New')

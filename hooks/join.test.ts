@@ -6,6 +6,12 @@ import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionL
 
 tier('user')
 
+/**
+ * A redraw, which is the hook context the plugin answers its own command in: a remote message's
+ * row only reaches Claude when the host draws a site again.
+ */
+const redraw = async ($: Engine) => JSON.stringify(await $.ui.render(abovePrompt))
+
 /** Keeps a clock wait held, so stepping the mock clock does not wait out a settle budget. */
 const test = testsWithHeldClockWait(kitTest)
 
@@ -81,7 +87,6 @@ describe('joining', () => {
 
   for (const surface of ['terminal'] as const) test(`${surface} joins in a fresh session and separate exact mount without exporting, attaching, publishing, or executing`, async ($, on) => {
     const fake = sharedThread(on, $)
-    fake.contractRange = { min: 1, max: 3 }
     fake.cliMissing = true
     fake.authReplies = [
       { status: 'signed_out' },
@@ -165,7 +170,6 @@ describe('joining', () => {
 
   test("the session started in the thread's folder joins before its opening line, which becomes a one-word turn the thread never records", async ($, on) => {
     const fake = desktopTab(on, $)
-    fake.contractRange = { min: 1, max: 3 }
     const offer = await offerFromDesktopTab($, fake)
     await startInThreadFolder($, fake, offer.folder)
     // Claude delivers the first prompt once session.start returns, so the join is done by then.
@@ -283,7 +287,6 @@ describe('joining', () => {
 
   test('resume mounts again, moves Claude from its launch directory, and records only new rows', async ($, on) => {
     const fake = sharedThread(on, $)
-    fake.contractRange = { min: 1, max: 3 }
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${fake.shareId}` })
     await finishJoin(fake)
@@ -393,7 +396,6 @@ describe('joining', () => {
 
   test('worktrees added and removed live update the mounts, tell Claude and the person, and move Claude to the thread folder once', async ($, on) => {
     const fake = sharedThread(on, $)
-    fake.contractRange = { min: 1, max: 3 }
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
     await finishJoin(fake)
@@ -574,6 +576,78 @@ describe('joining', () => {
     expect(fake.watches).toEqual([])
     expect(fake.records()).toEqual([])
     await $.session.end(sessionEnd(fake.session))
+  })
+
+  // A joined session writes into someone else's thread with server-confirmed delivery, so losing its
+  // watcher stops the turn it owns; an automatic or shared session records offline instead.
+  test('malformed watch output surfaces failure and reconnects', async ($, on) => {
+    const fake = sharedThread(on, $)
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    fake.live()!.write('{"type":"item","item":{"id":""}}\n')
+    await fake.clock.settle()
+    expect(fake.logs.some((log) => log.startsWith('Connection interrupted'))).toBe(true)
+    expect((await $.prompt.submit(prompt('invalid'))).drop).toBeDefined()
+    await fake.clock.advance(1000)
+    expect((await $.prompt.submit(prompt('ready after automatic reconnect'))).drop).toBeUndefined()
+    fake.expectClean()
+  })
+
+  test('queued lifecycle survives disconnect and reconnect without replaying a prompt', async ($, on) => {
+    const fake = sharedThread(on, $)
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    fake.appendOffline = true
+    expect((await $.prompt.submit(prompt('offline'))).drop).toBeUndefined()
+    await $.turn.start(turnStart('native-offline'))
+    fake.live()!.exit(1)
+    await fake.clock.settle()
+    expect(fake.aborts).toEqual(['native-offline'])
+    // Observing turn.abort does not mean its asynchronous finish is persisted.
+    // The host's aborted completion provides the durable lifecycle boundary.
+    await $.turn.complete(turnComplete('native-offline', 'aborted'))
+    expect((fake.store.get(`session:${fake.session}`) as any).pending).toHaveLength(2)
+    fake.appendOffline = false
+    await fake.clock.advance(60_000)
+    expect(fake.finishes()).toEqual(fake.starts())
+    expect(fake.entered).toHaveLength(1)
+    fake.expectClean()
+  })
+
+  test('a disconnected observer held in abort cannot corrupt a restarted live observer or its ready gate', async ($, on) => {
+    const fake = sharedThread(on, $)
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    await $.prompt.submit(prompt('owned'))
+    await $.turn.start(turnStart('native-held-abort', 'owned'))
+    let release!: () => void
+    fake.holdAbort = new Promise<void>((resolve) => { release = resolve })
+    fake.live()!.exit(1)
+    await fake.clock.settle()
+    expect(fake.aborts).toEqual(['native-held-abort'])
+    // The old abort is still held, but completion and a new observer can proceed.
+    fake.holdAbort = undefined
+    await $.turn.complete(turnComplete('native-held-abort', 'aborted'))
+    await $.session.end(sessionEnd(fake.session))
+    fake.server.items.set('fresh', remoteItem('New observer live snapshot', { id: 'fresh' }))
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    await redraw($)
+    const live = fake.live()!
+    // A press handle is new with every draw; the band is otherwise the same.
+    const drawnBand = async () => JSON.stringify(await $.ui.render(abovePrompt)).replace(/"handle":\d+/g, '')
+    const band = await drawnBand()
+    expect(band).toContain(LIVE)
+    release()
+    await fake.clock.settle()
+    await redraw($)
+    expect(await drawnBand()).toBe(band)
+    expect((await $.prompt.submit(prompt('new observer still ready'))).drop).toBeUndefined()
+    expect(fake.live()).toBe(live)
+    fake.expectClean()
   })
 
   test('a joined delivery refusal lifts only after explicit successful same-thread join verification', { timeoutMs: 15_000 }, async ($, on) => {

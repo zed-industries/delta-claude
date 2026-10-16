@@ -844,8 +844,6 @@ export function fakeThreads(on: On, options: {
       const folder = parsed?.options['--folder'] === true
       const joining = parsed?.options['--join'] === true
       fake.mountRequests.push({ owner, folder, join: joining })
-      if (joining && contractMax() < 3)
-        fake.violations.push('join-intent flag sent to an older CLI')
       if (!matchesCommand(e.argv, ['thread', 'mount', threadLocator(parsed?.positionals[2])],
         { '--owner': ownerOf(owner), ...folder ? { '--folder': true } : {}, ...joining ? { '--join': true } : {} }))
         fake.violations.push(`unexpected mount arguments: ${e.argv.join(' ')}`)
@@ -931,11 +929,6 @@ export function fakeThreads(on: On, options: {
     return fixture.url.replace(fixture.share_id, fake.shareId)
   }
 
-  /** The newest recording contract this fake CLI speaks, from the test's override or the fixture. */
-  function contractMax(): number {
-    return fake.contractRange?.max ?? (cliFixture('contract').max as number)
-  }
-
   /** The session owns its mounts; a Desktop hand-off mounts under an owner of its own. */
   function ownerOf(owner: string) {
     return owner.startsWith('desktop-') ? owner : fake.session
@@ -1015,12 +1008,6 @@ export function fakeThreads(on: On, options: {
       if (fault?.accept !== undefined && index >= fault.accept) break
       let envelope: Envelope
       try { envelope = JSON.parse(line) } catch { failure = 'malformed JSONL'; break }
-      // A CLI whose contract predates titles refuses them, as Delta refuses an unsupported update.
-      if (envelope.update?.sessionUpdate === 'session_info_update' && contractMax() < 2) {
-        fake.violations.push(`a title sent to contract ${contractMax()}`)
-        failure = 'unsupported update'
-        break
-      }
       const existing = fake.server.records.get(envelope.sequence)
       let ack: Record<string, any>
       if (existing) {

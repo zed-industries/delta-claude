@@ -212,10 +212,11 @@ describe('setup wizard', () => {
     expect(() => inviteResultsFrom({ operation: 'listed', organizations: [] })).toThrow()
   })
 
-  test('an automatic mode needs a CLI that records offline', async () => {
-    const h = harness({ answers: ['Organization sharing'], contractMax: 2 })
+  test('a Delta this plugin cannot record against stops setup before any question', async () => {
+    const h = harness({ answers: ['Organization sharing'], contractMax: 3 })
     const outcome = await runSetupWizard(h.env, h.interaction)
-    expect(outcome.status).toBe('needs-update')
+    expect(outcome).toMatchObject({ status: 'failed', text: expect.stringContaining('Update Delta') })
+    expect(h.asks).toEqual([])
     expect(h.writes).toEqual([])
   })
 

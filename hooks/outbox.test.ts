@@ -1,5 +1,5 @@
 import { describe, expect, test, tier } from 'claude-code/testing'
-import { acknowledgedOutboxFiles, acknowledgedPrefix, appendOutboxRecord, outboxRemoval } from './outbox'
+import { acknowledgedOutboxFiles, acknowledgedPrefix, outboxRemoval, pendingRecordTurn } from './outbox'
 import { cliFixture } from './cli-fixtures'
 
 tier('user')
@@ -36,35 +36,18 @@ describe('outbox', () => {
       thread, [{ sequence: 1, turnSequence: 1 }])).toEqual({ count: 1, fenced: [] })
   })
 
-  test('legacy associated state remains historical; explicit controls and content retain their sequences', () => {
-    const translated = (record: Record<string, unknown>) =>
-      JSON.parse(appendOutboxRecord(JSON.stringify(record) + '\n', record.sequence as number).line)
-    expect(translated({ schemaVersion: 1, sequence: 1, turn: { action: 'claim' } })).toEqual({
-      schemaVersion: 1, sequence: 1, turnSequence: 1, update: { sessionUpdate: 'state_update', state: 'running' },
-    })
-    for (const state of ['running', 'idle']) {
-      const update = { sessionUpdate: 'state_update', state }
-      expect(translated({ schemaVersion: 1, sequence: 2, claim: 1, update })).toEqual({ schemaVersion: 1, sequence: 2, update })
-      const ordinary = { schemaVersion: 1, sequence: 2, update }
-      expect(translated(ordinary)).toEqual(ordinary)
-    }
+  test('a pending record is sent as written, naming its turn, and a malformed one fails closed', () => {
     const update = { sessionUpdate: 'agent_message', content: [{ type: 'text', text: 'still running' }] }
-    expect(translated({ schemaVersion: 1, sequence: 4, claim: 1, update })).toEqual({
-      schemaVersion: 1, sequence: 4, turnSequence: 1, update,
-    })
-  })
-
-  test('malformed saved controls fail closed without changing their immutable representation', () => {
-    for (const patch of [
-      { schemaVersion: 2 }, { sequence: 9 }, { update: { sessionUpdate: 'state_update', state: 'idle' } },
-      { claim: 1 }, { turn: { action: 'claim', claim: 1 } }, { turn: { action: 'unknown' } },
-      { turn: { action: 'end', claim: 0 } }, { turn: { action: 'end', claim: 1 } },
-      '{"schemaVersion":1,"sequence":1,"turn":{"action":"end","action":"claim"}}',
-      '{"schemaVersion":1,"sequence":99,"sequence":1,"turn":{"action":"claim"}}',
-    ]) {
-      const line = (typeof patch === 'string' ? patch : JSON.stringify({ schemaVersion: 1, sequence: 1, turn: { action: 'claim' }, ...patch })) + '\n'
-      expect(() => appendOutboxRecord(line, 1)).toThrow()
-    }
+    const line = (record: Record<string, unknown>) => JSON.stringify(record) + '\n'
+    expect(pendingRecordTurn(line({ schemaVersion: 1, sequence: 4, turnSequence: 1, update }), 4)).toBe(1)
+    expect(pendingRecordTurn(line({ schemaVersion: 1, sequence: 2, update }), 2)).toBeUndefined()
+    // Only a turn's start, a running state update, may name its own sequence.
+    expect(pendingRecordTurn(line({ schemaVersion: 1, sequence: 3, turnSequence: 3, update: { sessionUpdate: 'state_update', state: 'running' } }), 3)).toBe(3)
+    for (const bad of [
+      line({ schemaVersion: 2, sequence: 1, update }), line({ schemaVersion: 1, sequence: 9, update }),
+      line({ schemaVersion: 1, sequence: 1, turnSequence: 1, update }), line({ schemaVersion: 1, sequence: 1, claim: 1, update }),
+      '{"schemaVersion":1,"sequence":99,"sequence":1,"update":{"sessionUpdate":"agent_message"}}\n',
+    ]) expect(() => pendingRecordTurn(bad, 1)).toThrow()
   })
 
   test('deletes only known record filenames below the durable pending frontier', () => {

@@ -1,7 +1,7 @@
 import type { ApiMessage, EngineInterface, On, RenderSurface, TextProps, Timer } from 'claude-code'
 import { capturedMessage, isOmittedTool, messageUpdates, resultUpdate, toolInfo, type Update } from './content'
 import { ToolRecords } from './tool-records'
-import { acknowledgedOutboxFiles, acknowledgedPrefix, appendBatch, appendOutboxRecord, outboxChunks, outboxRemoval } from './outbox'
+import { acknowledgedOutboxFiles, acknowledgedPrefix, appendBatch, outboxChunks, outboxRemoval, pendingRecordTurn } from './outbox'
 import { readCommandStream } from './command-reader'
 import { deliveryFailure, deliveryRetryDelay } from './delivery-policy'
 import { snapshotMessages } from './snapshot'
@@ -14,8 +14,8 @@ import { pathKey, samePath } from './paths'
 import { PresenceTracker } from './presence'
 import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
-  JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
-  validateJoinedMounts, parseThreadFork, validateThreadFrontier, validateThreadCheckout, OFFLINE_CONTRACT_VERSION, PLUGIN_CONTRACT_VERSION, TITLE_CONTRACT_VERSION, JOIN_INTENT_CONTRACT_VERSION,
+  ContractRefusalError, JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
+  validateJoinedMounts, parseThreadFork, validateThreadFrontier, validateThreadCheckout,
   type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadStatus, type ThreadTurn, type ThreadUpload, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
 import {
@@ -153,20 +153,19 @@ let sharing: ShareRequest | undefined
 /** A Keep or Discard the band started, so its two controls cannot both run at once. */
 let resolving = false
 /**
- * Sessions whose CLI build already answered a compatible recording contract, each with the range it
- * reported so the negotiated version and its offline capability are both known; a refusal is never
- * remembered.
+ * The contract version negotiated with each session's CLI build, once it answered a range this plugin
+ * speaks; a refusal is never remembered. A capability newer than `PLUGIN_CONTRACT_MIN` is gated on it.
  */
 const contractVerified = new Map<string, number>()
 /**
- * Whether this session records offline, on a CLI that speaks the contract where
- * `append --acknowledge local` answers without the server. An automatic or
- * shared session does: it writes to its own thread, and Delta's background uploader pushes what it
- * acknowledged locally. A joined session writes into someone else's thread, so it keeps
- * server-confirmed delivery and holds Claude while Delta is unreachable.
+ * Whether this session records offline, with `append --acknowledge local` answering without the
+ * server. An automatic or shared session does once its CLI is verified: it writes to its own thread,
+ * and Delta's background uploader pushes what it acknowledged locally. A joined session writes into
+ * someone else's thread, so it keeps server-confirmed delivery and holds Claude while Delta is
+ * unreachable.
  */
 function recordsOffline(session: string, binding: Binding | undefined): boolean {
-  return !!binding && !binding.joined && (contractVerified.get(session) ?? 0) >= OFFLINE_CONTRACT_VERSION
+  return !!binding && !binding.joined && contractVerified.has(session)
 }
 /** A read of what a transcript gained gives up after this long; the next turn's end reads it again. */
 const TITLE_TIMEOUT_MS = 10_000
@@ -1269,7 +1268,7 @@ async function requireContract($: Runtime, session: string) {
   if (contractVerified.has(session)) return
   const range = await readThreadContract($)
   const refusal = contractRefusal(range)
-  if (refusal) throw new Error(refusal)
+  if (refusal) throw new ContractRefusalError(refusal)
   contractVerified.set(session, contractVersion(range!))
 }
 
@@ -1413,9 +1412,7 @@ async function save($: Runtime, value: Binding, isCurrent = () => true) {
 }
 
 async function load($: Runtime, session: string): Promise<Binding> {
-  const previous = await $.store.get(key(session)) as (Binding & {
-    lastClaim?: number; execution?: Execution & { claim?: number }
-  }) | undefined
+  const previous = await $.store.get(key(session)) as Binding | undefined
   if (!previous || previous.session !== session) return { session, snapshot: false, next: 1, pending: [] }
   return restoreBinding(previous)
 }
@@ -1616,7 +1613,8 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
       const turnSequences: (number | undefined)[] = []
       let collected = { input: '', bytes: 0, count: 0 }
       for (const entry of binding.pending) {
-        const { line, turnSequence } = appendOutboxRecord(await readRecord($, entry), entry.sequence)
+        const line = await readRecord($, entry)
+        const turnSequence = pendingRecordTurn(line, entry.sequence)
         const next = appendBatch(collected, line)
         if (!next) break
         collected = next
@@ -1901,15 +1899,12 @@ function scheduleSendRetry($: Runtime, session: string, retryAfterMs?: number) {
 
 /**
  * Record the session's title for its thread when it changed since the last one recorded. Only a
- * shared session names its thread; a joined session takes part in someone else's. A CLI whose
- * contract predates titles would refuse the record and pause sharing, so it is never sent one.
- * Nothing here can fail a turn or sharing: a title that cannot be read or staged is skipped, and
+ * shared session names its thread; a joined session takes part in someone else's. Nothing here can fail a turn or sharing: a title that cannot be read or staged is skipped, and
  * the next turn's end tries again.
  */
 async function recordTitle($: Runtime, session: string, transcript: string) {
   const binding = stateFor(session).binding
   if (!binding?.snapshot || binding.joined || !binding.thread) return
-  if ((contractVerified.get(session) ?? 0) < TITLE_CONTRACT_VERSION) return
   try {
     const title = await readTitle($, session, transcript)
     if (title === undefined || title === stateFor(session).binding?.title) return
@@ -2246,8 +2241,8 @@ async function join($: Runtime, request: JoinRequest) {
     // Refuse a CLI this plugin cannot record against before any transition, mount, or clear.
     await resolveCli($, true)
     await requireContract($, request.session)
-    // `/clear` ends the old session and removes its cached contract before the fresh session mounts.
-    request.contractVersion = contractVerified.get(request.session) ?? PLUGIN_CONTRACT_VERSION
+    // `/clear` ends the old session and removes its negotiated version before the fresh session mounts.
+    request.contractVersion = contractVerified.get(request.session)
     const check = async () => {
       await assertJoinSession($, request.session, request)
       if (await $.session.cwd() !== request.cwd)
@@ -2398,8 +2393,9 @@ async function requireJoinCommands($: Runtime, names: string[]) {
 
 /** Complete only the saved fresh session's transition, never clear again on retry. */
 async function completeJoin($: Runtime, session: string, plan: JoinPlan, request: JoinRequest) {
-  // This session runs against the same CLI build `join` already verified for this process.
-  contractVerified.set(session, request.contractVersion ?? PLUGIN_CONTRACT_VERSION)
+  // This session runs against the same CLI build `join` already verified for this process; `/clear`
+  // removed the old session's verification before this fresh one started.
+  contractVerified.set(session, request.contractVersion!)
   const check = () => assertJoinSession($, session, request)
   await check()
   setProgress($, "Mounting the thread's worktrees…", 'active')
@@ -2458,8 +2454,7 @@ async function mountThread(
     'thread', 'mount', binding.locator ?? binding.thread!, '--owner', owner,
     ...options.folder ? ['--folder'] : [],
   ]
-  const join = !!options.reportJoin &&
-    (contractVerified.get(binding.session) ?? PLUGIN_CONTRACT_VERSION) >= JOIN_INTENT_CONTRACT_VERSION
+  const join = !!options.reportJoin
   if (join) args.push('--join')
   // A first mount can materialize large checkouts, which the CLI waits for.
   return parseThreadMount(await readCommand($, args, 'thread mount', new AbortController().signal, MOUNT_TIMEOUT_MS,
@@ -2560,7 +2555,7 @@ async function claimHandoff($: Runtime, session: string, handoff: Handoff) {
   try {
     setProgress($, 'Joining the shared thread…', 'active')
     await requireContract($, session)
-    request.contractVersion = contractVerified.get(session) ?? PLUGIN_CONTRACT_VERSION
+    request.contractVersion = contractVerified.get(session)
     await takeOverHandoff($, request, handoff)
   } catch (error) {
     if (request.cancelled) return
@@ -3120,16 +3115,10 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
     // this account cannot record to is reported before anything is staged.
     const misconfiguration = existing.snapshot ? undefined : policyMisconfiguration($, upload.organization)
     try {
-      // Refuse a CLI that cannot record offline before persisting anything, so an incompatible build
-      // leaves the session manual rather than holding a half-initialized automatic binding.
+      // Refuse an incompatible CLI before persisting anything, so it leaves the session manual rather
+      // than holding a half-initialized automatic binding.
       await requireContract($, session)
       if (!ownsActivation()) return
-      const version = contractVerified.get(session) ?? PLUGIN_CONTRACT_VERSION
-      if (version < OFFLINE_CONTRACT_VERSION) {
-        // Auto mode cannot record without a CLI that speaks the offline contract; say so once.
-        await notifyOnce($, 'Update Delta to sync sessions automatically; this version is too old. Until then, only sessions you share with /delta-share sync.')
-        return
-      }
       const refusal = await misconfiguration
       if (!ownsActivation()) return
       if (refusal) {
@@ -3223,6 +3212,8 @@ async function policyMisconfiguration($: Runtime, organization: string): Promise
 function activationRefusal(error: unknown, organization: string): ActivationRefusal {
   if (error instanceof DeltaCommandError && error.reason === 'organization_not_member') return notMemberRefusal(organization)
   if (error instanceof DeltaCommandError && error.code === 'authentication_required') return SIGNED_OUT_REFUSAL
+  if (error instanceof ContractRefusalError)
+    return { band: `Not syncing: ${error.message}`, transcript: `This session isn't syncing: ${error.message}.` }
   const advice = error instanceof DeltaCommandError
     ? permanentFailureAdvice(error.code, true, error.reason) : 'Fix the cause, then start a new session'
   return {

@@ -194,13 +194,8 @@ succeeds, and a failure shows in the band and retries. The watcher inspection ac
 intent-only `local_only` thread for these sessions, because the upload intent is what
 makes the checkout recorded.
 
-A CLI whose recording contract tops out below 3 cannot record offline, so auto
-mode is unavailable: the plugin says once, in the band and transcript, that Delta
-must be updated for automatic uploads. Manual sharing and joins keep working with
-contract 1–2 behavior.
-
 A session this plugin created itself — auto-activated or an explicit
-`/delta share` — records offline when its CLI speaks contract 3. It appends with
+`/delta share` — records offline. It appends with
 `--acknowledge local`, so `prompt.submit` and
 `turn.start` do not drop a prompt or abort a Claude turn merely because the
 watcher is not live or the server is unreachable. Retryable failures keep records
@@ -400,12 +395,15 @@ delta --json thread discard THREAD --force
 ```
 
 `thread contract` reports the recording-output contract versions the CLI build speaks
-(`{"operation":"contract","min":1,"max":3}`), answered locally without starting delta-app; the
-plugin calls it once per session before its first recording command. If the plugin's contract version
-is outside that range, the plugin refuses to share, join, or resume and says to update Delta (the CLI
-is older than the plugin) or the plugin (the CLI is newer); a CLI that predates the subcommand is
-treated as an older Delta. The plugin speaks contract versions 1–3; 3 is the first that records
-offline (see Automatic recording).
+(`{"operation":"contract","min":1,"max":4}`), answered locally without starting delta-app; the
+plugin calls it once per session before its first recording command, and `/delta setup` before its
+first question. The plugin speaks versions `PLUGIN_CONTRACT_MIN` through `PLUGIN_CONTRACT_MAX`,
+currently 4 through 4: nothing older is supported, because neither the plugin nor the CLI has
+shipped. When the ranges don't overlap, the plugin refuses to set up, share, join, or resume and says
+to update Delta (the CLI is older) or the plugin (the CLI is newer); a CLI that predates the
+subcommand is treated as an older Delta. The plugin remembers the newest version both speak for each
+session, so a capability a later version adds can be gated on it until `PLUGIN_CONTRACT_MIN` reaches
+that version.
 
 `thread create` records a durable upload intent when given `--organization` and
 `--visibility private|organization`, without waiting for the network. It is idempotent by external
@@ -421,18 +419,11 @@ retryable error, which the plugin's envelope-driven retry handles.
 `org list` returns `{"operation":"listed","organizations":[{"id","name","current"}]}` and carries
 the typed error envelope.
 
-Contract 3 adds `thread mount --join` for an explicit join attempt. The plugin
-passes it only while completing a requested `/delta join`, not while restoring a
-session or refreshing worktrees in the background. The verified capability is
-kept across `/clear`. Older compatible CLI versions receive no new flag. New
-apps emit no join telemetry for mounts without it. This prevents background
-maintenance from adding user activity.
+The plugin passes `thread mount --join` only while completing a requested `/delta join`, not while
+restoring a session or refreshing worktrees in the background, so background maintenance adds no
+join telemetry.
 
-Contract 4 adds `thread create --organization --visibility`, `thread append --acknowledge local`,
-and status `visibility` and `upload`; the plugin records offline only on contract 4.
-
-The plugin speaks contract versions 1 through 4. Version 2 adds ACP's `session_info_update` to `append`,
-carrying the session's title, which Delta makes the thread's name in place of "Recorded conversation".
+`append` accepts ACP's `session_info_update`, carrying the session's title, which Delta makes the thread's name in place of "Recorded conversation".
 When a shared session's turn ends, the plugin reads the title from that session's own transcript
 file, whose path the turn's end names: Claude's own `ai-title` row, or a `/rename`'s `custom-title`
 row, which wins. Claude writes a title row when the title is chosen or changed and repeats it as the
@@ -725,10 +716,9 @@ as unknown until the new snapshot arrives. Child status never starts a Claude
 turn or adds a transcript message; newer statuses display as unknown, and newer
 child kinds display as a generic child without interrupting the watch.
 
-Child entries can also carry an opaque `reference` for CLI commands, separate from
-the canonical `thread_id` used to identify the child. The plugin preserves it but
-does not open or execute child conversations. Older CLI builds without this field
-still display child status; the plugin does not invent a locator from a bare ID.
+Child entries carry an opaque `reference` for CLI commands, separate from the
+canonical `thread_id` used to identify the child. The plugin preserves it but
+does not open or execute child conversations.
 
 As the row narrows, parts give way in a fixed order: the copy label shortens, the URL moves
 to a row of its own below (whole, so it stays clickable and easy to select), other

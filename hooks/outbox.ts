@@ -48,46 +48,27 @@ export function appendBatch(
   return { input: batch.input + line, bytes: batch.bytes + bytes, count: batch.count + 1 }
 }
 
-/** Translate private historical envelopes without rewriting their immutable journal files. */
-export function appendOutboxRecord(line: string, sequence: number): { line: string; turnSequence?: number } {
+/**
+ * Check a pending outbox record before sending it, and read the turn it belongs to. Only a turn's
+ * own start, a running state update, may name its own sequence.
+ */
+export function pendingRecordTurn(line: string, sequence: number): number | undefined {
   const record = JSON.parse(line)
   const invalid = () => new Error(`invalid pending record ${sequence}; sharing paused without changing its record`)
-  // Every saved envelope was written with JSON.stringify plus a newline. Requiring
-  // that representation also rejects duplicate keys before translating old controls.
+  // Every saved envelope was written with JSON.stringify plus a newline; requiring that
+  // representation also rejects duplicate keys.
   if (!record || line !== JSON.stringify(record) + '\n' ||
       record.schemaVersion !== 1 || record.sequence !== sequence ||
       !Number.isSafeInteger(sequence) || sequence < 1) throw invalid()
   const keys = Object.keys(record).sort().join()
-  if (Object.hasOwn(record, 'turn')) {
-    const turn = record.turn
-    if (keys !== 'schemaVersion,sequence,turn' || !turn ||
-        (turn.action === 'claim' ? Object.keys(turn).join() !== 'action'
-          : turn.action !== 'end' || Object.keys(turn).sort().join() !== 'action,claim' ||
-            !Number.isSafeInteger(turn.claim) || turn.claim < 1 || turn.claim >= sequence)) throw invalid()
-    const turnSequence = turn.action === 'claim' ? sequence : turn.claim
-    return {
-      line: JSON.stringify({
-        schemaVersion: 1, sequence, turnSequence,
-        update: { sessionUpdate: 'state_update', state: turn.action === 'claim' ? 'running' : 'idle' },
-      }) + '\n',
-      turnSequence,
-    }
-  }
-  if (!['schemaVersion,sequence,update', 'claim,schemaVersion,sequence,update', 'schemaVersion,sequence,turnSequence,update'].includes(keys) ||
+  if (!['schemaVersion,sequence,update', 'schemaVersion,sequence,turnSequence,update'].includes(keys) ||
       !record.update || Array.isArray(record.update) || typeof record.update.sessionUpdate !== 'string') throw invalid()
-  const legacy = Object.hasOwn(record, 'claim')
-  const turnSequence = legacy ? record.claim : record.turnSequence
-  if ((legacy || Object.hasOwn(record, 'turnSequence')) &&
+  const turnSequence = record.turnSequence
+  if (turnSequence !== undefined &&
       (!Number.isSafeInteger(turnSequence) || turnSequence < 1 ||
         (turnSequence >= sequence && !(turnSequence === sequence &&
-          record.update.sessionUpdate === 'state_update' && record.update.state === 'running' && !legacy)))) throw invalid()
-  if (!legacy) return { line, turnSequence }
-  const { claim, ...content } = record
-  // Old state updates were passive even when associated with output. Only old
-  // explicit controls may become lifecycle; an old idle must not finish a turn.
-  if (record.update.sessionUpdate === 'state_update')
-    return { line: JSON.stringify(content) + '\n' }
-  return { line: JSON.stringify({ ...content, turnSequence: claim }) + '\n', turnSequence }
+          record.update.sessionUpdate === 'state_update' && record.update.state === 'running')))) throw invalid()
+  return turnSequence
 }
 
 /** The durable pending prefix is the authority for which record files can be removed. */

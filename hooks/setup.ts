@@ -5,7 +5,7 @@
 //! `register.tsx` supplies the real Claude Code bindings.
 
 import { policyPath, readProjectPolicy, recordsAutomatically, serializeProjectPolicy, type PolicyFile, type ThreadMode } from './project-policy'
-import { OFFLINE_CONTRACT_VERSION, commandErrorFromEnvelope, type ThreadContract } from './thread-commands'
+import { commandErrorFromEnvelope, contractRefusal, type ThreadContract } from './thread-commands'
 
 /** A question could not be shown: this Claude has no interactive question API. */
 export class InteractionUnavailable extends Error {}
@@ -127,7 +127,7 @@ export function emailsIn(text: string): string[] {
 
 /** What the setup wizard did, for the command's answer and its tests. */
 export type SetupOutcome = {
-  status: 'wrote' | 'cancelled' | 'unavailable' | 'no-checkout' | 'needs-update' | 'failed'
+  status: 'wrote' | 'cancelled' | 'unavailable' | 'no-checkout' | 'failed'
   text: string
 }
 
@@ -184,9 +184,6 @@ const UNAVAILABLE_NOTICE =
 /** What `/delta setup` answers a session with no interactive surface: it can never ask. */
 export const HEADLESS_REFUSAL =
   '/delta-setup needs an interactive Claude Code terminal or Desktop Code tab. Print mode and SDK sessions cannot answer its questions. Edit .delta/settings.json at the checkout root by hand instead.'
-const UPDATE_NOTICE =
-  'Syncing sessions automatically needs a newer Delta. Update Delta, then run /delta-setup again. ' +
-  '/delta-share and /delta-join keep working.'
 
 /** An organization's option label: its name, plus its id when another organization shares the name. */
 function organizationLabel(organization: Organization, organizations: readonly Organization[]): string {
@@ -243,6 +240,10 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     if (await interaction.ask(`Replace the unreadable Delta settings at ${path}?`, { options: ['Replace it', 'Cancel'], header: HEADER }) !== 'Replace it') return CANCELLED
   }
 
+  // A Delta this plugin cannot record against would make every choice below fail later.
+  const refusal = contractRefusal(await env.contract())
+  if (refusal) return { status: 'failed', text: `/delta-setup: ${refusal}, then run /delta-setup again.` }
+
   let organizations: Organization[]
   try { organizations = await env.organizations() }
   catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta organizations: ${String(error)}` } }
@@ -284,7 +285,6 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   if ('status' in chosen) return chosen
   const team = chosen
 
-  const contract = await env.contract()
   const labels = modeLabels(team, isPersonalOrganization(team, login))
   const answer = await interaction.ask(
     `${currentPolicy(file.policy)} When Delta syncs a Claude Code session, it stores the conversation and ` +
@@ -299,10 +299,6 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   let organization: string | undefined
   let organizationName: string | undefined
   if (mode !== 'manual') {
-    if ((contract?.max ?? 0) < OFFLINE_CONTRACT_VERSION) {
-      await interaction.log(UPDATE_NOTICE, 'transcript')
-      return { status: 'needs-update', text: UPDATE_NOTICE }
-    }
     organization = team.id
     organizationName = team.name
   }
