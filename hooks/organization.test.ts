@@ -11,6 +11,7 @@ test('organization commands return CLI output on a headless host using the selec
     ['org list', '* org_one\tFirst team\n  org_two\tSecond team\n'],
     ['org current', 'org_one\tFirst team\n'],
     ['org switch org_two', 'org_two\tSecond team\n'],
+    ['org invite ada@example.com, bo@example.com', 'Invited ada@example.com and bo@example.com\n'],
   ] as const) {
     fake.organizationResult.stdout = stdout
     expect(await $.command.run({ ...shareCommand, args })).toEqual({
@@ -21,6 +22,7 @@ test('organization commands return CLI output on a headless host using the selec
     ['/selected/delta', 'org', 'list'],
     ['/selected/delta', 'org', 'current'],
     ['/selected/delta', 'org', 'switch', '--', 'org_two'],
+    ['/selected/delta', 'org', 'invite', '--', 'ada@example.com', 'bo@example.com'],
   ])
   expect(fake.exports).toBe(0)
   expect(fake.authCalls).toEqual([])
@@ -34,6 +36,8 @@ test('invalid organization syntax and CLI failures are returned without sharing'
     const result = await $.command.run({ ...shareCommand, args })
     expect(result.text).toContain('/delta org switch <ID>')
   }
+  // An invite with no address runs nothing and says how to name one.
+  expect((await $.command.run({ ...shareCommand, args: 'org invite nobody' })).text).toContain('/delta-org invite <email>')
   expect(fake.commands).toEqual([])
   fake.organizationResult.exitCode = 1
   fake.organizationResult.stderr = 'organization is not a membership'

@@ -73,7 +73,7 @@ those declarations. Generated files are ignored. The marketplace is
 
 Each `/delta` action is also its own command, so all of them appear in Claude's
 slash-command menu: `/delta-share`, `/delta-join <link>`, `/delta-setup`, and
-`/delta-org list | current | switch <ID>` run exactly what `/delta share`,
+`/delta-org list | current | switch <ID> | invite <email>…` run exactly what `/delta share`,
 `/delta join <link>`, `/delta setup`, and `/delta org …` run. Claude Code plugin
 commands cannot declare subcommands, which is why both forms exist.
 
@@ -141,7 +141,8 @@ sync (recommended, `private`), Organization sharing (`organization`), or Manual
 (`manual`), each labelled with what it syncs and who sees it, lists organization
 names from `delta --json org list` (an account with none is offered to create one
 with `delta org create`, named after the checkout or as typed; a failed creation
-is reported and never retried, since it may have succeeded), previews
+is reported and never retried, since it may have succeeded, and a created one
+offers to invite teammates by email with `delta org invite`), previews
 the destination path and resulting content, and writes only after confirmation.
 It does not commit the file: committing it applies the policy to everyone who
 opens the repository with the plugin. Cancelling or dismissing any step leaves

@@ -725,6 +725,7 @@ describe('setup dialogs and notices', () => {
       const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
       const answer = text.startsWith('Save this setting') ? 'Save it'
         : text.startsWith("You aren't in a Delta organization") ? 'Acme'
+        : text.startsWith('Invite teammates') ? 'Not now'
         : offered.find((label) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
     }

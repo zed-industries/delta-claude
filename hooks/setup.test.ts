@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { InteractionDismissed, InteractionUnavailable, offerOnboarding, runSetupWizard, type Interaction, type SetupEnv } from './setup'
+import { InteractionDismissed, InteractionUnavailable, inviteResultsFrom, offerOnboarding, runSetupWizard, type Interaction, type SetupEnv } from './setup'
 
 /** An environment over an in-memory file, with the questions answered from a queue. */
 function harness(options: {
@@ -13,6 +13,7 @@ function harness(options: {
   shared?: boolean
   failWrite?: boolean
   failCreate?: boolean
+  failInvite?: string
 } = {}) {
   const answers = [...options.answers ?? []]
   const asks: { question: string; options: unknown }[] = []
@@ -21,6 +22,7 @@ function harness(options: {
   const writes: { path: string; text: string }[] = []
   let shares = 0
   const creates: string[] = []
+  const invites: { organization: string; emails: string[] }[] = []
   const interaction: Interaction = {
     async ask(question, askOptions) {
       // Claude's `$.ui.ask` shows plain-text options only; anything else cannot be drawn.
@@ -48,6 +50,11 @@ function harness(options: {
       if (options.failCreate) throw new Error('network error')
       return { id: `org-${name}`, name, current: false }
     },
+    inviteMembers: async (organization, emails) => {
+      invites.push({ organization, emails })
+      return emails.map((email) => email === options.failInvite
+        ? { email, invited: false as const, message: 'already a member' } : { email, invited: true as const })
+    },
     readFile: async () => file,
     writeFile: async (path, text) => {
       if (options.failWrite) throw new Error('read-only checkout')
@@ -57,7 +64,7 @@ function harness(options: {
     sessionShared: async () => options.shared ?? false,
     shareSession: async () => { shares++; return true },
   }
-  return { env, interaction, asks, logs, writes, creates, current: () => file, shares: () => shares }
+  return { env, interaction, asks, logs, writes, creates, invites, current: () => file, shares: () => shares }
 }
 
 describe('setup wizard', () => {
@@ -105,8 +112,8 @@ describe('setup wizard', () => {
   test('an account with no organization is offered one, named as suggested or as typed', async () => {
     const cases: { answers: string[]; created: string[]; status: string; failCreate?: boolean }[] = [
       // The suggestion is the checkout's folder name.
-      { answers: ['Private sync', 'Create "repo"', 'Save it'], created: ['repo'], status: 'wrote' },
-      { answers: ['Organization sharing', 'Acme Team', 'Save it'], created: ['Acme Team'], status: 'wrote' },
+      { answers: ['Private sync', 'Create "repo"', 'Not now', 'Save it'], created: ['repo'], status: 'wrote' },
+      { answers: ['Organization sharing', 'Acme Team', 'Not now', 'Save it'], created: ['Acme Team'], status: 'wrote' },
       { answers: ['Private sync', 'Cancel'], created: [], status: 'cancelled' },
       // A slash command typed while the dialog was open is not a name.
       { answers: ['Private sync', '/delta-share'], created: [], status: 'cancelled' },
@@ -119,6 +126,32 @@ describe('setup wizard', () => {
       expect({ status: outcome.status, created: h.creates }).toEqual({ status, created })
       if (status === 'wrote') expect(JSON.parse(h.current()!).threads.organization).toBe(`org-${created[0]}`)
     }
+  })
+
+  test('a newly created organization offers to invite teammates by email, and setup continues either way', async () => {
+    const invited = harness({ answers: ['Private sync', 'Acme', 'ada@example.com, bo@example.com nonsense', 'Save it'],
+      organizations: [], failInvite: 'bo@example.com' })
+    expect((await runSetupWizard(invited.env, invited.interaction)).status).toBe('wrote')
+    expect(invited.invites).toEqual([{ organization: 'org-Acme', emails: ['ada@example.com', 'bo@example.com'] }])
+    expect(invited.logs.join('\n')).toContain("Couldn't invite bo@example.com (already a member)")
+    // Text with no address invites nobody and says how to invite later.
+    const none = harness({ answers: ['Private sync', 'Acme', 'later please', 'Save it'], organizations: [] })
+    expect((await runSetupWizard(none.env, none.interaction)).status).toBe('wrote')
+    expect(none.invites).toEqual([])
+    // An existing organization is never offered invitations.
+    const existing = harness({ answers: ['Private sync', 'Save it'] })
+    await runSetupWizard(existing.env, existing.interaction)
+    expect(existing.asks.some((ask) => ask.question.startsWith('Invite teammates'))).toBe(false)
+  })
+
+  test('invitation results decode from the CLI wire format', () => {
+    // `delta --json org invite` output, as `OrganizationResult::Invited` serializes it.
+    expect(inviteResultsFrom({
+      operation: 'invited', organization: { id: 'org-1', name: 'Acme', current: false },
+      results: [{ status: 'invited', email: 'ada@example.com' },
+        { status: 'failed', email: 'bo@example.com', reason: 'already_member', message: 'already a member' }],
+    })).toEqual([{ email: 'ada@example.com', invited: true }, { email: 'bo@example.com', invited: false, message: 'already a member' }])
+    expect(() => inviteResultsFrom({ operation: 'listed', organizations: [] })).toThrow()
   })
 
   test('an automatic mode needs a CLI that records offline', async () => {

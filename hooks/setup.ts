@@ -46,6 +46,8 @@ export type SetupEnv = {
    * lost response the organization may exist anyway.
    */
   createOrganization(name: string): Promise<Organization>
+  /** Invite people by email to an organization; answers which addresses were invited and which failed, and why. */
+  inviteMembers(organization: string, emails: string[]): Promise<InviteResult[]>
   /** Read a policy file, or undefined when it does not exist. */
   readFile(path: string): Promise<string | undefined>
   /** Write a policy file; the wizard does not commit it. */
@@ -75,6 +77,26 @@ export function createdOrganizationFrom(result: any): Organization {
   if (result?.operation !== 'created' || typeof org?.id !== 'string' || !org.id || typeof org.name !== 'string')
     throw new Error('Unexpected organization creation result; use matching CLI and plugin builds')
   return { id: org.id, name: org.name, current: !!org.current }
+}
+
+/** One address from `delta --json org invite`. */
+export type InviteResult = { email: string; invited: true } | { email: string; invited: false; message: string }
+
+/** Validate the parsed body of `delta --json org invite`, keeping the CLI's typed error envelope. */
+export function inviteResultsFrom(result: any): InviteResult[] {
+  const failure = commandErrorFromEnvelope(result?.error)
+  if (failure) throw failure
+  if (result?.operation !== 'invited' || !Array.isArray(result.results) ||
+      !result.results.every((entry: any) => typeof entry?.email === 'string' && ['invited', 'failed'].includes(entry.status)))
+    throw new Error('Unexpected invitation result; use matching CLI and plugin builds')
+  return result.results.map((entry: any): InviteResult => entry.status === 'invited'
+    ? { email: entry.email, invited: true }
+    : { email: entry.email, invited: false, message: String(entry.message ?? entry.reason ?? 'failed') })
+}
+
+/** The email addresses in a typed answer: words separated by commas or spaces that contain an `@`. */
+export function emailsIn(text: string): string[] {
+  return [...new Set(text.split(/[\s,;]+/).filter((word) => /^[^@\s]+@[^@\s]+$/.test(word)))]
 }
 
 /** What the setup wizard did, for the command's answer and its tests. */
@@ -211,6 +233,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
       catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the organization "${name}": ${String(error)}. Check /delta-org list before trying again; it may have been created.` } }
       await interaction.log(`Created the Delta organization "${created.name}".`, 'transcript')
       organizations = [created]
+      await offerInvites(env, interaction, created)
     }
     const current = organizations.find((org) => org.current) ?? organizations[0]!
     // Offer the current organization and up to three others; any organization is still reachable by
@@ -250,6 +273,41 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
       ? `${saved} Syncing this session now.`
       : `${saved} This session couldn't start syncing now; use /delta-share once Claude is idle.`,
   }
+}
+
+/**
+ * Offer to invite teammates to an organization setup just created. Nothing here can stop setup: the
+ * organization exists either way, and a skipped or failed invitation can be sent later with
+ * /delta-org invite.
+ */
+async function offerInvites(env: SetupEnv, interaction: Interaction, organization: Organization) {
+  const later = 'Invite later with /delta-org invite'
+  let answer: string
+  try {
+    answer = await interaction.ask(`Invite teammates to ${organization.name}? Type their email addresses, separated by commas.`,
+      { options: ['Not now', later], header: HEADER })
+  } catch (error) {
+    if (error instanceof InteractionDismissed) return
+    throw error
+  }
+  if (answer === 'Not now' || answer === later) return
+  const emails = emailsIn(answer)
+  if (!emails.length) {
+    await interaction.log('No email addresses found, so nobody was invited. Use /delta-org invite <email> to invite teammates later.', 'transcript')
+    return
+  }
+  let results: InviteResult[]
+  try { results = await env.inviteMembers(organization.id, emails) }
+  catch (error) {
+    await interaction.log(`Couldn't send the invitations: ${String(error)}. Use /delta-org invite <email> to try again.`, 'transcript')
+    return
+  }
+  const invited = results.filter((result) => result.invited).map((result) => result.email)
+  const failed = results.flatMap((result) => result.invited ? [] : [`${result.email} (${result.message})`])
+  await interaction.log([
+    invited.length ? `Invited ${invited.join(', ')} to ${organization.name}.` : '',
+    failed.length ? `Couldn't invite ${failed.join(', ')}.` : '',
+  ].filter(Boolean).join(' '), 'transcript')
 }
 
 /** How an onboarding attempt ended, mostly for tests and the debug log. */

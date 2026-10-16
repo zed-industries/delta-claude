@@ -26,7 +26,8 @@ import {
 import { TitleScanner, transcriptRead } from './title'
 import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
 import {
-  HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, offerOnboarding, organizationsFrom, releaseOnboarding, runSetupWizard,
+  HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, emailsIn, inviteResultsFrom, offerOnboarding,
+  organizationsFrom, releaseOnboarding, runSetupWizard,
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
@@ -2907,6 +2908,8 @@ function setupEnv($: Runtime): SetupEnv {
     contract: () => readThreadContract($),
     organizations: () => listOrganizations($),
     createOrganization: (name) => createOrganization($, name),
+    inviteMembers: async (organization, emails) =>
+      inviteResultsFrom(await command($, ['org', 'invite', '--org', organization, '--', ...emails], 'org invite')),
     readFile: async (path) => await $.fs.exists(path) ? await $.fs.read(path) : undefined,
     writeFile: (path, text) => $.fs.write(path, text) as Promise<void>,
     // A joined thread is someone else's shared thread; an organization or unlisted one is already
@@ -3343,12 +3346,18 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
   if (action === 'setup') return { text: await setupCommand($) }
   const locator = /^join\s+(\S+)$/.exec(action)?.[1]
   const organization = /^org\s+(?:(list|current)|(switch)\s+(\S+))$/.exec(action)
-  if (action !== 'share' && !locator && !organization)
-    return { text: 'Usage: /delta share | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID>' }
+  const invite = /^org\s+invite\b\s*(.*)$/.exec(action)?.[1]
+  if (action !== 'share' && !locator && !organization && invite === undefined)
+    return { text: 'Usage: /delta share | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>…' }
   if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
   if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
   if (organization)
     return organizationCommand($, organization[1] ? [organization[1]] : ['switch', '--', organization[3]!])
+  if (invite !== undefined) {
+    const emails = emailsIn(invite)
+    if (!emails.length) return { text: 'Usage: /delta-org invite <email> [<email>…]. Invites people to your current Delta organization.' }
+    return organizationCommand($, ['invite', '--', ...emails])
+  }
   const session = await $.session.id()
   let shareRequest: ShareRequest | undefined
   try {
@@ -3789,7 +3798,7 @@ export function register(on: On) {
     // Claude's menu shows a command's description but not its argument hint, so the description carries the format.
     await $.command.register({ name: 'delta-join', description: 'Delta: join a shared conversation. Needs its link: /delta-join <link>', argumentHint: '<shared-link-or-thread>' })
     await $.command.register({ name: 'delta-setup', description: 'Delta: choose which sessions in this repository sync to DeltaDB' })
-    await $.command.register({ name: 'delta-org', description: 'Delta: manage your organization. /delta-org list, current, or switch <ID>', argumentHint: 'list | current | switch <ID>' })
+    await $.command.register({ name: 'delta-org', description: 'Delta: manage your organization. /delta-org list, current, switch <ID>, or invite <email>', argumentHint: 'list | current | switch <ID> | invite <email>…' })
     const result = await next(e)
     const session = await $.session.id()
     try { await activate($, session) }
@@ -3850,7 +3859,7 @@ export function register(on: On) {
   on('command.run', { command: 'delta-setup' }, async ($, e) => runDeltaCommand($, `setup ${e.args.trim()}`.trim(), 'dedicated_command'))
   on('command.run', { command: 'delta-org' }, async ($, e) => e.args.trim()
     ? runDeltaCommand($, `org ${e.args.trim()}`, 'dedicated_command')
-    : { text: 'Usage: /delta-org list (your organizations), /delta-org current (the selected one), or /delta-org switch <ID>.' })
+    : { text: 'Usage: /delta-org list (your organizations), /delta-org current (the selected one), /delta-org switch <ID>, or /delta-org invite <email>… (invite people to the selected one).' })
 
   on('session.append', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
