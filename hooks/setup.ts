@@ -276,17 +276,15 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   }
 
   const text = serializeProjectPolicy(file.document, mode, organization)
-  await interaction.log(`Delta will save this to ${SETTINGS_FILE}:\n${text}`, 'transcript')
-  if (await interaction.ask(`Save this setting to ${SETTINGS_FILE}?`,
-    { options: ['Save it', 'Cancel'], header: HEADER }) !== 'Save it') return CANCELLED
-
+  // Choosing a mode is the decision; saving it needs no second confirmation, and the answer says what was saved.
   try { await env.writeFile(path, text) }
   catch (error) { return { status: 'failed', text: `Delta could not save ${path}: ${String(error)}` } }
   // The setting is personal, so it stays out of commits, as the Delta app keeps its own `.delta/`
   // files out. A file that is already committed keeps being tracked; excluding it changes nothing.
   if (!await excludeFromGit(env, EXCLUDE_ENTRY))
     await interaction.log(`Delta couldn't keep ${SETTINGS_FILE} out of Git; add it to .gitignore if you don't want to commit it.`, 'transcript')
-  const saved = `Saved to ${SETTINGS_FILE}. New sessions follow it from now on.`
+  const chosen = `${MODE_NAMES[mode]}${organizationName ? ` with ${organizationName}` : ''}`
+  const saved = `Saved ${chosen} to ${SETTINGS_FILE}. New sessions follow it from now on; run /delta-setup to change it.`
   // The setting never applies to the session that saved it. Only Organization sharing offers to sync
   // this one now: sharing it is what that choice asked for, while a share would contradict Private sync
   // (it publishes to the organization) and Manual (sessions are shared by hand).

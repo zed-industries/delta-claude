@@ -704,16 +704,16 @@ describe('setup dialogs and notices', () => {
       const text = question.questions[0].question
       // Choose the private option as the person would, by its offered label.
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith('Save this setting to') ? 'Save it' : offered.find((label: string) => label.startsWith('Private sync'))
+      const answer = offered.find((label: string) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
     }
     await $.session.start(sessionStart)
-    await $.command.run({ ...typedDelta('setup') } as never)
+    const { text } = await $.command.run({ ...typedDelta('setup') } as never)
     expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-1' } })
     // The setting starts with the next session, so the band now says this one isn't syncing.
     expect(await reminderKind($)).toBe('manual')
-    // The person sees exactly what will be written before confirming it.
-    expect(fake.logs.join('\n')).toContain('Delta will save this to .delta/settings.json')
+    // The answer names what was saved.
+    expect(text).toContain('Saved Private sync with Zed to .delta/settings.json')
     fake.expectClean()
   })
 
@@ -723,8 +723,7 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith('Save this setting to') ? 'Save it'
-        : text.startsWith("You aren't in a Delta organization") ? 'Acme'
+      const answer = text.startsWith("You aren't in a Delta organization") ? 'Acme'
         : text.startsWith('Invite teammates') ? 'Not now'
         : offered.find((label) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
@@ -742,7 +741,7 @@ describe('setup dialogs and notices', () => {
       const text = question.questions[0].question
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
       const answer = text.startsWith('Set up Delta syncing') ? 'Set it up'
-        : text.startsWith('Save this setting to') ? 'Save it' : offered.find((label: string) => label.startsWith('Manual'))
+        : offered.find((label: string) => label.startsWith('Manual'))
       return { result: { answers: { [text]: answer } } }
     }
     await startAuto($, fake)

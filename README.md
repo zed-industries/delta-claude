@@ -140,9 +140,9 @@ sync (recommended, `private`), Organization sharing (`organization`), or Manual
 names from `delta --json org list` (an account with none is offered to create one
 with `delta org create`, named after the checkout or as typed; a failed creation
 is reported and never retried, since it may have succeeded, and a created one
-offers to invite teammates by email with `delta org invite`), previews
-the destination path and resulting content, and writes only after confirmation
-("Save this setting to .delta/settings.json?"). Cancelling or dismissing any step leaves
+offers to invite teammates by email with `delta org invite`), then saves the
+choice without a further confirmation and says what it saved ("Saved Private
+sync with Zed to .delta/settings.json"). Cancelling or dismissing any question leaves
 the file untouched. Print and SDK
 sessions get a clear refusal instead. The policy applies to sessions started
 afterwards, so after saving Organization sharing the wizard offers to sync the
