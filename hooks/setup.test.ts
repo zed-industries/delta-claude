@@ -102,11 +102,11 @@ describe('setup wizard', () => {
     for (const answers of [['Private sync', 'Save it'], ['Manual', 'Save it']]) {
       const other = harness({ answers })
       expect((await runSetupWizard(other.env, other.interaction)).status).toBe('wrote')
-      expect(other.asks.at(-1)?.question).toContain('Save this setting')
+      expect(other.asks.at(-1)?.question).toContain('Use this setting for everyone')
     }
     const already = harness({ answers: ['Organization sharing', 'Save it'], shared: true })
     await runSetupWizard(already.env, already.interaction)
-    expect(already.asks.at(-1)?.question).toContain('Save this setting')
+    expect(already.asks.at(-1)?.question).toContain('Use this setting for everyone')
   })
 
   test('an account with no organization is offered one, named as suggested or as typed', async () => {

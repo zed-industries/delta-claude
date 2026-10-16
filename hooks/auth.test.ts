@@ -55,6 +55,18 @@ test('failed and unknown authentication outcomes stop share without creating a t
   fake.expectClean()
 })
 
+test('unaccepted beta terms point to the terms page and a retry, without a failure or a new sign-in', async ($, on) => {
+  const fake = fakeThreads(on)
+  fake.surfaces = []
+  await $.session.start(sessionStart)
+  fake.authReplies = [{ status: 'access_denied', reason: 'terms_not_accepted', message: 'Accept the terms.', url: 'https://zed.dev/delta/terms' }]
+  const { text } = await $.command.run(shareCommand)
+  expect(text).toBe('Delta needs you to accept its beta terms first. Accept them here: https://zed.dev/delta/terms\nThen run /delta-share or /delta-join <link> again.')
+  expect(fake.authCalls.map((argv) => argv[3])).toEqual(['status'])
+  expect(fake.server.thread).toBeUndefined()
+  fake.expectClean()
+})
+
 test('headless share returns a pending sign-in link without waiting, and a signed-in retry shares', async ($, on) => {
   const fake = fakeThreads(on)
   fake.surfaces = []

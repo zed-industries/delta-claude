@@ -31,7 +31,7 @@ import {
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
-import { PendingAuthenticationError, requireAuthentication, type AuthenticationHost } from './auth'
+import { AccessRequiredError, PendingAuthenticationError, requireAuthentication, type AuthenticationHost } from './auth'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
 } from './handoff'
@@ -2203,7 +2203,8 @@ async function runShare($: Runtime, request: ShareRequest) {
     await $.ui.log(`Delta share link: ${url}`, { to: 'debug' })
   } catch (error) {
     if (request.cancelled || sharing !== request) return
-    const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
+    const text = error instanceof AccessRequiredError ? error.message
+      : `Delta sharing failed: ${String(error)}. Fix the issue and retry ${recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
     setProgress($, text, 'error')
     await $.ui.log(text, { to: 'transcript' })
   } finally {
@@ -2329,7 +2330,8 @@ async function join($: Runtime, request: JoinRequest) {
   } catch (error) {
     if (request.cancelled) return
     const invalidLocator = error instanceof DeltaCommandError && error.code === 'invalid_reference'
-    const text = `Delta join failed: ${String(error)}. ${invalidLocator
+    // Sign-in runs before the session changes, so an access requirement leaves nothing to preserve.
+    const text = error instanceof AccessRequiredError && !fresh ? error.message : `Delta join failed: ${String(error)}. ${invalidLocator
       ? `The ${fresh ? 'fresh session' : 'previous session and folder'} was preserved. Use the thread's share link with /delta-join instead of retrying this locator.`
       : fresh
       ? `Fresh session ${fresh} was preserved. Retry /delta-join ${plan?.locator ?? request.locator} to finish the saved transition; the previous session is ${plan?.session ?? request.session} at ${plan?.cwd ?? request.cwd}.`
@@ -3395,7 +3397,7 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
     return { text: `Delta share link: ${url}` }
   }
   catch (error) {
-    if (error instanceof PendingAuthenticationError) {
+    if (error instanceof PendingAuthenticationError || error instanceof AccessRequiredError) {
       if (sharing === shareRequest) sharing = undefined
       return { text: error.message }
     }

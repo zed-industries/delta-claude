@@ -5,6 +5,12 @@ import { commandErrorFromEnvelope } from './thread-commands'
 export class PendingAuthenticationError extends Error {}
 
 /**
+ * The account is signed in but Delta needs something from the person first, such as accepting its
+ * beta terms on the web. The message is complete, ready to show as is, never wrapped in a failure.
+ */
+export class AccessRequiredError extends Error {}
+
+/**
  * What sign-in needs from the session, as values and callbacks. Claude Code's loader refuses a
  * module that passes `$` across an import, so `register.tsx` builds this from `$` itself.
  */
@@ -83,9 +89,14 @@ export async function requireAuthentication(
   }
 }
 
-function authFailure(value: { status: string; message?: string; url?: string }, recovery: string): Error {
+function authFailure(value: { status: string; reason?: string; message?: string; url?: string }, recovery: string): Error {
   switch (value.status) {
-    case 'access_denied': return new Error(`Delta access denied: ${value.message ?? 'account access is required'}. ${value.url ?? ''}\n${recovery}`)
+    // Terms are accepted on the web; the app keeps the sign-in, so a retry needs no new login.
+    case 'access_denied': return value.reason === 'terms_not_accepted'
+      ? new AccessRequiredError(`Delta needs you to accept its beta terms first. Accept them here: ${value.url ?? 'https://zed.dev/delta/terms'}\nThen run /delta-share or /delta-join <link> again.`)
+      : value.reason === 'access_not_granted'
+      ? new AccessRequiredError(`Your Delta account doesn't have access yet. Join the waitlist: ${value.url ?? 'https://zed.dev/delta'}\nOnce you have access, run /delta-share or /delta-join <link> again.`)
+      : new Error(`Delta access denied: ${value.message ?? 'account access is required'}. ${value.url ?? ''}\n${recovery}`)
     case 'wrong_account': return new Error('Delta is using another account’s data directory. Resolve the account in Delta and retry; the plugin will not switch accounts.')
     case 'cancelled': return new Error('Delta sign-in was cancelled. Retry /delta-share or /delta-join <link>.')
     case 'expired': return new Error('Delta sign-in expired. Retry /delta-share or /delta-join <link>.')
