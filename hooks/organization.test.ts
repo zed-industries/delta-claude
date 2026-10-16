@@ -37,7 +37,9 @@ test('invalid organization syntax and CLI failures are returned without sharing'
     expect(result.text).toContain('/delta org switch <ID>')
   }
   // An invite with no address runs nothing and says how to name one.
-  expect((await $.command.run({ ...shareCommand, args: 'org invite nobody' })).text).toContain('/delta-org invite <email>')
+  const usage = (await $.command.run({ ...shareCommand, args: 'org invite nobody' })).text
+  expect(usage).toContain('/delta-org invite <email>')
+  expect(usage).toContain('https://dashboard.zed.dev')
   expect(fake.commands).toEqual([])
   fake.organizationResult.exitCode = 1
   fake.organizationResult.stderr = 'organization is not a membership'

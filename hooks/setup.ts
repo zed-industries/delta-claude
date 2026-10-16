@@ -94,6 +94,14 @@ export function inviteResultsFrom(result: any): InviteResult[] {
     : { email: entry.email, invited: false, message: String(entry.message ?? entry.reason ?? 'failed') })
 }
 
+/** Delta's web dashboard, where an organization's members are managed in bulk. */
+export const DASHBOARD_URL = 'https://dashboard.zed.dev'
+
+/** An organization's members page on the dashboard, as the Delta app links it. */
+export function membersUrl(organization: string): string {
+  return `${DASHBOARD_URL}/${organization}/members`
+}
+
 /** The email addresses in a typed answer: words separated by commas or spaces that contain an `@`. */
 export function emailsIn(text: string): string[] {
   return [...new Set(text.split(/[\s,;]+/).filter((word) => /^[^@\s]+@[^@\s]+$/.test(word)))]
@@ -284,7 +292,8 @@ async function offerInvites(env: SetupEnv, interaction: Interaction, organizatio
   const later = 'Invite later with /delta-org invite'
   let answer: string
   try {
-    answer = await interaction.ask(`Invite teammates to ${organization.name}? Type their email addresses, separated by commas.`,
+    answer = await interaction.ask(`Invite teammates to ${organization.name}? Type their email addresses, separated by commas. ` +
+      `To invite many people or manage members, use the dashboard: ${membersUrl(organization.id)}`,
       { options: ['Not now', later], header: HEADER })
   } catch (error) {
     if (error instanceof InteractionDismissed) return
@@ -307,6 +316,7 @@ async function offerInvites(env: SetupEnv, interaction: Interaction, organizatio
   await interaction.log([
     invited.length ? `Invited ${invited.join(', ')} to ${organization.name}.` : '',
     failed.length ? `Couldn't invite ${failed.join(', ')}.` : '',
+    `Manage members: ${membersUrl(organization.id)}`,
   ].filter(Boolean).join(' '), 'transcript')
 }
 

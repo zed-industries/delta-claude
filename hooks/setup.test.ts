@@ -134,6 +134,9 @@ describe('setup wizard', () => {
     expect((await runSetupWizard(invited.env, invited.interaction)).status).toBe('wrote')
     expect(invited.invites).toEqual([{ organization: 'org-Acme', emails: ['ada@example.com', 'bo@example.com'] }])
     expect(invited.logs.join('\n')).toContain("Couldn't invite bo@example.com (already a member)")
+    // Bulk invitations live on the dashboard's members page, linked from the question and the result.
+    expect(invited.asks.find((ask) => ask.question.startsWith('Invite teammates'))?.question).toContain('https://dashboard.zed.dev/org-Acme/members')
+    expect(invited.logs.join('\n')).toContain('Manage members: https://dashboard.zed.dev/org-Acme/members')
     // Text with no address invites nobody and says how to invite later.
     const none = harness({ answers: ['Private sync', 'Acme', 'later please', 'Save it'], organizations: [] })
     expect((await runSetupWizard(none.env, none.interaction)).status).toBe('wrote')

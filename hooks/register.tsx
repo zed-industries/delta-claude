@@ -26,7 +26,7 @@ import {
 import { TitleScanner, transcriptRead } from './title'
 import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
 import {
-  HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, emailsIn, inviteResultsFrom, offerOnboarding,
+  DASHBOARD_URL, HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, emailsIn, inviteResultsFrom, membersUrl, offerOnboarding,
   organizationsFrom, releaseOnboarding, runSetupWizard,
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
@@ -3355,7 +3355,11 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
     return organizationCommand($, organization[1] ? [organization[1]] : ['switch', '--', organization[3]!])
   if (invite !== undefined) {
     const emails = emailsIn(invite)
-    if (!emails.length) return { text: 'Usage: /delta-org invite <email> [<email>…]. Invites people to your current Delta organization.' }
+    if (!emails.length) {
+      // The current organization is known once anything has listed them; otherwise link the dashboard itself.
+      const members = currentOrganizationId ? membersUrl(currentOrganizationId) : DASHBOARD_URL
+      return { text: `Usage: /delta-org invite <email> [<email>…]. Invites people to your current Delta organization. To invite many people at once, use the dashboard: ${members}` }
+    }
     return organizationCommand($, ['invite', '--', ...emails])
   }
   const session = await $.session.id()
