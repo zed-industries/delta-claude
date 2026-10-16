@@ -139,7 +139,7 @@ const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Pri
  */
 function modeLabels(organization: Organization | undefined, personal: boolean): [ThreadMode, string][] {
   return [
-    ['private', 'Private sync (Recommended) (every new session, only you see it until you share)'],
+    ['private', 'Private sync (every new session, only you see it until you share)'],
     ...personal ? [] : [['organization', `Organization sharing (every new session, visible to ${organization?.name ?? 'your organization'})`] as [ThreadMode, string]],
     ['manual', 'Manual (only sessions you share with /delta-share)'],
   ]
@@ -262,9 +262,9 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     chosen = teams[0]!
     await interaction.log(`Delta will use ${chosen.name}.`, 'transcript')
   } else if (!teams.length) {
-    chosen = await offerNewOrganization(env, interaction, root,
+    chosen = await offerNewOrganization(env, interaction,
       'Delta syncs your sessions into a team, so you can share them later; only you see them until you do. ' +
-      'Create your team? Choose the suggested name, or type your own.', personalOrganization ? KEEP_PERSONAL : 'Cancel')
+      'Type a name to create your team.', personalOrganization ? KEEP_PERSONAL : 'Not now')
     if (chosen === 'declined' && personalOrganization) chosen = personalOrganization
     else if (!chosen || chosen === 'declined') return CANCELLED
   }
@@ -278,7 +278,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
       'Which team should this checkout sync to? Choose one, create a new one, or type an exact organization name or id.',
       { options: [...offered.map((org) => organizationLabel(org, organizations)), CREATE_ORGANIZATION], header: 'Team' })
     chosen = answer === CREATE_ORGANIZATION
-      ? await offerNewOrganization(env, interaction, root, 'Name the new team. Choose the suggested name, or type your own.', 'Cancel')
+      ? await offerNewOrganization(env, interaction, 'Type a name for the new team.', 'Back to the list')
       : matchOrganization(answer, organizations)
   }
   if ('status' in chosen) return chosen
@@ -337,16 +337,15 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
 }
 
 /**
- * Ask for a new team's name, suggesting the checkout's folder name, then create it and offer
- * invitations. `declined` when the person chooses `decline`, undefined when they type something that
- * is not a name; a failed creation is the setup's outcome.
+ * Ask for a new team's typed name, then create it and offer invitations. The question's options are
+ * `decline`, answered as `declined`, and Cancel, which ends setup; anything typed that is not a name
+ * is undefined, and a failed creation is the setup's outcome.
  */
-async function offerNewOrganization(env: SetupEnv, interaction: Interaction, root: string, question: string, decline: string): Promise<Organization | SetupOutcome | 'declined' | undefined> {
-  const suggested = root.split(/[\\/]/).filter(Boolean).at(-1) || 'My team'
-  const create = `Create "${suggested}"${decline === KEEP_PERSONAL ? ' (Recommended)' : ''}`
-  const answer = await interaction.ask(question, { options: [create, decline], header: HEADER })
+async function offerNewOrganization(env: SetupEnv, interaction: Interaction, question: string, decline: string): Promise<Organization | SetupOutcome | 'declined' | undefined> {
+  const answer = await interaction.ask(question, { options: [decline, 'Cancel'], header: HEADER })
   if (answer === decline) return 'declined'
-  const name = answer === create ? suggested : answer.trim()
+  if (answer === 'Cancel') return CANCELLED
+  const name = answer.trim()
   // A typed slash command, entered while the dialog was open, is not a name.
   if (!name || name.startsWith('/')) return undefined
   let created: Organization

@@ -131,10 +131,8 @@ describe('setup wizard', () => {
     expect(already.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
   })
 
-  test('an account with no team is asked to create one before choosing a mode, named as suggested or as typed', async () => {
+  test('an account with no team is asked to name one before choosing a mode', async () => {
     const cases: { answers: string[]; created: string[]; status: string; failCreate?: boolean }[] = [
-      // The suggestion is the checkout's folder name.
-      { answers: ['Create "repo"', 'Not now', 'Private sync'], created: ['repo'], status: 'wrote' },
       { answers: ['Acme Team', 'Not now', 'Organization sharing'], created: ['Acme Team'], status: 'wrote' },
       { answers: ['Cancel'], created: [], status: 'cancelled' },
       // A slash command typed while the dialog was open is not a name.
@@ -157,16 +155,17 @@ describe('setup wizard', () => {
     const named = harness({ answers: [keep, 'Private sync'], login: 'ada',
       organizations: [{ id: 'org-ada', name: "ada's Organization", current: true }] })
     expect((await runSetupWizard(named.env, named.interaction)).status).toBe('wrote')
-    expect(options(named, 0)).toEqual(['Create "repo" (Recommended)', keep])
+    expect(options(named, 0)).toEqual([keep, 'Cancel'])
     expect(JSON.parse(named.current()!).threads).toEqual({ mode: 'private', organization: 'org-ada' })
     // Nobody else is in a personal organization, so it offers no Organization sharing.
     expect(options(named, 1).some((label) => label.startsWith('Organization sharing'))).toBe(false)
     // The flag decides whatever the name, and a created team is offered every mode.
-    const flagged = harness({ answers: ['Create "repo" (Recommended)', 'Not now', 'Organization sharing'],
+    const flagged = harness({ answers: ['Acme', 'Not now', 'Organization sharing'],
       organizations: [{ id: 'org-p', name: 'Renamed', current: true, personal: true }] })
     expect((await runSetupWizard(flagged.env, flagged.interaction)).status).toBe('wrote')
-    expect(JSON.parse(flagged.current()!).threads).toEqual({ mode: 'organization', organization: 'org-repo' })
-    expect(options(flagged, 2)).toContain('Organization sharing (every new session, visible to repo)')
+    expect(JSON.parse(flagged.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
+    expect(options(flagged, 2)).toEqual(['Private sync (every new session, only you see it until you share)',
+      'Organization sharing (every new session, visible to Acme)', 'Manual (only sessions you share with /delta-share)'])
   })
 
   test('an account with several teams can still create a new one, or go back to the list', async () => {
@@ -175,11 +174,13 @@ describe('setup wizard', () => {
     expect((await runSetupWizard(created.env, created.interaction)).status).toBe('wrote')
     expect(created.creates).toEqual(['Acme'])
     expect(JSON.parse(created.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
-    // Cancelling the name asks which team again, instead of ending setup.
-    const back = harness({ organizations: teams, answers: ['Create a new organization', 'Cancel', 'Zed', 'Private sync'] })
+    // Going back from the name asks which team again; Cancel ends setup.
+    const back = harness({ organizations: teams, answers: ['Create a new organization', 'Back to the list', 'Zed', 'Private sync'] })
     expect((await runSetupWizard(back.env, back.interaction)).status).toBe('wrote')
     expect(back.creates).toEqual([])
     expect(JSON.parse(back.current()!).threads.organization).toBe('org-1')
+    const cancelled = harness({ organizations: teams, answers: ['Create a new organization', 'Cancel'] })
+    expect((await runSetupWizard(cancelled.env, cancelled.interaction)).status).toBe('cancelled')
   })
 
   test('a newly created organization offers to invite teammates by email, and setup continues either way', async () => {

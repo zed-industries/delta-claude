@@ -298,6 +298,26 @@ describe('the band on an automatic session', () => {
     fake.expectClean()
   })
 
+  for (const mode of ['organization', 'private'] as const) {
+    test(`a ${mode} thread in a personal organization is synced, never shared, and offers no share control`, async ($, on) => {
+      const fake = fakeThreads(on)
+      // The fake account's login is `tester`, so this is its personal organization by name.
+      fake.files.set(POLICY, policy(mode, 'org-p'))
+      fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-p', name: "tester's Organization", current: false }]
+      fake.server.registered = true
+      fake.server.confirmed = true
+      await startAuto($, fake)
+      await drawn($)
+      await fake.clock.settle()
+      const band = await drawn($)
+      expect(band).toContain("Synced with tester's Organization")
+      expect(band).not.toContain('Shared with')
+      // A wide band has room for every control, so a share control would be drawn if offered.
+      expect(JSON.stringify(await $.ui.render({ ...abovePrompt, props: { ...abovePrompt.props, bodyColumns: 200 } }))).not.toContain('Share with')
+      fake.expectClean()
+    })
+  }
+
   test('a failed background upload shows its reason on the band', async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('private', 'org-1'))

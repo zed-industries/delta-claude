@@ -136,17 +136,16 @@ Run `/delta setup` for an interactive wizard. It settles the team first, because
 a thread's organization never changes once it syncs and a personal organization
 has nobody to share with. A single team is used without a question; several are
 offered by name from `delta --json org list` plus "Create a new organization";
-an account with only its personal organization is recommended to create a team,
-or may skip and keep its sessions personal. A personal organization is the one
+an account with only its personal organization is asked to type a name for a
+new team, or may skip and keep its sessions personal. A personal organization is the one
 the CLI flags `personal`, or, from CLIs that don't report it, the one named
 `<login>'s Organization` after `delta auth status`'s login, as Delta names it and
-never lets it be renamed. A new team is created with `delta org create`, named
-after the checkout or as typed; a failed creation is reported and never retried,
+never lets it be renamed. A new team is created with `delta org create` under the
+typed name; a failed creation is reported and never retried,
 since it may have succeeded, and a created one offers to invite teammates by
 email with `delta org invite`. Setup then shows the current mode, explains that
 syncing stores the conversation and a copy of the checkout's code, including
-uncommitted changes, in DeltaDB, and offers Private sync (recommended,
-`private`), Organization sharing (`organization`, not offered for a personal
+uncommitted changes, in DeltaDB, and offers Private sync (`private`), Organization sharing (`organization`, not offered for a personal
 organization), or Manual (`manual`), each labelled with what it syncs and who
 sees it. Manual saves no organization. Setup then saves the
 choice without a further confirmation and says what it saved ("Saved Private
@@ -233,7 +232,8 @@ session's own read-to-delete window.
 
 The band shows the thread's link whenever status reports one (a URL alone does not
 mean others can see the thread), its audience apart from the link (`Synced with
-<organization name>` for a private thread, `Shared with <organization name>`, or
+<organization name>` for a private thread or any thread in a personal
+organization, which also offers no share control, `Shared with <organization name>`, or
 `Unlisted`; an automatic session names the organization its setting uploads to),
 and an automatic session's
 background upload as the band's running operation, drawn on its row like a share's

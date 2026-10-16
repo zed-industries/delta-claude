@@ -26,7 +26,7 @@ import {
 import { TitleScanner, transcriptRead } from './title'
 import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
 import {
-  DASHBOARD_URL, HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, emailsIn, inviteResultsFrom, membersUrl, offerOnboarding,
+  DASHBOARD_URL, HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, emailsIn, inviteResultsFrom, isPersonalOrganization, membersUrl, offerOnboarding,
   organizationsFrom, releaseOnboarding, runSetupWizard,
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
@@ -880,7 +880,8 @@ async function statusView($: Runtime): Promise<StatusState> {
     // A refused offline thread keeps its controls until the person forks the changes or discards them.
     conflict: state?.refusedOffline ? { fork: 'Fork & Restore', discard: 'Discard' } : undefined,
     // Sharing waits for Claude's turn to finish, so the control says so rather than ignoring a press.
-    share: binding?.visibility === 'private' ? {
+    // A personal organization has nobody to share with, so its threads offer no share control.
+    share: binding?.visibility === 'private' && !personalOrganizationIds.has(threadOrganization(binding) ?? currentOrganizationId ?? '') ? {
       label: state?.currentTurnId ? 'Share after this turn' : `Share with ${organizationName(threadOrganization(binding)) ?? 'organization'}`,
     } : undefined,
     people: presence.roster(),
@@ -896,15 +897,17 @@ async function statusView($: Runtime): Promise<StatusState> {
 }
 
 /**
- * Who can see the thread, apart from whether it has a link: `Synced with <org>` for a private
- * thread, which is stored in the organization but visible only to its owner, `Shared with <org>`, or
- * `Unlisted`.
+ * Who can see the thread, apart from whether it has a link: `Synced with <org>` for a thread only
+ * its owner sees (a private one, or any in a personal organization, which has no other members),
+ * `Shared with <org>`, or `Unlisted`.
  */
 function audienceLabel(binding: Binding | undefined): string | undefined {
   if (!binding?.visibility) return undefined
   if (binding.visibility === 'unlisted') return 'Unlisted'
-  const name = organizationName(threadOrganization(binding)) ?? 'your organization'
-  return binding.visibility === 'private' ? `Synced with ${name}` : `Shared with ${name}`
+  const organization = threadOrganization(binding) ?? currentOrganizationId
+  const name = organizationName(organization) ?? 'your organization'
+  return binding.visibility === 'private' || personalOrganizationIds.has(organization ?? '')
+    ? `Synced with ${name}` : `Shared with ${name}`
 }
 
 /**
@@ -2877,6 +2880,8 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
  */
 const organizationNames = new Map<string, string>()
 let currentOrganizationId: string | undefined
+/** The account's personal organization, from the band's directory read, which also reads the login. */
+let personalOrganizationIds = new Set<string>()
 let organizationDirectory: Promise<void> | undefined
 
 /** The account's organizations from `delta --json org list`, remembering their names for the band. */
@@ -2895,8 +2900,17 @@ async function listOrganizations($: Runtime, timeoutMs?: number): Promise<Organi
 }
 
 function loadOrganizationDirectory($: Runtime): Promise<void> {
-  organizationDirectory ??= listOrganizations($).then(() => undefined, () => undefined)
+  organizationDirectory ??= (async () => {
+    const [organizations, login] = await Promise.all([listOrganizations($), readLogin($).catch(() => undefined)])
+    personalOrganizationIds = new Set(organizations.filter((org) => isPersonalOrganization(org, login)).map((org) => org.id))
+  })().catch(() => undefined)
   return organizationDirectory
+}
+
+/** The signed-in account's GitHub login, from `delta --json auth status`. */
+async function readLogin($: Runtime): Promise<string | undefined> {
+  const status = await command($, ['auth', 'status'], 'auth status')
+  return typeof status?.account?.login === 'string' ? status.account.login : undefined
 }
 
 /** The name of an organization, or of the current one when the caller names none. */
@@ -2922,10 +2936,7 @@ function setupEnv($: Runtime): SetupEnv {
     },
     contract: () => readThreadContract($),
     organizations: () => listOrganizations($),
-    login: async () => {
-      const status = await command($, ['auth', 'status'], 'auth status')
-      return typeof status?.account?.login === 'string' ? status.account.login : undefined
-    },
+    login: () => readLogin($),
     createOrganization: (name) => createOrganization($, name),
     inviteMembers: async (organization, emails) =>
       inviteResultsFrom(await command($, ['org', 'invite', '--org', organization, '--', ...emails], 'org invite')),
