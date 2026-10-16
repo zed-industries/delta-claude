@@ -86,15 +86,15 @@ describe('setup wizard', () => {
 
   test('a saved setting is kept out of Git through the repository exclude list, once', async () => {
     const exclude = '/repo/.git/info/exclude'
-    const h = harness({ answers: ['Manual'], commonDir: '/repo/.git', others: { [exclude]: '# local\n/.delta/worktrees/' } })
+    const h = harness({ answers: ['Zed', 'Manual'], commonDir: '/repo/.git', others: { [exclude]: '# local\n/.delta/worktrees/' } })
     expect((await runSetupWizard(h.env, h.interaction)).status).toBe('wrote')
     expect(h.others.get(exclude)).toBe('# local\n/.delta/worktrees/\n/.delta/settings.json\n')
-    const again = harness({ answers: ['Manual'], commonDir: '/repo/.git', others: { [exclude]: h.others.get(exclude)! } })
+    const again = harness({ answers: ['Zed', 'Manual'], commonDir: '/repo/.git', others: { [exclude]: h.others.get(exclude)! } })
     await runSetupWizard(again.env, again.interaction)
     expect(again.others.get(exclude)).toBe(h.others.get(exclude))
     expect(again.logs.some((log) => log.includes("couldn't keep"))).toBe(false)
     // Outside a Git repository it can't be excluded; the person is told how instead.
-    const unknown = harness({ answers: ['Manual'] })
+    const unknown = harness({ answers: ['Zed', 'Manual'] })
     await runSetupWizard(unknown.env, unknown.interaction)
     expect(unknown.logs.join('\n')).toContain('add it to .gitignore')
   })
@@ -105,28 +105,29 @@ describe('setup wizard', () => {
     expect(cancelled.writes).toEqual([])
     expect(cancelled.logs.join('\n')).toContain('could not read')
 
-    const replaced = harness({ answers: ['Replace it', 'Manual'], file: '{ broken' })
+    const replaced = harness({ answers: ['Replace it', 'Zed', 'Manual'], file: '{ broken' })
     expect((await runSetupWizard(replaced.env, replaced.interaction)).status).toBe('wrote')
-    expect(JSON.parse(replaced.current()!)).toEqual({ threads: { mode: 'manual' } })
+    // Manual keeps the team too, as the organization /delta-share shares to.
+    expect(JSON.parse(replaced.current()!)).toEqual({ threads: { mode: 'manual', organization: 'org-1' } })
   })
 
   test('after saving, only Organization sharing offers to sync this session, and only while it is unshared', async () => {
-    const synced = harness({ answers: ['Organization sharing', 'Sync it'] })
+    const synced = harness({ answers: ['Zed', 'Organization sharing', 'Sync it'] })
     expect((await runSetupWizard(synced.env, synced.interaction)).status).toBe('wrote')
     expect(synced.asks.at(-1)?.question).toContain('Sync this session to Zed')
     expect(synced.shares()).toBe(1)
 
-    const declined = harness({ answers: ['Organization sharing'] })
+    const declined = harness({ answers: ['Zed', 'Organization sharing'] })
     expect((await runSetupWizard(declined.env, declined.interaction)).status).toBe('wrote')
     expect(declined.shares()).toBe(0)
 
     // A share would publish to the organization, which Private sync and Manual did not ask for.
-    for (const answers of [['Private sync'], ['Manual']]) {
+    for (const answers of [['Zed', 'Private sync'], ['Zed', 'Manual']]) {
       const other = harness({ answers })
       expect((await runSetupWizard(other.env, other.interaction)).status).toBe('wrote')
       expect(other.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
     }
-    const already = harness({ answers: ['Organization sharing'], shared: true })
+    const already = harness({ answers: ['Zed', 'Organization sharing'], shared: true })
     await runSetupWizard(already.env, already.interaction)
     expect(already.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
   })
@@ -155,7 +156,7 @@ describe('setup wizard', () => {
     const named = harness({ answers: [keep, 'Private sync'], login: 'ada',
       organizations: [{ id: 'org-ada', name: "ada's Organization", current: true }] })
     expect((await runSetupWizard(named.env, named.interaction)).status).toBe('wrote')
-    expect(options(named, 0)).toEqual([keep, 'Cancel'])
+    expect(options(named, 0)).toEqual(['Create a new organization', keep])
     expect(JSON.parse(named.current()!).threads).toEqual({ mode: 'private', organization: 'org-ada' })
     // Nobody else is in a personal organization, so it offers no Organization sharing.
     expect(options(named, 1).some((label) => label.startsWith('Organization sharing'))).toBe(false)
@@ -197,7 +198,7 @@ describe('setup wizard', () => {
     expect((await runSetupWizard(none.env, none.interaction)).status).toBe('wrote')
     expect(none.invites).toEqual([])
     // An existing organization is never offered invitations.
-    const existing = harness({ answers: ['Private sync'] })
+    const existing = harness({ answers: ['Zed', 'Private sync'] })
     await runSetupWizard(existing.env, existing.interaction)
     expect(existing.asks.some((ask) => ask.question.startsWith('Invite teammates'))).toBe(false)
   })
@@ -234,8 +235,8 @@ describe('setup wizard', () => {
     const six = Array.from({ length: 6 }, (_, index) => ({ id: `org-${index}`, name: `Organization ${index}`, current: index === 0 }))
     const twins = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Zed', current: false }]
     const cases: { answers: string[]; organizations?: typeof six; chosen: string; offered?: string[] }[] = [
-      // A single team needs no question.
-      { answers: ['Private sync'], chosen: 'org-1' },
+      // Even a single team is offered beside a new one.
+      { answers: ['Zed', 'Private sync'], chosen: 'org-1', offered: ['Zed', 'Create a new organization'] },
       // At most three are offered, then a new one; the rest are reached by typing a name or an id.
       { answers: ['Organization 5', 'Private sync'], organizations: six, chosen: 'org-5',
         offered: ['Organization 0', 'Organization 1', 'Organization 2', 'Create a new organization'] },
@@ -271,7 +272,7 @@ describe('onboarding', () => {
     const first = harness({ answers: ['Not now'], commonDir: '/repo/.git' })
     expect(await offerOnboarding(first.env, first.interaction, backend, newSession())).toBe('offered')
     // A second session in a linked worktree shares the common directory and is not offered again.
-    const second = harness({ answers: ['Set it up', 'Manual'], commonDir: '/repo/.git' })
+    const second = harness({ answers: ['Set it up', 'Zed', 'Manual'], commonDir: '/repo/.git' })
     expect(await offerOnboarding(second.env, second.interaction, backend, newSession())).toBe('skipped')
     expect(second.asks).toEqual([])
   })
@@ -290,7 +291,7 @@ describe('onboarding', () => {
       // A typed answer, like a command entered while the dialog was open, is not a decision.
       ['__unavailable__'], [undefined], ['/delta-share'], ['Set it up', undefined],
       // A setup that fails partway: the policy write is refused.
-      ['Set it up', 'Manual', '__write_fails__'],
+      ['Set it up', 'Zed', 'Manual', '__write_fails__'],
     ]
     for (const answers of unfinished) {
       const { store, backend } = memoryStore()
@@ -301,7 +302,7 @@ describe('onboarding', () => {
       expect(await offerOnboarding(again.env, again.interaction, backend, newSession())).toBe('offered')
       expect(again.asks).toHaveLength(1)
     }
-    for (const answers of [['Not now'], ['Set it up', 'Manual']]) {
+    for (const answers of [['Not now'], ['Set it up', 'Zed', 'Manual']]) {
       const { store, backend } = memoryStore()
       const h = harness({ answers })
       await offerOnboarding(h.env, h.interaction, backend, newSession())
@@ -332,7 +333,7 @@ describe('onboarding', () => {
 
   test('a setup started from the offer reports its outcome', async () => {
     const { backend } = memoryStore()
-    const h = harness({ answers: ['Set it up', 'Private sync'] })
+    const h = harness({ answers: ['Set it up', 'Zed', 'Private sync'] })
     await offerOnboarding(h.env, h.interaction, backend, newSession())
     expect(h.logs.at(-1)).toContain('Saved Private sync with Zed to .delta/settings.json')
   })

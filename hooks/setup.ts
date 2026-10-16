@@ -258,28 +258,25 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   const login = await env.login().catch(() => undefined)
   const teams = organizations.filter((org) => !isPersonalOrganization(org, login))
   const personalOrganization = organizations.find((org) => isPersonalOrganization(org, login))
-  let chosen: Organization | SetupOutcome | 'declined' | undefined
-  if (teams.length === 1) {
-    chosen = teams[0]!
-    await interaction.log(`Delta will use ${chosen.name}.`, 'transcript')
-  } else if (!teams.length) {
-    chosen = await offerNewOrganization(env, interaction,
-      'Delta syncs your sessions into a team, so you can share them later; only you see them until you do. ' +
-      'Type a name to create your team.', personalOrganization ? KEEP_PERSONAL : 'Not now')
-    if (chosen === 'declined' && personalOrganization) chosen = personalOrganization
-    else if (!chosen || chosen === 'declined') return CANCELLED
-  }
+  // The list always offers the current team and up to two others, then a new one; an account with no
+  // team may instead keep its personal organization. Any organization is still reachable by typing its
+  // exact name or id, an unmatched or ambiguous answer asks again, and going back from a new team's
+  // name returns here.
   const current = teams.find((org) => org.current) ?? teams[0]
-  // Offer the current team and up to two others, then a new one; any organization is still reachable
-  // by typing its exact name or id, and an unmatched or ambiguous answer asks again. Cancelling a new
-  // team's name returns here.
   const offered = current ? [current, ...teams.filter((org) => org !== current)].slice(0, MAX_ORGANIZATION_OPTIONS) : []
+  const alternative = teams.length ? [] : [personalOrganization ? KEEP_PERSONAL : 'Cancel']
+  const question = teams.length
+    ? 'Which team should this checkout sync to? Choose one, create a new one, or type an exact organization name or id.'
+    : 'Delta syncs your sessions into a team, so you can share them later; only you see them until you do. Type a name to create your team.'
+  let chosen: Organization | SetupOutcome | 'declined' | undefined
   while (!chosen || chosen === 'declined') {
-    const answer = await interaction.ask(
-      'Which team should this checkout sync to? Choose one, create a new one, or type an exact organization name or id.',
-      { options: [...offered.map((org) => organizationLabel(org, organizations)), CREATE_ORGANIZATION], header: 'Team' })
-    chosen = answer === CREATE_ORGANIZATION
-      ? await offerNewOrganization(env, interaction, 'Type a name for the new team.', 'Back to the list')
+    const answer = await interaction.ask(question,
+      { options: [...offered.map((org) => organizationLabel(org, organizations)), CREATE_ORGANIZATION, ...alternative], header: 'Team' })
+    if (answer === 'Cancel') return CANCELLED
+    chosen = answer === KEEP_PERSONAL ? personalOrganization
+      : answer === CREATE_ORGANIZATION ? await offerNewOrganization(env, interaction, 'Type a name for the new team.', 'Back to the list')
+      // With no team to choose, a typed answer is the new team's name.
+      : !teams.length ? await createTeam(env, interaction, answer)
       : matchOrganization(answer, organizations)
   }
   if ('status' in chosen) return chosen
@@ -296,14 +293,9 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     answer === label || answer.trim().toLowerCase() === MODE_NAMES[candidate].toLowerCase())?.[0]
   if (!mode) return CANCELLED
 
-  let organization: string | undefined
-  let organizationName: string | undefined
-  if (mode !== 'manual') {
-    organization = team.id
-    organizationName = team.name
-  }
-
-  const text = serializeProjectPolicy(file.document, mode, organization)
+  // Every mode saves the team: the automatic ones sync to it, and Manual shares to it.
+  const organizationName = team.name
+  const text = serializeProjectPolicy(file.document, mode, team.id)
   // Choosing a mode is the decision; saving it needs no second confirmation, and the answer says what was saved.
   try { await env.writeFile(path, text) }
   catch (error) { return { status: 'failed', text: `Delta could not save ${path}: ${String(error)}` } }
@@ -311,7 +303,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   // files out. A file that is already committed keeps being tracked; excluding it changes nothing.
   if (!await excludeFromGit(env, EXCLUDE_ENTRY))
     await interaction.log(`Delta couldn't keep ${SETTINGS_FILE} out of Git; add it to .gitignore if you don't want to commit it.`, 'transcript')
-  const summary = `${MODE_NAMES[mode]}${organizationName ? ` with ${organizationName}` : ''}`
+  const summary = `${MODE_NAMES[mode]} with ${organizationName}`
   const saved = `Saved ${summary} to ${SETTINGS_FILE}. New sessions follow it from now on; run /delta-setup to change it.`
   // The setting never applies to the session that saved it. Only Organization sharing offers to sync
   // this one now: sharing it is what that choice asked for, while a share would contradict Private sync
@@ -319,7 +311,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   if (mode !== 'organization' || await env.sessionShared()) return { status: 'wrote', text: saved }
   let share: string | undefined
   try {
-    share = await interaction.ask(`Your new setting starts with your next session. Sync this session to ${organizationName ?? 'your organization'} too?`,
+    share = await interaction.ask(`Your new setting starts with your next session. Sync this session to ${organizationName} too?`,
       { options: ['Sync it', 'Not now'], header: HEADER })
   }
   catch (error) { if (!(error instanceof InteractionDismissed || error instanceof InteractionUnavailable)) throw error }
@@ -341,6 +333,14 @@ async function offerNewOrganization(env: SetupEnv, interaction: Interaction, que
   const answer = await interaction.ask(question, { options: [decline, 'Cancel'], header: HEADER })
   if (answer === decline) return 'declined'
   if (answer === 'Cancel') return CANCELLED
+  return createTeam(env, interaction, answer)
+}
+
+/**
+ * Create a team under a typed name and offer invitations. Undefined for an answer that is not a name;
+ * a failed creation is the setup's outcome.
+ */
+async function createTeam(env: SetupEnv, interaction: Interaction, answer: string): Promise<Organization | SetupOutcome | undefined> {
   const name = answer.trim()
   // A typed slash command, entered while the dialog was open, is not a name.
   if (!name || name.startsWith('/')) return undefined

@@ -9,6 +9,7 @@ describe('project policy', () => {
       ['{}', { mode: 'manual', configured: false }],
       ['{"threads":{}}', { mode: 'manual', configured: false }],
       ['{"threads":{"mode":"manual"}}', { mode: 'manual', configured: true }],
+      ['{"threads":{"mode":"manual","organization":"org-1"}}', { mode: 'manual', organization: 'org-1', configured: true }],
       ['{"threads":{"mode":"organization","organization":"org-1"}}', { mode: 'organization', organization: 'org-1', configured: true }],
       ['{"threads":{"mode":"private"}}', { mode: 'manual', configured: false, problem }],
       ['{"threads":{"mode":"team"}}', { mode: 'manual', configured: false, problem }],
@@ -29,8 +30,10 @@ describe('project policy', () => {
       threads: { future: 'x', mode: 'organization', organization: 'org-2' },
     })
     expect(readProjectPolicy(text).policy).toEqual({ mode: 'organization', organization: 'org-2', configured: true })
-    // Switching back to manual drops the upload organization rather than leaving it implied.
-    const manual = JSON.parse(serializeProjectPolicy(JSON.parse(text), 'manual'))
-    expect(manual).toEqual({ unrelated: { keep: [1, 2] }, threads: { future: 'x', mode: 'manual' } })
+    // Manual keeps the organization `/delta share` shares to, and drops it when none is given.
+    const manual = serializeProjectPolicy(JSON.parse(text), 'manual', 'org-2')
+    expect(readProjectPolicy(manual).policy).toEqual({ mode: 'manual', organization: 'org-2', configured: true })
+    expect(JSON.parse(serializeProjectPolicy(JSON.parse(text), 'manual')))
+      .toEqual({ unrelated: { keep: [1, 2] }, threads: { future: 'x', mode: 'manual' } })
   })
 })

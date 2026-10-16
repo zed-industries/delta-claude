@@ -58,9 +58,10 @@ export function readProjectPolicy(text: string | undefined): PolicyFile {
     return { document, policy: { mode: 'manual', configured: false } }
   if (typeof mode !== 'string' || !MODES.includes(mode as ThreadMode))
     return { document, policy: { mode: 'manual', configured: false, problem: `its mode must be one of ${MODES.join(', ')}` } }
-  if (mode === 'manual')
-    return { document, policy: { mode: 'manual', configured: true } }
   const organization = threads.organization
+  // Manual names the organization `/delta share` shares to, when setup chose one.
+  if (mode === 'manual')
+    return { document, policy: { mode: 'manual', configured: true, ...typeof organization === 'string' && organization.trim() ? { organization } : {} } }
   if (typeof organization !== 'string' || !organization.trim())
     return { document, policy: { mode: 'manual', configured: false, problem: `mode "${mode}" requires a non-empty organization` } }
   return { document, policy: { mode: mode as ThreadMode, organization, configured: true } }
@@ -68,8 +69,7 @@ export function readProjectPolicy(text: string | undefined): PolicyFile {
 
 /**
  * Serialize a policy, preserving every unknown top-level and nested key of the previous document.
- * `organization` is written only for the modes that require it, so a switch back to `manual` drops
- * the stale one rather than leaving it to imply an upload that no longer happens.
+ * Every mode keeps `organization` when given: the automatic modes sync to it, and `manual` shares to it.
  */
 export function serializeProjectPolicy(
   previous: Record<string, unknown> | undefined, mode: ThreadMode, organization?: string,
@@ -77,7 +77,7 @@ export function serializeProjectPolicy(
   const document = isObject(previous) ? { ...previous } : {}
   const threads = isObject(document.threads) ? { ...document.threads } : {}
   threads.mode = mode
-  if (mode === 'manual') delete threads.organization
+  if (organization === undefined) delete threads.organization
   else threads.organization = organization
   document.threads = threads
   return `${JSON.stringify(document, null, 2)}\n`

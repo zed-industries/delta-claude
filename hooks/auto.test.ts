@@ -722,9 +722,9 @@ describe('setup dialogs and notices', () => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
-      // Choose the private option as the person would, by its offered label.
+      // Choose the team and the private option as the person would, by their offered labels.
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = offered.find((label: string) => label.startsWith('Private sync'))
+      const answer = offered.find((label: string) => label === 'Zed' || label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
     }
     await $.session.start(sessionStart)
@@ -755,17 +755,31 @@ describe('setup dialogs and notices', () => {
     fake.expectClean()
   })
 
+  test('/delta share in a Manual repository shares to its saved team, not the selected organization', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('manual', 'org-2'))
+    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Acme', current: false }]
+    await $.session.start(sessionStart)
+    await fake.share($)
+    expect(fake.commands.find((argv) => argv.includes('create'))).toEqual(expect.arrayContaining(['--organization', 'org-2', '--visibility', 'private']))
+    expect(fake.server.shared).toBe(true)
+    await drawn($)
+    await fake.clock.settle()
+    expect(await drawn($)).toContain('Shared with Acme')
+    fake.expectClean()
+  })
+
   test('a setup the startup offer opened updates the band once it saves', async ($, on) => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
       const answer = text.startsWith('Set up Delta syncing') ? 'Set it up'
-        : offered.find((label: string) => label.startsWith('Manual'))
+        : offered.find((label: string) => label === 'Zed' || label.startsWith('Manual'))
       return { result: { answers: { [text]: answer } } }
     }
     await startAuto($, fake)
-    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'manual' } })
+    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'manual', organization: 'org-1' } })
     expect(await reminderKind($)).toBe('manual')
   })
 

@@ -80,6 +80,8 @@ type Binding = {
    * session may participate while its thread is still local-only.
    */
   autoUpload?: AutoUpload
+  /** The organization a shared session's thread was created under, from the repository's saved team. */
+  organization?: string
   /**
    * When the session really ended, from the engine clock. Absent while it may still be live, so a
    * session in another process is never pruned; pruned sessions can no longer resume into their thread.
@@ -910,12 +912,13 @@ function audienceLabel(binding: Binding | undefined): string | undefined {
 }
 
 /**
- * The organization a session's thread uploads to. An automatic session's own setting names it: the
- * CLI's status can report no organization even for a thread created with one. Undefined for a
- * thread shared by hand or joined, which the caller names by the current organization.
+ * The organization a session's thread uploads to. The organization the plugin created the thread
+ * under names it, since the CLI's status can report none even for a thread created with one.
+ * Undefined for a thread shared without a saved team, or joined, which the caller names by the
+ * current organization.
  */
 function threadOrganization(binding: Binding): string | undefined {
-  return binding.autoUpload?.organization ?? binding.upload?.organization_id ?? undefined
+  return binding.autoUpload?.organization ?? binding.organization ?? binding.upload?.organization_id ?? undefined
 }
 
 /**
@@ -2152,7 +2155,11 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
   binding = await serial(() => load($, session))
   await assertShareSession($, request)
   if (!binding.thread) {
-    const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session], 'thread create', check)
+    // The repository's saved team decides where its sessions go, rather than the organization selected
+    // in Delta: creating the thread under it makes the later `thread share` publish there too.
+    const organization = await savedOrganization($, root)
+    const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session,
+      ...organization ? ['--organization', organization, '--visibility', 'private'] : []], 'thread create', check)
     validateCreationReceipt(created)
     if (!created.created) {
       const status = await readThreadStatus($, created.thread_id, session)
@@ -2163,7 +2170,7 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
         throw new Error('This Delta producer already contains records, but its local thread identity and receipts are missing. Restore the matching producer state or start a new Claude session; do not reset or reuse sequence numbers. The existing Delta conversation was preserved.')
     }
     // Persist identity before further fallible commands; creation is idempotent if this write fails.
-    await serial(async () => save($, { ...await load($, session), thread: created.thread_id }))
+    await serial(async () => save($, { ...await load($, session), thread: created.thread_id, ...organization ? { organization } : {} }))
     binding = await serial(() => load($, session))
   }
   await assertShareSession($, request)
@@ -2911,6 +2918,12 @@ async function readLogin($: Runtime): Promise<string | undefined> {
 /** The name of an organization, or of the current one when the caller names none. */
 function organizationName(id: string | undefined): string | undefined {
   return organizationNames.get(id ?? currentOrganizationId ?? '')
+}
+
+/** The organization a checkout's `.delta/settings.json` names, in any mode; undefined when it names none or can't be read. */
+async function savedOrganization($: Runtime, root: string): Promise<string | undefined> {
+  try { return readProjectPolicy(await setupEnv($).readFile(policyPath(root))).policy.organization }
+  catch { return undefined }
 }
 
 /** The host bindings the setup wizard and onboarding run against. */

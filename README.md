@@ -120,7 +120,7 @@ A checkout's Delta setting lives at its Git checkout root, `.delta/settings.json
 - No file, or no `threads` key, is unconfigured and behaves as `manual`: recording
   only through `/delta share` or `/delta join`. An explicit `manual` behaves the
   same but counts as configured, which suppresses the onboarding offer.
-- `private` and `organization` require `organization`. They make every **new**
+- `private` and `organization` require `organization`; `manual` may name one, which `/delta share` shares to. They make every **new**
   session in the checkout record automatically; `private` uploads for you alone
   until you share it, and `organization` shares with the organization.
 - A malformed file or an invalid value behaves as `manual`, shows the problem
@@ -134,20 +134,24 @@ A checkout's Delta setting lives at its Git checkout root, `.delta/settings.json
 
 Run `/delta setup` for an interactive wizard. It settles the team first, because
 a thread's organization never changes once it syncs and a personal organization
-has nobody to share with. A single team is used without a question; several are
-offered by name from `delta --json org list` plus "Create a new organization";
-an account with only its personal organization is asked to type a name for a
-new team, or may skip and keep its sessions personal. A personal organization is the one
-the CLI flags `personal`, or, from CLIs that don't report it, the one named
-`<login>'s Organization` after `delta auth status`'s login, as Delta names it and
-never lets it be renamed. A new team is created with `delta org create` under the
-typed name; a failed creation is reported and never retried,
-since it may have succeeded, and a created one offers to invite teammates by
-email with `delta org invite`. Setup then shows the current mode, explains that
-syncing stores the conversation and a copy of the checkout's code, including
-uncommitted changes, in DeltaDB, and offers Private sync (`private`), Organization sharing (`organization`, not offered for a personal
-organization), or Manual (`manual`), each labelled with what it syncs and who
-sees it. Manual saves no organization. Setup then saves the
+has nobody to share with. It always asks: up to three teams by name from
+`delta --json org list`, then "Create a new organization"; an account with only
+its personal organization is offered "Create a new organization" (or a typed
+name) and "Skip: keep sessions in my personal organization". A personal
+organization is the one the CLI flags `personal`, or, from CLIs that don't
+report it, the one named `<login>'s Organization` after `delta auth status`'s
+login, as Delta names it and never lets it be renamed. A new team is created
+with `delta org create` under the typed name; a failed creation is reported and
+never retried, since it may have succeeded, and a created one offers to invite
+teammates by email with `delta org invite`. Setup then shows the current mode,
+explains that syncing stores the conversation and a copy of the checkout's code,
+including uncommitted changes, in DeltaDB, and offers Private sync (`private`),
+Organization sharing (`organization`, not offered for a personal organization),
+or Manual (`manual`), each labelled with what it syncs and who sees it. Every
+mode saves the team as `organization`: the automatic modes sync to it, and
+`/delta share` creates its thread under it (`thread create --organization ORG
+--visibility private`), so the share publishes there rather than to the
+organization selected in Delta. Setup then saves the
 choice without a further confirmation and says what it saved ("Saved Private
 sync with Zed to .delta/settings.json"). Cancelling or dismissing any question leaves
 the file untouched. Print and SDK
