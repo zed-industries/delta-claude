@@ -227,8 +227,10 @@ session at a time, so a session another process resumes can only be lost in that
 session's own read-to-delete window.
 
 The band shows the thread's link whenever status reports one (a URL alone does not
-mean others can see the thread), its audience apart from the link (`Private`,
-`Shared with <organization name>`, or `Unlisted`), and an automatic session's
+mean others can see the thread), its audience apart from the link (`Synced with
+<organization name>` for a private thread, `Shared with <organization name>`, or
+`Unlisted`; an automatic session names the organization its setting uploads to),
+and an automatic session's
 background upload as the band's running operation, drawn on its row like a share's
 steps: `Waiting to sync…` or `Syncing to DeltaDB…`, then `Synced to DeltaDB`, or
 `Sync failed: <reason>`. Activation returns before Delta registers the thread, and
@@ -671,8 +673,8 @@ hyperlink-capable; an unlabelled one prints it once, as a hyperlink where the te
 them. Beside it
 is a copy control, which a click presses, or Enter once the band has the focus (ctrl+x tab
 lands on it), and which confirms only once the clipboard took the link. The thread's
-audience sits beside the link (`Private`, `Shared with <organization name>`, or
-`Unlisted`), and Delta's background upload takes a row of its own while it is queued,
+audience sits beside the link (`Synced with <organization name>`, `Shared with
+<organization name>`, or `Unlisted`), and Delta's background upload takes a row of its own while it is queued,
 uploading, or failed. A private thread also offers a "Share with <organization>"
 control that runs the same publication flow as `/delta share`. While a share
 or join still runs, the link shows dimmed and is not offered; before status reports

@@ -331,10 +331,13 @@ describe('the band on an automatic session', () => {
     fake.expectClean()
   })
 
-  test('a private thread offers a share control that publishes the same thread', async ($, on) => {
+  test('a private thread is labelled with its own organization and offers a share control that publishes the same thread', async ($, on) => {
     const fake = fakeThreads(on)
-    fake.files.set(POLICY, policy('private', 'org-1'))
-    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }]
+    // The setting names an organization other than the current one, and status names none, as real
+    // CLIs have answered; the band still names the setting's.
+    fake.files.set(POLICY, policy('private', 'org-2'))
+    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Personal', current: false }]
+    fake.server.reportsOrganization = false
     fake.server.registered = true
     fake.server.confirmed = true
     await startAuto($, fake)
@@ -342,10 +345,10 @@ describe('the band on an automatic session', () => {
     // The first draw reads the organization directory; the next one names it.
     await drawn($)
     await fake.clock.settle()
-    await drawn($)
+    expect(await drawn($)).toContain('Synced with Personal')
     await fake.clock.settle()
     const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
-    await terminal.find({ type: 'Button', label: 'Share with Zed' })
+    await terminal.find({ type: 'Button', label: 'Share with Personal' })
     await terminal.press({ key: 'share' })
     await fake.clock.settle()
     await fake.clock.advance(0)

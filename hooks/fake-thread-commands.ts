@@ -263,6 +263,8 @@ export function fakeThreads(on: On, options: {
       upload: undefined as { organization: string; visibility: 'private' | 'organization' } | undefined,
       /** Whether Delta has registered the thread with the cloud, which upgrades local-only access. */
       registered: false,
+      /** Whether status names the upload's organization; real CLIs have reported null for a thread created with one. */
+      reportsOrganization: true,
       /** Whether Delta has confirmed the thread's content upload; only then is `upload.state` `uploaded`. */
       confirmed: false,
       /** A failure reason Delta reports for the thread's background upload, replacing any success. */
@@ -379,7 +381,7 @@ export function fakeThreads(on: On, options: {
           state: fake.server.uploadFailure ? 'failed'
             : fake.server.confirmed ? 'uploaded'
               : fake.server.registered ? 'uploading' : 'queued',
-          organization_id: upload.organization,
+          organization_id: fake.server.reportsOrganization ? upload.organization : null,
           error: fake.server.uploadFailure
             ? { code: 'upload_failed', reason: 'upload_failed', message: fake.server.uploadFailure }
             : null,

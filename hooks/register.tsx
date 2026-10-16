@@ -864,7 +864,7 @@ async function statusView($: Runtime): Promise<StatusState> {
   const doing = remote ? remoteActivity(remote, now) : undefined
   const binding = state?.binding
   // The visibility label names an organization; read the directory once, and a later redraw fills it.
-  if (binding?.visibility === 'organization' || binding?.upload?.organization_id) void loadOrganizationDirectory($)
+  if (binding?.visibility) void loadOrganizationDirectory($)
   return {
     ...feed,
     // A staged automatic session records before its watch starts, while the band shows its connection step.
@@ -881,7 +881,7 @@ async function statusView($: Runtime): Promise<StatusState> {
     conflict: state?.refusedOffline ? { fork: 'Fork & Restore', discard: 'Discard' } : undefined,
     // Sharing waits for Claude's turn to finish, so the control says so rather than ignoring a press.
     share: binding?.visibility === 'private' ? {
-      label: state?.currentTurnId ? 'Share after this turn' : `Share with ${organizationName(binding.upload?.organization_id) ?? 'organization'}`,
+      label: state?.currentTurnId ? 'Share after this turn' : `Share with ${organizationName(threadOrganization(binding)) ?? 'organization'}`,
     } : undefined,
     people: presence.roster(),
     children: feed.children,
@@ -895,12 +895,25 @@ async function statusView($: Runtime): Promise<StatusState> {
   }
 }
 
-/** Who can see the thread, apart from whether it has a link: `Private`, `Shared with <org>`, or `Unlisted`. */
+/**
+ * Who can see the thread, apart from whether it has a link: `Synced with <org>` for a private
+ * thread, which is stored in the organization but visible only to its owner, `Shared with <org>`, or
+ * `Unlisted`.
+ */
 function audienceLabel(binding: Binding | undefined): string | undefined {
   if (!binding?.visibility) return undefined
-  if (binding.visibility === 'private') return 'Private'
   if (binding.visibility === 'unlisted') return 'Unlisted'
-  return `Shared with ${organizationName(binding.upload?.organization_id) ?? 'your organization'}`
+  const name = organizationName(threadOrganization(binding)) ?? 'your organization'
+  return binding.visibility === 'private' ? `Synced with ${name}` : `Shared with ${name}`
+}
+
+/**
+ * The organization a session's thread uploads to. An automatic session's own setting names it: the
+ * CLI's status can report no organization even for a thread created with one. Undefined for a
+ * thread shared by hand or joined, which the caller names by the current organization.
+ */
+function threadOrganization(binding: Binding): string | undefined {
+  return binding.autoUpload?.organization ?? binding.upload?.organization_id ?? undefined
 }
 
 /**
