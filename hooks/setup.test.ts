@@ -167,6 +167,12 @@ describe('setup wizard', () => {
     expect(JSON.parse(flagged.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
     expect(options(flagged, 2)).toEqual(['Private sync (every new session, only you see it until you share)',
       'Organization sharing (every new session, visible to Acme)', 'Manual (only sessions you share with /delta-share)'])
+    // A Delta that can invite by email says a personal session can still be shared that way.
+    const invites = 'Skip: keep sessions personal; share one by email with /delta-share'
+    const inviting = harness({ answers: [invites, 'Private sync'], login: 'ada', contractMax: 5,
+      organizations: [{ id: 'org-ada', name: "ada's Organization", current: true }] })
+    expect((await runSetupWizard(inviting.env, inviting.interaction)).status).toBe('wrote')
+    expect(options(inviting, 0)).toEqual(['Create a new organization', invites])
   })
 
   test('an account with several teams can still create a new one, or go back to the list', async () => {

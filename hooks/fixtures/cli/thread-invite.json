@@ -1,0 +1,1 @@
+{"operation":"invited","thread_id":"thread_example","share_id":"share_example","url":"https://delta.dev/join/share_example","results":[{"status":"invited","email":"ada@example.com"},{"status":"failed","email":"bo@example.com","reason":"already_member","message":"already a member"}]}

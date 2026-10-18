@@ -259,6 +259,8 @@ export function fakeThreads(on: On, options: {
       /** The mounted checkouts of each owner that asked for them, and the directory each was told to work in. */
       groups: new Map<string, { directory: string; mounts: Map<string, { name: string; directory: string; active: boolean }> }>(),
       shared: false,
+      /** Every address `thread invite` sent, in order. */
+      invited: [] as string[],
       /** The upload intent `thread create` recorded, before or after the thread registers with the cloud. */
       upload: undefined as { organization: string; visibility: 'private' | 'organization' } | undefined,
       /** Whether Delta has registered the thread with the cloud, which upgrades local-only access. */
@@ -303,10 +305,12 @@ export function fakeThreads(on: On, options: {
     /** Every `thread unmount` the plugin asked for. */
     unmounts: [] as { thread: string; owner: string }[],
     publicationPatch: undefined as Record<string, unknown> | undefined,
+    /** Addresses `thread invite` reports as failed, with the reason it gives. */
+    inviteFailures: {} as Record<string, string>,
     /** Replaces the default watch readiness and snapshot. */
     onWatch: undefined as ((watch: Watch, index: number) => void) | undefined,
     commandFault: undefined as { operation: string; message: string; code?: string; reason?: string; retryable?: boolean; after?: boolean; exitCode?: number } | undefined,
-    /** The recording-contract range `thread contract` reports; overrides the fixture's `{min:1,max:4}`. */
+    /** The recording-contract range `thread contract` reports; overrides the fixture's `{min:1,max:5}`. */
     contractRange: undefined as { min?: number; max?: number } | undefined,
     /** Answers `thread contract` like a CLI that predates it: clap error on stderr, exit 2, no JSON. */
     contractUnknownSubcommand: false,
@@ -611,7 +615,14 @@ export function fakeThreads(on: On, options: {
       fake.questions.push(e)
       // A test answers the dialog through `answerQuestion`; otherwise it is dismissed, as a person
       // who closes the prompt would.
-      return (fake.answerQuestion?.(e as never) ?? { deny: 'the person dismissed the question' }) as never
+      const answer = fake.answerQuestion?.(e as never)
+      if (answer !== undefined) return answer as never
+      // `/delta share` asks who should see the session; unless a test answers, it takes the first
+      // option, sharing with the organization as the command did before it asked.
+      const question = (e as any).input?.questions?.[0] ?? (e as any).questions?.[0]
+      if (question?.question?.startsWith('Who should see this session?'))
+        return { result: { answers: { [question.question]: question.options[0].label } } } as never
+      return { deny: 'the person dismissed the question' } as never
     }
     if (fake.holdTool) await fake.holdTool
     return { result: { stdout: 'tool output', stderr: '', interrupted: false } } as any
@@ -734,6 +745,27 @@ export function fakeThreads(on: On, options: {
     }
     const source = { '--source': 'claude-code', '--external-id': fake.session }
     const positionals = operation === 'create' ? [] : operation === 'attach' ? [CHECKOUT] : [threadLocator(parsed?.positionals[2])]
+    if (operation === 'invite') {
+      const emails = parsed!.positionals.slice(3)
+      if (!matchesCommand(argv, ['thread', 'invite', threadLocator(parsed!.positionals[2]), ...emails], {}) ||
+          argv[argv.length - emails.length - 1] !== '--' || !emails.length) {
+        fake.violations.push(`forbidden command: ${argv.join(' ')}`)
+        throw new Error(`forbidden command ${argv.join(' ')}`)
+      }
+      const fault = fake.commandFault?.operation === 'invite' ? fake.commandFault : undefined
+      if (fault) return output(JSON.stringify(cliFixture('error', faultEnvelope(fault))), fault.exitCode ?? 2)
+      // A thread not yet on the server is uploaded privately first, so only the invited people see it.
+      fake.server.upload ??= { organization: 'org-1', visibility: 'private' }
+      fake.server.registered = true
+      fake.server.confirmed = true
+      fake.server.invited.push(...emails)
+      return output(JSON.stringify(cliFixture('invite', {
+        thread_id: fake.server.thread, url: urlOf(),
+        results: emails.map((email) => fake.inviteFailures[email]
+          ? { status: 'failed', email, reason: 'already_member', message: fake.inviteFailures[email] }
+          : { status: 'invited', email }),
+      })))
+    }
     const options = operation === 'attach' ? { '--thread': fake.server.thread }
       : operation === 'share' ? { '--visibility': 'organization' }
       : operation === 'fork' || operation === 'discard' ? { ...operation === 'discard' ? { '--force': true as any } : {} }

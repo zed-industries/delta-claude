@@ -78,6 +78,29 @@ slash-command menu: `/delta-share`, `/delta-join <link>`, `/delta-setup`, and
 commands cannot declare subcommands, which is why both forms exist.
 
 From a Claude session inside the intended Git checkout, run `/delta share`.
+On an interactive host it first asks who should see the session, after checking the CLI and
+before staging anything:
+
+- **Share with <team>**: publish to the organization (described below). Not offered for a
+  personal organization, which has nobody to share with, or a thread already shared with its
+  organization.
+- **Just me (sync privately)**: create the thread with a private upload intent
+  (`thread create --organization ORG --visibility private`, the repository's saved team, else the
+  selected organization), attach the checkout, and hand the session to Delta's background
+  uploader exactly as Private sync does. Nothing is published. Offered only before the session
+  syncs; a synced session is offered **Keep current sharing** instead, which reconnects it
+  without changing who sees it.
+- **Typed email addresses**: `thread invite THREAD -- EMAIL…`, which uploads a thread not yet on
+  the server privately and invites each address; the transcript names who was invited and who
+  was not, and why. Requires contract version 5.
+
+`/delta share ada@example.com bo@example.com` skips the question and invites those addresses.
+Dismissing the question shares nothing. A headless host, or a Claude without the question API,
+shares with the organization, as do the band's share control and setup's offer.
+
+The plugin's own questions run as `AskUserQuestion` tool calls; they are never recorded into the
+thread.
+
 It stages the complete bounded, normalized post-compaction conversation locally
 (the newest up to 4096 Messages API messages) before contacting Delta. It then
 explicitly creates the thread without running a model, attaches the checkout
@@ -389,6 +412,7 @@ delta --json org list
 delta --json thread create --source claude-code --external-id SESSION --organization ORG --visibility private|organization
 delta --json worktree attach PATH --thread THREAD
 delta --json thread share THREAD --visibility organization
+delta --json thread invite THREAD -- EMAIL...
 delta --json thread append THREAD --source claude-code --external-id SESSION [--acknowledge local|server]
 delta --json thread watch THREAD --source claude-code --external-id SESSION
 delta --json thread status THREAD --source claude-code --external-id SESSION
@@ -399,11 +423,12 @@ delta --json thread discard THREAD --force
 ```
 
 `thread contract` reports the recording-output contract versions the CLI build speaks
-(`{"operation":"contract","min":1,"max":4}`), answered locally without starting delta-app; the
+(`{"operation":"contract","min":1,"max":5}`), answered locally without starting delta-app; the
 plugin calls it once per session before its first recording command, and `/delta setup` before its
 first question. The plugin speaks versions `PLUGIN_CONTRACT_MIN` through `PLUGIN_CONTRACT_MAX`,
-currently 4 through 4: nothing older is supported, because neither the plugin nor the CLI has
-shipped. When the ranges don't overlap, the plugin refuses to set up, share, join, or resume and says
+currently 4 through 5: nothing older is supported, because neither the plugin nor the CLI has
+shipped. Version 5 adds `thread invite`; with a version 4 CLI, `/delta share` offers no email
+invitations and setup's personal-organization option doesn't mention them. When the ranges don't overlap, the plugin refuses to set up, share, join, or resume and says
 to update Delta (the CLI is older) or the plugin (the CLI is newer); a CLI that predates the
 subcommand is treated as an older Delta. The plugin remembers the newest version both speak for each
 session, so a capability a later version adds can be gated on it until `PLUGIN_CONTRACT_MIN` reaches

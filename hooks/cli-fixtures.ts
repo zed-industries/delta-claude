@@ -4,7 +4,7 @@ const names = {
   status: 'thread-status.granted', recorded: 'thread-append.recorded',
   fenced: 'thread-append.fenced', duplicate: 'thread-append.duplicate', create: 'thread-create',
   share: 'thread-share', attach: 'worktree-attach', mount: 'thread-mount',
-  unmount: 'thread-unmount', contract: 'thread-contract',
+  unmount: 'thread-unmount', contract: 'thread-contract', invite: 'thread-invite',
 }
 
 export const cliWatchFrames = cliFixtureData['thread-watch.frames'] as Record<string, any>[]

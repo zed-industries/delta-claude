@@ -373,7 +373,9 @@ export const PLUGIN_CONTRACT_MIN = 4
  * version is gated on the session's negotiated version (`contractVersion`) until `PLUGIN_CONTRACT_MIN`
  * reaches it.
  */
-export const PLUGIN_CONTRACT_MAX = 4
+export const PLUGIN_CONTRACT_MAX = 5
+/** The first contract version whose CLI has `thread invite`. */
+export const INVITE_CONTRACT = 5
 
 /** The range of recording-output contract versions a CLI build speaks. */
 export type ThreadContract = { operation: 'contract'; min: number; max: number }

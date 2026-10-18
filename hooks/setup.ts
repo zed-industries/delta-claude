@@ -5,7 +5,7 @@
 //! `register.tsx` supplies the real Claude Code bindings.
 
 import { policyPath, readProjectPolicy, recordsAutomatically, serializeProjectPolicy, type PolicyFile, type ThreadMode } from './project-policy'
-import { commandErrorFromEnvelope, contractRefusal, type ThreadContract } from './thread-commands'
+import { INVITE_CONTRACT, commandErrorFromEnvelope, contractRefusal, contractVersion, type ThreadContract } from './thread-commands'
 
 /** A question could not be shown: this Claude has no interactive question API. */
 export class InteractionUnavailable extends Error {}
@@ -146,8 +146,12 @@ function modeLabels(organization: Organization | undefined, personal: boolean): 
 }
 /** The organization picker's last option, offered alongside every existing team. */
 const CREATE_ORGANIZATION = 'Create a new organization'
-/** The team question's alternative for an account with only a personal organization. */
+/**
+ * The team question's alternative for an account with only a personal organization. With a CLI that
+ * can invite by email, a personal session can still be shared with chosen people.
+ */
 const KEEP_PERSONAL = 'Skip: keep sessions in my personal organization, where no team can see them'
+const KEEP_PERSONAL_INVITES = 'Skip: keep sessions personal; share one by email with /delta-share'
 /** The tag above each setup question; Claude Code allows at most 12 characters. */
 const HEADER = 'Delta sync'
 /** The setting's file, relative to the checkout root, as people see it named. */
@@ -241,7 +245,8 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   }
 
   // A Delta this plugin cannot record against would make every choice below fail later.
-  const refusal = contractRefusal(await env.contract())
+  const contract = await env.contract()
+  const refusal = contractRefusal(contract)
   if (refusal) return { status: 'failed', text: `/delta-setup: ${refusal}, then run /delta-setup again.` }
 
   let organizations: Organization[]
@@ -264,7 +269,8 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   // name returns here.
   const current = teams.find((org) => org.current) ?? teams[0]
   const offered = current ? [current, ...teams.filter((org) => org !== current)].slice(0, MAX_ORGANIZATION_OPTIONS) : []
-  const alternative = teams.length ? [] : [personalOrganization ? KEEP_PERSONAL : 'Cancel']
+  const keepPersonal = contractVersion(contract!) >= INVITE_CONTRACT ? KEEP_PERSONAL_INVITES : KEEP_PERSONAL
+  const alternative = teams.length ? [] : [personalOrganization ? keepPersonal : 'Cancel']
   const question = teams.length
     ? 'Which team should this checkout sync to? Choose one, create a new one, or type an exact organization name or id.'
     : 'Delta syncs your sessions into a team, so you can share them later; only you see them until you do. Type a name to create your team.'
@@ -273,7 +279,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     const answer = await interaction.ask(question,
       { options: [...offered.map((org) => organizationLabel(org, organizations)), CREATE_ORGANIZATION, ...alternative], header: 'Team' })
     if (answer === 'Cancel') return CANCELLED
-    chosen = answer === KEEP_PERSONAL ? personalOrganization
+    chosen = answer === keepPersonal ? personalOrganization
       : answer === CREATE_ORGANIZATION ? await offerNewOrganization(env, interaction, 'Type a name for the new team.', 'Back to the list')
       // With no team to choose, a typed answer is the new team's name.
       : !teams.length ? await createTeam(env, interaction, answer)

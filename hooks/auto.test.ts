@@ -53,6 +53,14 @@ async function startAuto($: Engine, fake: ReturnType<typeof fakeThreads>, source
   await fake.clock.settle()
 }
 
+/** Run `/delta <args>` and let the share it starts on the clock finish. */
+async function runShare($: Engine, fake: ReturnType<typeof fakeThreads>, args: string) {
+  await $.command.run(typedDelta(args))
+  await fake.clock.settle()
+  await fake.clock.advance(0)
+  await fake.clock.settle()
+}
+
 /** Make the server refuse the thread's recorded changes, as an append that keeps failing until resolved. */
 function refuseChanges(fake: ReturnType<typeof fakeThreads>, fork?: string) {
   fake.refusedChanges = { fork }
@@ -220,6 +228,8 @@ describe('automatic activation', () => {
     fake.answerQuestion = async () => ({ result: { answers: {} } })
     await startAuto($, fake)
     expect(await reminderKind($)).toBe('not set up')
+    // The share's own question is answered as the fake answers it by default: with the organization.
+    fake.answerQuestion = undefined
     // While the share runs, its progress takes the reminder's place.
     await $.command.run(shareCommand)
     expect(await reminderKind($)).toBe('none')
@@ -766,6 +776,62 @@ describe('setup dialogs and notices', () => {
     await drawn($)
     await fake.clock.settle()
     expect(await drawn($)).toContain('Shared with Acme')
+    fake.expectClean()
+  })
+
+  test('/delta share asks who should see the session: "just me" syncs it privately without publishing', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('manual', 'org-2'))
+    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Acme', current: false }]
+    fake.answerQuestion = (question: any) => {
+      const asked = question.questions[0]
+      expect(asked.options.map((option: { label: string }) => option.label)).toEqual(['Share with Acme', 'Just me (sync privately)'])
+      return { result: { answers: { [asked.question]: 'Just me (sync privately)' } } }
+    }
+    await $.session.start(sessionStart)
+    await runShare($, fake, 'share')
+    expect(fake.commands.find((argv) => argv.includes('create'))).toEqual(expect.arrayContaining(['--organization', 'org-2', '--visibility', 'private']))
+    expect(fake.server.upload).toEqual({ organization: 'org-2', visibility: 'private' })
+    expect(fake.operations()).not.toContain('share')
+    // Delta's background uploader now owns the session, as it does for Private sync.
+    expect(binding(fake)).toMatchObject({ thread: fake.threadId, autoUpload: { mode: 'private', organization: 'org-2' } })
+    expect(fake.live()?.ready).toBe(true)
+    fake.expectClean()
+  })
+
+  test('/delta share with addresses invites them, and a Delta without invitations refuses before anything syncs', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.inviteFailures = { 'bo@example.com': 'already a member' }
+    await $.session.start(sessionStart)
+    fake.contractRange = { max: 4 }
+    await runShare($, fake, 'share ada@example.com')
+    expect(fake.logs.join('\n')).toContain('cannot invite people by email yet')
+    expect(fake.server.thread).toBeUndefined()
+    expect(fake.exports).toBe(0)
+    fake.contractRange = undefined
+    // The contract is checked once per session, so a new session sees the updated Delta.
+    await $.session.end(sessionEnd(fake.session))
+    fake.session = 'updated'
+    await $.session.start(sessionStart)
+    await runShare($, fake, 'share ada@example.com, bo@example.com')
+    expect(fake.server.invited).toEqual(['ada@example.com', 'bo@example.com'])
+    expect(fake.operations()).not.toContain('share')
+    expect(fake.logs.join('\n')).toContain(`Invited ada@example.com to this session: https://delta.dev/join/${fake.shareId} Couldn't invite bo@example.com (already a member).`)
+    expect(binding(fake)).toMatchObject({ url: `https://delta.dev/join/${fake.shareId}` })
+    fake.expectClean()
+  })
+
+  test('dismissing the share question shares nothing', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] })
+    fake.answerQuestion = () => ({ deny: 'dismissed' })
+    await $.session.start(sessionStart)
+    await runShare($, fake, 'share')
+    expect(fake.server.thread).toBeUndefined()
+    expect(fake.exports).toBe(0)
+    expect(binding(fake)?.snapshot ?? false).toBe(false)
+    // The band drops the share's progress rather than reporting a failure.
+    expect(await drawn($)).not.toContain('Preparing to share')
+    expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')
     fake.expectClean()
   })
 

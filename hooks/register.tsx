@@ -14,7 +14,7 @@ import { pathKey, samePath } from './paths'
 import { PresenceTracker } from './presence'
 import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
-  ContractRefusalError, JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
+  ContractRefusalError, INVITE_CONTRACT, JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
   validateJoinedMounts, parseThreadFork, validateThreadFrontier, validateThreadCheckout,
   type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadStatus, type ThreadTurn, type ThreadUpload, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
@@ -31,6 +31,7 @@ import {
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
+import { chooseShareAudience, invitationSummary, threadInvitationsFrom, type ShareAudience } from './share-audience'
 import { AccessRequiredError, PendingAuthenticationError, requireAuthentication, type AuthenticationHost } from './auth'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
@@ -76,8 +77,9 @@ type Binding = {
    */
   uploaded?: true
   /**
-   * Set on a session this plugin created from the repository's policy: what it uploads. Such a
-   * session may participate while its thread is still local-only.
+   * Set on a session that Delta's background uploader syncs: one this plugin created from the
+   * repository's policy, or one shared with "Just me". Such a session may participate while its
+   * thread is still local-only.
    */
   autoUpload?: AutoUpload
   /** The organization a shared session's thread was created under, from the repository's saved team. */
@@ -106,7 +108,12 @@ type ProgressTone = 'active' | 'done' | 'error'
 /** A join to finish in a session; `owner` names a mount another session made for it to take over. */
 type JoinPlan = { session: string; cwd: string; locator: string; thread: string; owner?: string }
 type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean; contractVersion?: number; form?: CommandForm }
-type ShareRequest = { session: string; cwd: string; cancelled?: boolean; form?: CommandForm }
+/**
+ * A share to run. With `choose`, the share decides who sees the session once the CLI is checked: the
+ * addresses typed after `/delta share`, or else the person's answer. Without it, it shares with the
+ * organization, as the band's control, setup, and headless hosts ask.
+ */
+type ShareRequest = { session: string; cwd: string; cancelled?: boolean; form?: CommandForm; choose?: { emails: string[] } }
 /** How a person ran a share or join: `/delta share` (`delta_subcommand`) or `/delta-share` (`dedicated_command`). */
 type CommandForm = 'delta_subcommand' | 'dedicated_command'
 
@@ -2080,7 +2087,21 @@ async function assertShareSession($: Runtime, request: ShareRequest) {
     throw new Error('The Claude session or folder changed during share; the obsolete share was stopped')
 }
 
-async function share($: Runtime, request: ShareRequest): Promise<string> {
+/**
+ * Whether a session already syncs: it is on the server, or handed to Delta's background uploader. Such
+ * a session keeps its audience when it reconnects and cannot become private to its owner again.
+ */
+function sessionSyncs(binding: Binding | undefined): boolean {
+  return !!binding?.url || !!binding?.autoUpload
+}
+
+/**
+ * What a finished share reports: the thread's link, which a private share may not have until Delta's
+ * background upload registers it, and what the band and transcript say.
+ */
+type ShareOutcome = { url?: string; band: string; notice?: string; skipped?: true }
+
+async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   const { session } = request
   const check = () => assertShareSession($, request)
   await assertShareSession($, request)
@@ -2098,6 +2119,12 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
   await assertShareSession($, request)
   await requireContract($, session)
   await assertShareSession($, request)
+  // Asked before anything is staged, so declining leaves the session exactly as it was.
+  const chosen: ShareAudience | string = request.choose ? await chooseAudience($, session, request.choose.emails) : { kind: 'organization' }
+  if (typeof chosen === 'string') return { band: '', skipped: true, ...chosen ? { notice: chosen } : {} }
+  const audience = chosen
+  await assertShareSession($, request)
+  if (runtime.currentTurnId) throw new Error('Wait for the current Claude turn to finish before sharing or reattaching')
   await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
     await check()
     setProgress($, 'Waiting for Delta sign-in…', 'active')
@@ -2154,14 +2181,23 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
   runtime.deliveryNotice = undefined
   binding = await serial(() => load($, session))
   await assertShareSession($, request)
-  if (!binding.thread) {
+  // A private share hands the thread to Delta's background uploader, as Private sync does, so it needs
+  // an organization to upload to even in a repository with no saved team.
+  const privateUpload = audience.kind === 'private' && !binding.autoUpload
+  if (!binding.thread || privateUpload) {
     // The repository's saved team decides where its sessions go, rather than the organization selected
-    // in Delta: creating the thread under it makes the later `thread share` publish there too.
-    const organization = await savedOrganization($, root)
+    // in Delta: creating the thread under it makes the later `thread share` or invitation publish there too.
+    const organization = (binding.thread ? threadOrganization(binding) : undefined) ?? await savedOrganization($, root) ??
+      (privateUpload ? (await listOrganizations($), currentOrganizationId) : undefined)
+    if (privateUpload && !organization)
+      throw new Error('Delta has no organization to sync this session to; check /delta-org list')
+    // Creation is idempotent: for a thread that already exists, it only records the private upload.
     const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session,
       ...organization ? ['--organization', organization, '--visibility', 'private'] : []], 'thread create', check)
     validateCreationReceipt(created)
-    if (!created.created) {
+    if (binding.thread && created.thread_id !== binding.thread)
+      throw new Error('Delta returned a different thread for this session; the existing binding was preserved')
+    if (!binding.thread && !created.created) {
       const status = await readThreadStatus($, created.thread_id, session)
       validateThreadFrontier(status, { session, thread: created.thread_id, next: binding.next, pending: binding.pending })
       // A durable identity always precedes append. A staged plan alone may have
@@ -2170,7 +2206,10 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
         throw new Error('This Delta producer already contains records, but its local thread identity and receipts are missing. Restore the matching producer state or start a new Claude session; do not reset or reuse sequence numbers. The existing Delta conversation was preserved.')
     }
     // Persist identity before further fallible commands; creation is idempotent if this write fails.
-    await serial(async () => save($, { ...await load($, session), thread: created.thread_id, ...organization ? { organization } : {} }))
+    await serial(async () => save($, {
+      ...await load($, session), thread: created.thread_id, ...organization ? { organization } : {},
+      ...privateUpload ? { autoUpload: { mode: 'private' as const, organization: organization! } } : {},
+    }))
     binding = await serial(() => load($, session))
   }
   await assertShareSession($, request)
@@ -2190,11 +2229,32 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
     await save($, { ...current, checkout: root, checkoutReference: attached.reference })
   })
   await assertShareSession($, request)
-  setProgress($, 'Publishing the thread…', 'active', [4, 5])
-  const shared = await command($, ['thread', 'share', binding.thread!, '--visibility', 'organization'], 'thread share', check,
-    undefined, commandFormEnv(request.form))
-  validatePublicationReceipt(shared, binding.thread)
-  await serial(async () => save($, { ...await load($, session), url: shared.url }))
+  let outcome: ShareOutcome = { band: audience.kind === 'unchanged' ? 'Reconnected' : 'Synced privately' }
+  if (audience.kind === 'unchanged' && !sessionSyncs(binding))
+    throw new Error('This session has not been shared yet; run /delta-share and choose who should see it')
+  // Keeping a thread shared with its organization publishes it again: publication is idempotent, and
+  // repeating it is how a share interrupted after its link was saved is finished.
+  const publish = audience.kind === 'organization' ||
+    (audience.kind === 'unchanged' && binding.visibility !== 'private' && !binding.autoUpload)
+  if (publish) {
+    setProgress($, 'Publishing the thread…', 'active', [4, 5])
+    const shared = await command($, ['thread', 'share', binding.thread!, '--visibility', 'organization'], 'thread share', check,
+      undefined, commandFormEnv(request.form))
+    validatePublicationReceipt(shared, binding.thread)
+    await serial(async () => save($, { ...await load($, session), url: shared.url }))
+    outcome = { url: shared.url, band: 'Shared' }
+  } else if (audience.kind === 'invite') {
+    // Inviting uploads a thread that is not on the server yet privately, so only the people invited see it.
+    setProgress($, 'Sending invitations…', 'active', [4, 5])
+    const invitations = threadInvitationsFrom(await command($, ['thread', 'invite', binding.thread!, '--', ...audience.emails],
+      'thread invite', check, undefined, commandFormEnv(request.form)), binding.thread!)
+    await serial(async () => save($, { ...await load($, session), url: invitations.url }))
+    const invited = invitations.results.filter((result) => result.invited).length
+    outcome = {
+      url: invitations.url, notice: invitationSummary(invitations),
+      band: invited ? `Invited ${invited === 1 ? '1 person' : `${invited} people`}` : 'Synced privately; nobody was invited',
+    }
+  }
   await assertShareSession($, request)
   await startConversation($, session)
   await assertShareSession($, request)
@@ -2206,7 +2266,7 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
     throw new Error('a live row could not be saved locally; fix the outbox error and retry /delta-share')
   await verifyCheckout($, await load($, session))
   await assertShareSession($, request)
-  return shared.url
+  return { ...outcome, url: outcome.url ?? (await serial(() => load($, session))).url }
 }
 
 /**
@@ -2216,9 +2276,11 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
 async function runShare($: Runtime, request: ShareRequest) {
   const { session } = request
   try {
-    const url = await share($, request)
-    finishProgress($, 'Shared', 'done')
-    await $.ui.log(`Delta share link: ${url}`, { to: 'debug' })
+    const outcome = await share($, request)
+    if (outcome.skipped) clearProgress($)
+    else finishProgress($, outcome.band, 'done')
+    if (outcome.notice) await $.ui.log(outcome.notice, { to: 'transcript' })
+    if (outcome.url) await $.ui.log(`Delta share link: ${outcome.url}`, { to: 'debug' })
   } catch (error) {
     if (request.cancelled || sharing !== request) return
     const text = error instanceof AccessRequiredError ? error.message
@@ -2960,17 +3022,25 @@ function setupEnv($: Runtime): SetupEnv {
   }
 }
 
+/**
+ * How many of the plugin's own questions are open. `$.ui.ask` runs as an `AskUserQuestion` tool call,
+ * which is the plugin talking to the person, not the conversation, so it is never recorded.
+ */
+let ownQuestions = 0
+
 /** The interactive surface the wizard speaks through: `$.ui.ask`, when this Claude build has it. */
 function claudeInteraction($: Runtime): Interaction {
   return {
     async ask(question, options) {
       let answer: unknown
+      ownQuestions++
       try { answer = await $.ui.ask(question, options as never) }
       catch (error) {
         // A missing method is a build without the question API; a dismissed dialog rejects too.
         if (error instanceof TypeError) throw new InteractionUnavailable(String(error))
         throw new InteractionDismissed(String(error))
       }
+      finally { ownQuestions-- }
       if (answer === undefined || answer === null || answer === '') throw new InteractionDismissed('dismissed')
       if (typeof answer === 'string') return answer
       const wrapped = answer as { label?: string; value?: string }
@@ -3374,6 +3444,33 @@ async function setupCommand($: Runtime): Promise<string> {
   return outcome.text
 }
 
+/**
+ * Decide who a `/delta share` makes the session visible to: the addresses typed after the command, or
+ * the person's answer to the question. A string is the command's answer when nothing is shared.
+ */
+async function chooseAudience($: Runtime, session: string, typed: string[]): Promise<ShareAudience | string> {
+  // The share has checked the CLI's contract, which says whether it has `thread invite`.
+  const invites = (contractVerified.get(session) ?? 0) >= INVITE_CONTRACT
+  if (typed.length) return invites ? { kind: 'invite', emails: typed }
+    : 'This Delta cannot invite people by email yet. Update Delta, or run /delta-share without addresses.'
+  const binding = stateFor(session).binding
+  if (binding?.joined || binding?.joinTransition) return { kind: 'organization' }
+  await loadOrganizationDirectory($)
+  const organization = (binding ? threadOrganization(binding) : undefined) ??
+    await savedOrganization($, await checkoutRoot($)) ?? currentOrganizationId
+  // A personal organization has nobody to share with, and a thread already shared with its organization stays shared.
+  const team = personalOrganizationIds.has(organization ?? '') || binding?.visibility === 'organization' ? undefined
+    : organizationName(organization) ?? 'your organization'
+  try {
+    return await chooseShareAudience(claudeInteraction($), { team, invites, synced: sessionSyncs(binding) })
+  } catch (error) {
+    if (error instanceof InteractionDismissed) return ''
+    // A Claude without the question API shares with the organization, as before the question existed.
+    if (error instanceof InteractionUnavailable) return { kind: 'organization' }
+    throw error
+  }
+}
+
 /** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
 async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
   // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
@@ -3381,8 +3478,11 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
   const locator = /^join\s+(\S+)$/.exec(action)?.[1]
   const organization = /^org\s+(?:(list|current)|(switch)\s+(\S+))$/.exec(action)
   const invite = /^org\s+invite\b\s*(.*)$/.exec(action)?.[1]
-  if (action !== 'share' && !locator && !organization && invite === undefined)
-    return { text: 'Usage: /delta share | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>…' }
+  // `/delta share` asks who should see the session; addresses typed after it answer that up front.
+  const shareArguments = /^share(?:\s+(.*))?$/.exec(action)?.[1]?.trim() ?? (action === 'share' ? '' : undefined)
+  const shareEmails = shareArguments ? emailsIn(shareArguments) : []
+  if ((shareArguments === undefined || (shareArguments && !shareEmails.length)) && !locator && !organization && invite === undefined)
+    return { text: 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>…' }
   if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
   if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
   if (organization)
@@ -3414,19 +3514,25 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
     }
     if (stateFor(session).currentTurnId)
       return { text: 'Wait for the current Claude turn to finish before sharing.' }
-    const request = { session, cwd: await $.session.cwd(), form }
+    const interactive = hasInteractiveSurface(await $.session.surfaces())
+    // A headless host cannot ask, so without typed addresses it shares with the organization as it always has.
+    const request: ShareRequest = {
+      session, cwd: await $.session.cwd(), form,
+      ...shareEmails.length || interactive ? { choose: { emails: shareEmails } } : {},
+    }
     sharing = shareRequest = request
     setProgress($, 'Preparing to share…', 'active', [1, 5])
-    if (hasInteractiveSurface(await $.session.surfaces())) {
+    if (interactive) {
       $.clock.after(0, () => runShare($, request))
       return {}
     }
     // Cloud and other headless hosts cannot show the band or be relied on to forward
     // background UI notices. Keep the command open so its caller receives the outcome.
-    const url = await share($, request)
-    finishProgress($, 'Shared', 'done')
+    const outcome = await share($, request)
+    if (outcome.skipped) clearProgress($)
+    else finishProgress($, outcome.band, 'done')
     if (sharing === request) sharing = undefined
-    return { text: `Delta share link: ${url}` }
+    return { text: [outcome.notice, outcome.url ? `Delta share link: ${outcome.url}` : ''].filter(Boolean).join('\n') || outcome.band }
   }
   catch (error) {
     if (error instanceof PendingAuthenticationError || error instanceof AccessRequiredError) {
@@ -3963,7 +4069,7 @@ export function register(on: On) {
   })
 
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
+    if (e.agentId !== undefined || (ownQuestions && e.tool === 'AskUserQuestion')) return next(e)
     const session = await $.session.id()
     const runtime = stateFor(session)
     if (runtime.localTurn) return next(e)

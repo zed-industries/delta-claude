@@ -215,7 +215,8 @@ describe('thread commands', () => {
     if (failure === 'record write') fake.failWrite = true
     else fake.failStoreSet = true
     expect(await fake.share($)).toContain('failed')
-    expect(fake.delta()).toEqual([])
+    // Naming the team in the share's question reads the organization list; nothing else runs.
+    expect(fake.delta().filter((argv) => argv[2] !== 'org')).toEqual([])
     expect(fake.watches).toEqual([])
     expect(fake.store.get(`session:${fake.session}`)).toBeUndefined()
     expect(fake.server.thread).toBeUndefined()
@@ -1044,7 +1045,7 @@ describe('thread commands', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 5, max: 6 }
+    fake.contractRange = { min: 6, max: 7 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -1142,7 +1143,7 @@ describe('thread commands', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 5, max: 6 }
+    fake.contractRange = { min: 6, max: 7 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
