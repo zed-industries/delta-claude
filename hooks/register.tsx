@@ -1287,11 +1287,27 @@ function followUpload($: Runtime, session: string) {
 
 /** Sign-in's view of the session; `$` stays in this file, as Claude Code's loader requires. */
 async function authenticationHost($: Runtime): Promise<AuthenticationHost> {
+  const windows = await $.env.get('OS') === 'Windows_NT'
   return {
-    windows: await $.env.get('OS') === 'Windows_NT',
+    windows,
     sleep: (milliseconds, signal) => $.clock.sleep(milliseconds, { signal }),
     spawn: (argv) => $.process.spawn({ argv }),
+    ask: (question, options) => claudeInteraction($).ask(question, { options, header: 'Delta' }),
+    open: (url) => openInBrowser($, url, windows),
   }
+}
+
+/**
+ * Open a web page in the person's browser, answering whether it opened. macOS has `open`; elsewhere
+ * that name is missing or another program, so its failure falls back to the desktop's `xdg-open`.
+ */
+async function openInBrowser($: Runtime, url: string, windows: boolean): Promise<boolean> {
+  const attempts = windows ? [['rundll32', 'url.dll,FileProtocolHandler', url]] : [['open', url], ['xdg-open', url]]
+  for (const argv of attempts) {
+    const opened = await $.process.run(argv, { timeoutMs: RELEASE_TIMEOUT_MS }).catch(() => ({ exitCode: 1 }))
+    if (opened.exitCode === 0) return true
+  }
+  return false
 }
 
 async function resolveCli($: Runtime, allowInstall = false, progress = (text: string) => setProgress($, text, 'active')) {
@@ -4716,7 +4732,9 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
           // A cancelled or failed login needs an explicit retry, never another browser on each prompt.
           await stopAutomaticRecording($, session, root, {
             band: 'Not syncing: Delta sign-in incomplete · /delta-share',
-            transcript: `${error instanceof Error ? error.message : String(error)}\nThis session isn't syncing. Run /delta-share to retry.`,
+            // An access requirement already says nothing was synced and how to retry.
+            transcript: error instanceof AccessRequiredError ? error.message
+              : `${error instanceof Error ? error.message : String(error)} This session isn't syncing. Run /delta-share to retry.`,
           })
           return
         }

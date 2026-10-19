@@ -730,6 +730,9 @@ export function fakeThreads(on: On, options: {
       // `/delta share` asks who should see the session; unless a test answers, it takes the first
       // option, sharing with the organization as the command did before it asked.
       const question = (e as any).input?.questions?.[0] ?? (e as any).questions?.[0]
+      // Sign-in asks before opening the browser; unless a test answers, the person agrees.
+      if (question?.question?.startsWith('Delta needs you to sign in'))
+        return { result: { answers: { [question.question]: 'Sign in' } } } as never
       if (question?.question?.startsWith('Who should see this session?'))
         return { result: { answers: { [question.question]: question.options[0].label } } } as never
       return { deny: 'the person dismissed the question' } as never

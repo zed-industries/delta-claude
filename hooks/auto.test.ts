@@ -864,6 +864,7 @@ describe('setup dialogs and notices', () => {
       const text = question.questions[0].question
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
       const answer = text.startsWith('Set up Delta syncing') ? 'Set it up'
+        : text.startsWith('Delta needs you to sign in') ? 'Sign in'
         : offered.find((label: string) => label === 'Zed' || label.startsWith('Manual'))
       return { result: { answers: { [text]: answer } } }
     }
