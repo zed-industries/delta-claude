@@ -6,6 +6,7 @@
 
 import { policyPath, readProjectPolicy, recordsAutomatically, serializeProjectPolicy, type PolicyFile, type ThreadMode } from './project-policy'
 import { commandErrorFromEnvelope, contractRefusal, type ThreadContract } from './thread-commands'
+import { AccessRequiredError } from './auth'
 
 /** A question could not be shown: this Claude has no interactive question API. */
 export class InteractionUnavailable extends Error {}
@@ -50,8 +51,10 @@ export type SetupEnv = {
   checkoutRoot(): Promise<string>
   /** The absolute Git common directory, shared by linked worktrees. */
   gitCommonDir(): Promise<string | undefined>
-  /** The recording contract this CLI speaks, or undefined when it predates `thread contract`. */
+  /** Find or install the CLI and read its contract; undefined when it predates `thread contract`. */
   contract(): Promise<ThreadContract | undefined>
+  /** Sign in before account operations, only after the person chooses to set up syncing. */
+  authenticate(notice: (text: string) => Promise<void>): Promise<void>
   /** Organizations for `thread create`, or a typed rejection when the CLI cannot list them. */
   organizations(): Promise<Organization[]>
   /** The signed-in account's GitHub login, or undefined when it cannot be read. */
@@ -251,8 +254,16 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   }
 
   // A Delta this plugin cannot record against would make every choice below fail later.
-  const refusal = contractRefusal(await env.contract())
+  let contract: ThreadContract | undefined
+  try { contract = await env.contract() }
+  catch (error) { return { status: 'failed', text: `/delta-setup could not prepare Delta: ${String(error)}` } }
+  const refusal = contractRefusal(contract)
   if (refusal) return { status: 'failed', text: `/delta-setup: ${refusal}, then run /delta-setup again.` }
+
+  try { await env.authenticate((text) => interaction.log(text, 'transcript')) }
+  catch (error) {
+    return { status: 'failed', text: error instanceof AccessRequiredError ? error.message : `/delta-setup could not sign in to Delta: ${String(error)}` }
+  }
 
   let organizations: Organization[]
   try { organizations = await env.organizations() }

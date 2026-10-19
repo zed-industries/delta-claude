@@ -1294,11 +1294,11 @@ async function authenticationHost($: Runtime): Promise<AuthenticationHost> {
   }
 }
 
-async function resolveCli($: Runtime, allowInstall = false) {
+async function resolveCli($: Runtime, allowInstall = false, progress = (text: string) => setProgress($, text, 'active')) {
   return cli.resolve((argv, init) => $.process.run(argv, {
     ...init, env: { ...init?.env, DELTA_CLI_INTEGRATION: 'claude_code' },
   }), allowInstall,
-    (text) => setProgress($, text, 'active'), await $.env.get('OS') === 'Windows_NT'
+    progress, await $.env.get('OS') === 'Windows_NT'
       ? { exists: (path) => $.fs.exists(path) } : false)
 }
 
@@ -4314,8 +4314,20 @@ async function savedOrganization($: Runtime, root: string): Promise<string | und
 
 /** The host bindings the setup wizard and onboarding run against. */
 function setupEnv($: Runtime): SetupEnv {
+  const session = active
+  const epoch = sessionEpoch
+  let cwd: string | undefined
+  const check = async () => {
+    if (active !== session || sessionEpoch !== epoch || await $.session.id() !== session ||
+        (cwd !== undefined && !samePath(await $.session.cwd(), cwd)))
+      throw new Error('The Claude session or folder changed during setup; the obsolete setup was stopped')
+  }
   return {
-    checkoutRoot: () => checkoutRoot($),
+    checkoutRoot: async () => {
+      cwd = await $.session.cwd()
+      await check()
+      return checkoutRoot($)
+    },
     // Linked worktrees share the common directory, so they share one onboarding marker. Git before
     // 2.31 has no `--path-format`, so the directory is resolved against the checkout root instead.
     gitCommonDir: async () => {
@@ -4328,7 +4340,26 @@ function setupEnv($: Runtime): SetupEnv {
         return /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(lines[0]) ? lines[0] : `${root}/${lines[0]}`
       } catch { return undefined }
     },
-    contract: () => readThreadContract($),
+    contract: async () => {
+      let progress: typeof feed.progress
+      try {
+        await check()
+        await resolveCli($, true, (text) => {
+          setProgress($, text, 'active')
+          progress = feed.progress
+        })
+        await check()
+        const contract = await readThreadContract($)
+        await check()
+        return contract
+      } finally {
+        if (progress && feed.progress === progress) clearProgress($)
+      }
+    },
+    authenticate: async (notice) => {
+      await requireAuthentication(await authenticationHost($), await resolveCli($), check, notice, '/delta-setup')
+      await check()
+    },
     organizations: () => listOrganizations($),
     login: () => readLogin($),
     createOrganization: (name) => createOrganization($, name),
