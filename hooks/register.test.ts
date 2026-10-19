@@ -437,7 +437,8 @@ describe('thread commands', () => {
     // A new session starts its backoff over rather than inheriting the old attempts.
     fake.appendFaults.push(appendEnvelope('failed', 'Delta did not confirm the record', { reason: 'sync', retryable: true }))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    // Recovery is a chain of host calls, which a loaded machine can leave unfinished after one settle.
+    await fake.settleUntil(() => fake.appendCalls > calls)
     expect(fake.appendCalls).toBe(calls + 1)
     await fake.clock.advance(2000)
     expect(fake.appendCalls).toBe(calls + 2)

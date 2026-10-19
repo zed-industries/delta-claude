@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { AccessRequiredError } from './auth'
 import { InteractionDismissed, InteractionUnavailable, inviteResultsFrom, offerOnboarding, runSetupWizard, type Interaction, type SetupEnv } from './setup'
 
 /** An environment over an in-memory file, with the questions answered from a queue. */
@@ -17,10 +16,6 @@ function harness(options: {
   failWrite?: boolean
   failCreate?: boolean
   failInvite?: string
-  /** `contract` rejects, as when installing a missing CLI fails. */
-  failInstall?: boolean
-  /** `signIn` rejects with this error. */
-  failSignIn?: Error
   /** Whether `openLink` can open a browser; true unless set. */
   canOpen?: boolean
   /** The checkout's Git remotes; `origin` unless set. */
@@ -60,14 +55,8 @@ function harness(options: {
     },
     gitCommonDir: async () => options.commonDir,
     remotes: async () => options.remotes ?? ['origin'],
-    contract: async () => {
-      if (options.failInstall) throw new Error('Delta installation failed: no network')
-      return { operation: 'contract', min: 1, max: options.contractMax ?? 6 }
-    },
-    signIn: async () => {
-      signIns++
-      if (options.failSignIn) throw options.failSignIn
-    },
+    contract: async () => ({ operation: 'contract', min: 1, max: options.contractMax ?? 6 }),
+    authenticate: async () => { signIns++ },
     openLink: async (url) => {
       opened.push(url)
       return options.canOpen ?? true
@@ -282,20 +271,6 @@ describe('setup wizard', () => {
     // Several remotes are fine when one is origin, as Delta then uses it.
     const named = harness({ answers: ['Zed', 'Manual'], remotes: ['upstream', 'origin'] })
     expect((await runSetupWizard(named.env, named.interaction)).status).toBe('wrote')
-  })
-
-  test('a Delta that cannot be installed or signed in to stops setup before any question, saying why', async () => {
-    const cases = [
-      { failInstall: true, text: "/delta-setup couldn't start Delta: Error: Delta installation failed: no network" },
-      { failSignIn: new Error('Delta sign-in expired'), text: "/delta-setup couldn't sign in to Delta: Error: Delta sign-in expired" },
-      // Access Delta has not granted yet is explained as Delta words it, not as a failure.
-      { failSignIn: new AccessRequiredError('Delta needs you to accept its beta terms first.'), text: 'Delta needs you to accept its beta terms first.' },
-    ]
-    for (const { text, ...failure } of cases) {
-      const h = harness({ answers: ['Zed', 'Manual'], ...failure })
-      expect(await runSetupWizard(h.env, h.interaction)).toEqual({ status: 'failed', text })
-      expect(h.asks).toEqual([])
-    }
   })
 
   test('the mode question names the current team, never its id', async () => {

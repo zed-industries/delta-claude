@@ -38,7 +38,7 @@ import {
   HISTORY_BUDGET, adoptionPrompt, deltaTurnReport, finishedReport, historyText, isOwnItem, itemsSince,
   looksLikeThreadLink, namedThread, resumePrompt, threadsNote, type ThreadTarget,
 } from './delta-threads'
-import { AccessRequiredError, requireAuthentication, type AuthenticationHost } from './auth'
+import { AccessRequiredError, requireAuthentication, type AuthenticationHost, type BrowserWait } from './auth'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
 } from './handoff'
@@ -1292,19 +1292,68 @@ function followUpload($: Runtime, session: string) {
 }
 
 /** Sign-in's view of the session; `$` stays in this file, as Claude Code's loader requires. */
+/** The sign-in waiting on the person's browser, which running a Delta command again offers to stop. */
+let browserWait: { on: BrowserWait; stop: AbortController } | undefined
+
 async function authenticationHost($: Runtime): Promise<AuthenticationHost> {
+  const windows = await $.env.get('OS') === 'Windows_NT'
+  const stop = new AbortController()
+  let progress: typeof feed.progress
   return {
-    windows: await $.env.get('OS') === 'Windows_NT',
+    windows,
     sleep: (milliseconds, signal) => $.clock.sleep(milliseconds, { signal }),
     spawn: (argv) => $.process.spawn({ argv }),
+    ask: (question, options) => claudeInteraction($).ask(question, { options, header: 'Delta' }),
+    open: (url) => openInBrowser($, url, windows),
+    waiting: (on) => {
+      if (on) {
+        browserWait = { on, stop }
+        setProgress($, on === 'terms' ? "Waiting for Delta's beta terms…" : 'Waiting for Delta sign-in…', 'active')
+        progress = feed.progress
+        return
+      }
+      if (browserWait?.stop === stop) browserWait = undefined
+      // What follows sets its own progress; a band still showing the wait would outlive it.
+      if (progress && feed.progress === progress) clearProgress($)
+    },
+    stop: stop.signal,
   }
 }
 
-async function resolveCli($: Runtime, allowInstall = false) {
+/**
+ * Offer to stop a sign-in waiting on the browser, answering whether one was waiting. Whatever waited
+ * reports the outcome itself, so the command that asked adds nothing of its own.
+ */
+async function offerToStopWaiting($: Runtime): Promise<boolean> {
+  const wait = browserWait
+  if (!wait) return false
+  const stop = 'Stop waiting'
+  const answer = await claudeInteraction($).ask(wait.on === 'terms'
+    ? 'Delta is waiting for you to accept its beta terms in your browser. Stop waiting?'
+    : 'Delta is waiting for you to finish signing in with your browser. Stop waiting?',
+  { options: [stop, 'Keep waiting'], header: 'Delta' }).catch(() => undefined)
+  if (answer === stop) wait.stop.abort()
+  return true
+}
+
+/**
+ * Open a web page in the person's browser, answering whether it opened. macOS has `open`; elsewhere
+ * that name is missing or another program, so its failure falls back to the desktop's `xdg-open`.
+ */
+async function openInBrowser($: Runtime, url: string, windows: boolean): Promise<boolean> {
+  const attempts = windows ? [['rundll32', 'url.dll,FileProtocolHandler', url]] : [['open', url], ['xdg-open', url]]
+  for (const argv of attempts) {
+    const opened = await $.process.run(argv, { timeoutMs: RELEASE_TIMEOUT_MS }).catch(() => ({ exitCode: 1 }))
+    if (opened.exitCode === 0) return true
+  }
+  return false
+}
+
+async function resolveCli($: Runtime, allowInstall = false, progress = (text: string) => setProgress($, text, 'active')) {
   return cli.resolve((argv, init) => $.process.run(argv, {
     ...init, env: { ...init?.env, DELTA_CLI_INTEGRATION: 'claude_code' },
   }), allowInstall,
-    (text) => setProgress($, text, 'active'), await $.env.get('OS') === 'Windows_NT'
+    progress, await $.env.get('OS') === 'Windows_NT'
       ? { exists: (path) => $.fs.exists(path) } : false)
 }
 
@@ -3399,7 +3448,7 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   if (runtime.currentTurnId) throw new Error('Wait for the current Claude turn to finish before sharing or reattaching')
   await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
     await check()
-    setProgress($, SIGN_IN_PROGRESS, 'active')
+    setProgress($, 'Waiting for Delta sign-in…', 'active')
     await $.ui.log(text, { to: 'transcript' })
   })
   await check()
@@ -3654,7 +3703,7 @@ async function join($: Runtime, request: JoinRequest) {
     }
     await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
       await check()
-      setProgress($, SIGN_IN_PROGRESS, 'active')
+      setProgress($, 'Waiting for Delta sign-in…', 'active')
       await $.ui.log(text, { to: 'transcript' })
     })
     await check()
@@ -4333,8 +4382,20 @@ async function savedOrganization($: Runtime, root: string): Promise<string | und
 
 /** The host bindings the setup wizard and onboarding run against. */
 function setupEnv($: Runtime): SetupEnv {
+  const session = active
+  const epoch = sessionEpoch
+  let cwd: string | undefined
+  const check = async () => {
+    if (active !== session || sessionEpoch !== epoch || await $.session.id() !== session ||
+        (cwd !== undefined && !samePath(await $.session.cwd(), cwd)))
+      throw new Error('The Claude session or folder changed during setup; the obsolete setup was stopped')
+  }
   return {
-    checkoutRoot: () => checkoutRoot($),
+    checkoutRoot: async () => {
+      cwd = await $.session.cwd()
+      await check()
+      return checkoutRoot($)
+    },
     // Linked worktrees share the common directory, so they share one onboarding marker. Git before
     // 2.31 has no `--path-format`, so the directory is resolved against the checkout root instead.
     gitCommonDir: async () => {
@@ -4348,28 +4409,30 @@ function setupEnv($: Runtime): SetupEnv {
       } catch { return undefined }
     },
     remotes: async () => gitRemotes($, await checkoutRoot($)),
-    contract: async () => {
-      try { await resolveCli($, true) }
-      finally { clearSetupProgress($) }
-      return readThreadContract($)
-    },
-    signIn: async () => {
-      const session = await $.session.id()
-      const check = async () => {
-        if (active !== session) throw new Error('The session changed during sign-in; run /delta-setup again')
-      }
-      try {
-        await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
-          await check()
-          setProgress($, SIGN_IN_PROGRESS, 'active')
-          await $.ui.log(text, { to: 'transcript' })
-        })
-      } finally { clearSetupProgress($) }
-    },
     // Opening links from a plugin needs macOS's `open`; anywhere else the person opens it.
     openLink: async (url) => {
       const opened = await $.process.run(['open', url], { timeoutMs: 10_000 }).catch(() => undefined)
       return opened?.exitCode === 0
+    },
+    contract: async () => {
+      let progress: typeof feed.progress
+      try {
+        await check()
+        await resolveCli($, true, (text) => {
+          setProgress($, text, 'active')
+          progress = feed.progress
+        })
+        await check()
+        const contract = await readThreadContract($)
+        await check()
+        return contract
+      } finally {
+        if (progress && feed.progress === progress) clearProgress($)
+      }
+    },
+    authenticate: async (notice) => {
+      await requireAuthentication(await authenticationHost($), await resolveCli($), check, notice, '/delta-setup')
+      await check()
     },
     organizations: () => listOrganizations($),
     login: () => readLogin($),
@@ -4387,17 +4450,6 @@ function setupEnv($: Runtime): SetupEnv {
     },
     shareSession: async (audience) => beginShare($, await $.session.id(), { kind: audience }),
   }
-}
-
-const SIGN_IN_PROGRESS = 'Waiting for Delta sign-in…'
-
-/**
- * Take down the band line setup showed while installing Delta or waiting for sign-in. Share and join
- * replace those lines with their next step, but setup has none to show.
- */
-function clearSetupProgress($: Runtime) {
-  const text = feed.progress?.text ?? ''
-  if (text.startsWith('Installing Delta') || text === SIGN_IN_PROGRESS) clearProgress($)
 }
 
 /**
@@ -4741,7 +4793,9 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
       if (!ownsActivation()) return
       const refusal = await misconfiguration
       if (!ownsActivation()) return
-      if (refusal) {
+      const interactive = hasInteractiveSurface(await $.session.surfaces())
+      if (!ownsActivation()) return
+      if (refusal && !(refusal === SIGNED_OUT_REFUSAL && interactive)) {
         await stopAutomaticRecording($, session, root, refusal)
         return
       }
@@ -4757,6 +4811,40 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
       if (!ownsActivation()) return
       // The snapshot exists now, so new-session activity may pass; the network steps stay asynchronous.
       decideCapture(session)
+      if (interactive) {
+        // Authentication may wait on the browser for minutes. Capture locally first, so the person
+        // can keep working and this same session uploads everything once sign-in finishes.
+        const check = async () => {
+          if (!ownsActivation()) throw new Error('Delta automatic sign-in stopped')
+        }
+        try {
+          await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
+            await check()
+            setProgress($, 'Waiting for Delta sign-in…', 'active')
+            await $.ui.log(text, { to: 'transcript' })
+          }, '/delta-share')
+        } catch (error) {
+          if (!ownsActivation()) return
+          // A cancelled or failed login needs an explicit retry, never another browser on each prompt.
+          await stopAutomaticRecording($, session, root, {
+            band: 'Not syncing: Delta sign-in incomplete · /delta-share',
+            // An access requirement already says nothing was synced and how to retry.
+            transcript: error instanceof AccessRequiredError ? error.message
+              : `${error instanceof Error ? error.message : String(error)} This session isn't syncing. Run /delta-share to retry.`,
+          })
+          return
+        }
+        if (!ownsActivation()) return
+        if (refusal === SIGNED_OUT_REFUSAL) {
+          // Only the signed-in account can answer which organizations it belongs to.
+          const afterSignIn = await policyMisconfiguration($, upload.organization)
+          if (!ownsActivation()) return
+          if (afterSignIn) {
+            await stopAutomaticRecording($, session, root, afterSignIn)
+            return
+          }
+        }
+      }
       setProgress($, 'Connecting this session to Delta…', 'active')
       const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session,
         '--organization', upload.organization, '--visibility', upload.mode], 'thread create')
@@ -5016,6 +5104,8 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
 
 /** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
 async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
+  // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
+  if (/^(?:setup|share|join)\b/.test(action) && await offerToStopWaiting($)) return {}
   // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
   if (action === 'setup') return { text: await setupCommand($) }
   const locator = /^join\s+(\S+)$/.exec(action)?.[1]

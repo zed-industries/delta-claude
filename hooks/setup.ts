@@ -55,13 +55,10 @@ export type SetupEnv = {
   gitCommonDir(): Promise<string | undefined>
   /** The checkout's Git remote names, or undefined when Git cannot list them. */
   remotes(): Promise<string[] | undefined>
-  /**
-   * The recording contract this CLI speaks, or undefined when it predates `thread contract`. A missing
-   * CLI is installed first; rejects when that fails.
-   */
+  /** Find or install the CLI and read its contract; undefined when it predates `thread contract`. */
   contract(): Promise<ThreadContract | undefined>
-  /** Sign in to Delta in the browser when signed out; rejects when sign-in does not finish. */
-  signIn(): Promise<void>
+  /** Sign in before account operations, only after the person chooses to set up syncing. */
+  authenticate(notice: (text: string) => Promise<void>): Promise<void>
   /** Open a web page in the person's browser; false when this platform cannot. */
   openLink(url: string): Promise<boolean>
   /** Organizations for `thread create`, or a typed rejection when the CLI cannot list them. */
@@ -295,17 +292,15 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     if (await interaction.ask(`Replace the unreadable Delta settings at ${path}?`, { options: ['Replace it', 'Cancel'], header: HEADER }) !== 'Replace it') return CANCELLED
   }
 
-  // A Delta this plugin cannot record against would make every choice below fail later. A missing CLI
-  // is installed first, as `/delta-share` installs it, so a new user's setup starts there.
+  // A Delta this plugin cannot record against would make every choice below fail later.
   let contract: ThreadContract | undefined
   try { contract = await env.contract() }
-  catch (error) { return { status: 'failed', text: `/delta-setup couldn't start Delta: ${String(error)}` } }
+  catch (error) { return { status: 'failed', text: `/delta-setup could not prepare Delta: ${String(error)}` } }
   const refusal = contractRefusal(contract)
   if (refusal) return { status: 'failed', text: `/delta-setup: ${refusal}, then run /delta-setup again.` }
-  try { await env.signIn() }
+  try { await env.authenticate((text) => interaction.log(text, 'transcript')) }
   catch (error) {
-    if (error instanceof AccessRequiredError) return { status: 'failed', text: error.message }
-    return { status: 'failed', text: `/delta-setup couldn't sign in to Delta: ${String(error)}` }
+    return { status: 'failed', text: error instanceof AccessRequiredError ? error.message : `/delta-setup could not sign in to Delta: ${String(error)}` }
   }
 
   let organizations: Organization[]

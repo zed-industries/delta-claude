@@ -15,8 +15,9 @@ You need Claude Code **2.1.287 or newer**. Inside Claude Code, run:
 ```
 
 The plugin uses the `delta` CLI. If it isn't installed on macOS or Linux, the
-plugin installs it the first time you set up, share, or join, and Delta opens your
-browser to sign in. On Windows, install Delta from [delta.dev](https://delta.dev) first.
+plugin installs it the first time you set up syncing, share, or join, and Delta
+offers to open your browser to sign in. You don't need to open the Delta app first.
+On Windows, install Delta from [delta.dev](https://delta.dev) first.
 
 ## Usage
 
@@ -34,6 +35,12 @@ Setup can create a team and invite teammates by email. It saves your choice to
 
 The plugin offers setup once per repository: right after you install it, or the
 first time you start a session in a repository that isn't set up yet.
+
+If automatic sync needs you to sign in, an interactive session asks before opening
+your browser. If Delta's beta terms still need accepting, it offers to open them too.
+You can keep working while you finish; that same session then syncs, including
+messages recorded while it waited. To stop waiting, run `/delta-share` again.
+Headless sessions never open a browser.
 
 ### Sharing
 
