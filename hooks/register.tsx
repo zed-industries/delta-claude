@@ -962,7 +962,7 @@ function audienceLabel(binding: Binding | undefined): string | undefined {
   if (!binding?.visibility) return undefined
   if (binding.visibility === 'unlisted') return 'Unlisted'
   const organization = threadOrganization(binding) ?? currentOrganizationId
-  const name = organizationName(organization) ?? 'your organization'
+  const name = organizationName(organization) ?? 'your team'
   return binding.visibility === 'private' || personalOrganizationIds.has(organization ?? '')
     ? `Synced with ${name}` : `Shared with ${name}`
 }
@@ -1637,12 +1637,12 @@ async function organizationCommand($: Runtime, args: string[]) {
     const executable = await resolveCli($)
     const result = await $.process.run([executable, 'org', ...args], { timeoutMs: 120_000 })
     if (result.isStdoutTruncated || result.isStderrTruncated)
-      throw new Error('Delta organization output was truncated; check the selection with /delta-org current.')
+      throw new Error('Delta team output was truncated; check the selection with /delta-org current.')
     if (result.exitCode !== 0)
       throw new Error(result.stderr.trim() || result.stdout.trim() || `Delta exited with code ${result.exitCode}`)
     return { text: result.stdout.trim() }
   } catch (error) {
-    return { text: `Delta organization command failed: ${String(error)}` }
+    return { text: `Delta team command failed: ${String(error)}` }
   }
 }
 
@@ -3464,7 +3464,7 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
     const organization = (binding.thread ? threadOrganization(binding) : undefined) ?? await savedOrganization($, root) ??
       (privateUpload ? currentOrganizationId : undefined)
     if (privateUpload && !organization)
-      throw new Error('Delta has no organization to sync this session to; check /delta-org list')
+      throw new Error('Delta has no team to sync this session to; check /delta-org list')
     // Creation is idempotent: for a thread that already exists, it only records the private upload.
     const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session,
       ...organization ? ['--organization', organization, '--visibility', 'private'] : []], 'thread create', check)
@@ -4719,8 +4719,8 @@ const SIGNED_OUT_REFUSAL: ActivationRefusal = {
 function notMemberRefusal(organization: string): ActivationRefusal {
   const name = organizationName(organization)
   return {
-    band: "Not syncing: your Delta account isn't in this repo's organization · /delta-share",
-    transcript: `This repository syncs sessions to ${name ? `${name} (${organization})` : organization}, which your Delta account isn't a member of, so this session isn't syncing. Use /delta-share to share it with your own organization, ask to be added to ${name ?? 'that organization'}, or run /delta-setup if the settings name the wrong organization.`,
+    band: "Not syncing: your Delta account isn't in this repo's team · /delta-share",
+    transcript: `This repository syncs sessions to ${name ? `${name} (${organization})` : organization}, which your Delta account isn't a member of, so this session isn't syncing. Use /delta-share to share it with your own team, ask to be added to ${name ?? 'that team'}, or run /delta-setup if the settings name the wrong team.`,
   }
 }
 
@@ -4915,7 +4915,7 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
     await savedOrganization($, await checkoutRoot($)) ?? currentOrganizationId
   // A personal organization has nobody to share with, and a thread already shared with its organization stays shared.
   const team = personalOrganizationIds.has(organization ?? '') || binding?.visibility === 'organization' ? undefined
-    : organizationName(organization) ?? 'your organization'
+    : organizationName(organization) ?? 'your team'
   try {
     return await chooseShareAudience(claudeInteraction($), { team, synced: sessionSyncs(binding) })
   } catch (error) {
@@ -4948,7 +4948,7 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
     if (!emails.length) {
       // The current organization is known once anything has listed them; otherwise link the dashboard itself.
       const members = currentOrganizationId ? membersUrl(currentOrganizationId) : DASHBOARD_URL
-      return { text: `Usage: /delta-org invite <email> [<email>…]. Invites people to your current Delta organization. To invite many people at once, use the dashboard: ${members}` }
+      return { text: `Usage: /delta-org invite <email> [<email>…]. Invites people to your current Delta team. To invite many people at once, use the dashboard: ${members}` }
     }
     return organizationCommand($, ['invite', '--', ...emails])
   }
@@ -5513,14 +5513,14 @@ export function register(on: On) {
   })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, or choose an organization', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | org list | org current | org switch <ID>' })
+    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, or choose a team', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | org list | org current | org switch <ID>' })
     // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
     // appears in the slash-command menu.
     await $.command.register({ name: 'delta-share', description: 'Delta: sync this session and its code to DeltaDB, and choose who sees it', argumentHint: '[<email>…]' })
     // Claude's menu shows a command's description but not its argument hint, so the description carries the format.
     await $.command.register({ name: 'delta-join', description: 'Delta: join a shared conversation. Needs its link: /delta-join <link>', argumentHint: '<shared-link-or-thread>' })
     await $.command.register({ name: 'delta-setup', description: 'Delta: choose which sessions in this repository sync to DeltaDB' })
-    await $.command.register({ name: 'delta-org', description: 'Delta: manage your organization. /delta-org list, current, switch <ID>, or invite <email>', argumentHint: 'list | current | switch <ID> | invite <email>…' })
+    await $.command.register({ name: 'delta-org', description: 'Delta: manage your team. /delta-org list, current, switch <ID>, or invite <email>', argumentHint: 'list | current | switch <ID> | invite <email>…' })
     const result = await next(e)
     const session = await $.session.id()
     try { await activate($, session) }
@@ -5593,7 +5593,7 @@ export function register(on: On) {
   on('command.run', { command: 'delta-setup' }, async ($, e) => runDeltaCommand($, `setup ${e.args.trim()}`.trim(), 'dedicated_command'))
   on('command.run', { command: 'delta-org' }, async ($, e) => e.args.trim()
     ? runDeltaCommand($, `org ${e.args.trim()}`, 'dedicated_command')
-    : { text: 'Usage: /delta-org list (your organizations), /delta-org current (the selected one), /delta-org switch <ID>, or /delta-org invite <email>… (invite people to the selected one).' })
+    : { text: 'Usage: /delta-org list (your teams), /delta-org current (the selected one), /delta-org switch <ID>, or /delta-org invite <email>… (invite people to the selected one).' })
 
   on('session.append', async ($, e, next) => {
     if (e.agentId !== undefined) {

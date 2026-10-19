@@ -169,11 +169,11 @@ export function classifyCommandFailure(error: unknown): FailureClass {
 export function permanentFailureAdvice(code: string, automatic = false, reason?: string): string {
   // Delta publishes an organization mismatch as `invalid_invocation`; only the reason tells it apart.
   if (reason === 'organization_mismatch')
-    return 'This thread already syncs to a different Delta organization, so who can see it can\'t change'
+    return 'This thread already syncs to a different Delta team, so who can see it can\'t change'
   if (['not_visible', 'authentication_required', 'wrong_account'].includes(code))
     return 'Check your Delta sign-in and access to this thread'
   if (code === 'organization_required')
-    return 'Find your organization with `/delta-org list`, then select it with `/delta-org switch <ID>`'
+    return 'Find your team with `/delta-org list`, then select it with `/delta-org switch <ID>`'
   if (code === 'not_shared')
     // An automatic session uploads by intent, so it recovers by retrying, not by publishing.
     return automatic ? 'This repository hasn\'t finished setting up syncing with Delta' : 'Share the thread with /delta-share'

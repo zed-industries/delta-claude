@@ -141,7 +141,7 @@ export type SetupOutcome = {
   text: string
 }
 
-const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Private sync', organization: 'Organization sharing' }
+const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Private sync', organization: 'Team sharing' }
 /**
  * Each mode's answer in the setup question, recommended one first. `$.ui.ask` shows no per-option
  * description, so the label carries its own short explanation. A personal organization has nobody
@@ -150,12 +150,12 @@ const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Pri
 function modeLabels(organization: Organization | undefined, personal: boolean): [ThreadMode, string][] {
   return [
     ['private', 'Private sync (every new session, only you see it until you share)'],
-    ...personal ? [] : [['organization', `Organization sharing (every new session, visible to ${organization?.name ?? 'your organization'})`] as [ThreadMode, string]],
+    ...personal ? [] : [['organization', `Team sharing (every new session, visible to ${organization?.name ?? 'your team'})`] as [ThreadMode, string]],
     ['manual', 'Manual (only sessions you share with /delta-share)'],
   ]
 }
 /** The organization picker's last option, offered alongside every existing team. */
-const CREATE_ORGANIZATION = 'Create a new organization'
+const CREATE_ORGANIZATION = 'Create a new team'
 /** The team question's alternative for an account with only a personal organization. */
 const KEEP_PERSONAL = 'Skip: keep sessions personal; share one by email with /delta-share'
 /** The tag above each setup question; Claude Code allows at most 12 characters. */
@@ -256,12 +256,12 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
 
   let organizations: Organization[]
   try { organizations = await env.organizations() }
-  catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta organizations: ${String(error)}` } }
+  catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta teams: ${String(error)}` } }
   // A policy that records to an organization this account isn't in records nothing for it; say so
   // before asking, so the person can see why.
   if (recordsAutomatically(file.policy) && file.policy.organization && organizations.length &&
       !organizations.some((org) => org.id === file.policy.organization))
-    await interaction.log(`This repository syncs to ${file.policy.organization}, which your Delta account isn't a member of, so its sessions don't sync for you. Choose an organization you're in, or cancel to leave it unchanged.`, 'transcript')
+    await interaction.log(`This repository syncs to ${file.policy.organization}, which your Delta account isn't a member of, so its sessions don't sync for you. Choose a team you're in, or cancel to leave it unchanged.`, 'transcript')
 
   // The team comes first, so sessions land in an organization they can later be shared from: a
   // thread's organization never changes once it syncs, and a personal one has nobody to share with.
@@ -276,7 +276,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   const offered = current ? [current, ...teams.filter((org) => org !== current)].slice(0, MAX_ORGANIZATION_OPTIONS) : []
   const alternative = teams.length ? [] : [personalOrganization ? KEEP_PERSONAL : 'Cancel']
   const question = teams.length
-    ? 'Which team should this checkout sync to? Choose one, create a new one, or type an exact organization name or id.'
+    ? "Which team should this checkout sync to? Choose one, create a new one, or type a team's exact name or id."
     : 'Delta syncs your sessions into a team, so you can share them later; only you see them until you do. Type a name to create your team.'
   let chosen: Organization | SetupOutcome | 'declined' | undefined
   while (!chosen || chosen === 'declined') {
@@ -356,8 +356,8 @@ async function createTeam(env: SetupEnv, interaction: Interaction, answer: strin
   if (!name || name.startsWith('/')) return undefined
   let created: Organization
   try { created = await env.createOrganization(name) }
-  catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the organization "${name}": ${String(error)}. Check /delta-org list before trying again; it may have been created.` } }
-  await interaction.log(`Created the Delta organization "${created.name}".`, 'transcript')
+  catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the team "${name}": ${String(error)}. Check /delta-org list before trying again; it may have been created.` } }
+  await interaction.log(`Created the team "${created.name}".`, 'transcript')
   await offerInvites(env, interaction, created)
   return created
 }

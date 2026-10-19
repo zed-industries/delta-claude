@@ -638,7 +638,7 @@ describe('offline recording', () => {
     // The membership check runs before staging, so nothing is created or queued.
     expect(fake.operations()).not.toContain('create')
     expect(binding(fake)).toBeUndefined()
-    expect(await drawn($)).toContain("isn't in this repo's organization")
+    expect(await drawn($)).toContain("isn't in this repo's team")
     expect(explained()).toBe(1)
     expect((await $.prompt.submit(prompt('one'))).drop).toBeUndefined()
     await fake.clock.settle()
@@ -647,7 +647,7 @@ describe('offline recording', () => {
 
     // The next new session in the repository keeps the band line without repeating the explanation.
     await startAuto($, fake, 'clear')
-    expect(await drawn($)).toContain("isn't in this repo's organization")
+    expect(await drawn($)).toContain("isn't in this repo's team")
     expect(explained()).toBe(1)
     fake.expectClean()
   })
@@ -671,7 +671,7 @@ describe('offline recording', () => {
     await fake.clock.settle()
     expect(binding(fake)).toBeUndefined()
     expect(queued.filter((path: string) => fake.files.has(path))).toEqual([])
-    expect(await drawn($)).toContain("isn't in this repo's organization")
+    expect(await drawn($)).toContain("isn't in this repo's team")
     // Nothing retries: the next prompt is accepted without another create or a new queue.
     expect((await $.prompt.submit(prompt('after'))).drop).toBeUndefined()
     await fake.clock.settle()

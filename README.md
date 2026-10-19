@@ -2,7 +2,7 @@
 
 [Delta](https://delta.dev) gives every agent thread a URL. With this plugin, your
 Claude Code sessions are recorded to Delta along with the Git checkout they work
-in. Anyone in your organization can then open the thread and join it, from their
+in. Anyone on your team can then open the thread and join it, from their
 own Claude Code session, from [delta.dev](https://delta.dev), or from the Delta app.
 
 ## Installation
@@ -26,7 +26,7 @@ Run `/delta-setup` in a repository to choose its team and which sessions sync:
 
 - **Private sync**: every new session syncs, and only you can see it until you
   share it.
-- **Organization sharing**: every new session syncs and is shared with your team.
+- **Team sharing**: every new session syncs and is shared with your team.
 - **Manual**: a session syncs only when you run `/delta-share`.
 
 Setup can create a team and invite teammates by email. It saves your choice to
@@ -49,10 +49,10 @@ Each command also works as `/delta <command>`, such as `/delta share`.
 | `/delta-share [<email>…]` | Sync the current session and its checkout, and choose who sees it |
 | `/delta-join <link>` | Join a shared thread in a fresh session, in the thread's checkout |
 | `/delta-setup` | Choose this repository's team and which sessions sync |
-| `/delta-org list` | List your Delta organizations |
-| `/delta-org current` | Show the selected organization |
-| `/delta-org switch <ID>` | Select a different organization |
-| `/delta-org invite <email>…` | Invite people to the selected organization |
+| `/delta-org list` | List your Delta teams |
+| `/delta-org current` | Show the selected team |
+| `/delta-org switch <ID>` | Select a different team |
+| `/delta-org invite <email>…` | Invite people to the selected team |
 
 Sharing and joining need an interactive Claude Code terminal or Desktop Code tab.
 

@@ -340,7 +340,7 @@ describe('permanent failure advice', () => {
     expect(permanentFailureAdvice('checkout_inactive')).toContain('Mount')
     expect(permanentFailureAdvice('incompatible_app')).toContain('restart')
     expect(permanentFailureAdvice('invalid_invocation')).toContain('plugin')
-    expect(permanentFailureAdvice('invalid_invocation', false, 'organization_mismatch')).toContain('different Delta organization')
+    expect(permanentFailureAdvice('invalid_invocation', false, 'organization_mismatch')).toContain('different Delta team')
   })
 })
 

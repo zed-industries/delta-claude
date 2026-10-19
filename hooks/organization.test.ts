@@ -44,7 +44,7 @@ test('invalid organization syntax and CLI failures are returned without sharing'
   fake.organizationResult.exitCode = 1
   fake.organizationResult.stderr = 'organization is not a membership'
   expect(await $.command.run({ ...shareCommand, args: 'org switch --help' })).toEqual({
-    text: 'Delta organization command failed: Error: organization is not a membership',
+    text: 'Delta team command failed: Error: organization is not a membership',
   })
   expect(fake.commands).toEqual([['/selected/delta', 'org', 'switch', '--', '--help']])
   fake.organizationResult.exitCode = 0
@@ -52,7 +52,7 @@ test('invalid organization syntax and CLI failures are returned without sharing'
   fake.organizationResult.stdout = 'org_two\tSecond team\n'
   fake.organizationResult.isStdoutTruncated = true
   expect(await $.command.run({ ...shareCommand, args: 'org current' })).toEqual({
-    text: 'Delta organization command failed: Error: Delta organization output was truncated; check the selection with /delta-org current.',
+    text: 'Delta team command failed: Error: Delta team output was truncated; check the selection with /delta-org current.',
   })
   expect(fake.exports).toBe(0)
   fake.expectClean()
