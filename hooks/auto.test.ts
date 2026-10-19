@@ -689,6 +689,7 @@ describe('setup command and policy problems', () => {
     const answer = await $.command.run({ ...typedDelta('setup') } as never)
     expect((answer as any).text).toContain('needs an interactive Claude Code terminal')
     expect(fake.files.has(POLICY)).toBe(false)
+    expect(fake.authCalls).toEqual([])
     fake.expectClean()
   })
 
@@ -852,8 +853,13 @@ describe('setup dialogs and notices', () => {
     fake.expectClean()
   })
 
-  test('a setup the startup offer opened updates the band once it saves', async ($, on) => {
+  test('accepting the startup offer signs in before setup and updates the band once it saves', async ($, on) => {
     const fake = fakeThreads(on)
+    fake.authReplies = [
+      { status: 'signed_out' },
+      { status: 'pending', login_id: 'attempt', url: 'https://example.com/login', expires_at: '2099-01-01T00:15:00Z' },
+      { status: 'signed_in', account: { account_id: 'user' } },
+    ]
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
@@ -862,6 +868,7 @@ describe('setup dialogs and notices', () => {
       return { result: { answers: { [text]: answer } } }
     }
     await startAuto($, fake)
+    expect(fake.authCalls.map((argv) => argv[3])).toEqual(['status', 'login', 'wait'])
     expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'manual', organization: 'org-1' } })
     expect(await reminderKind($)).toBe('manual')
   })
@@ -884,6 +891,7 @@ describe('setup dialogs and notices', () => {
     await $.session.end(sessionEnd(fake.session))
     await startup()
     expect(fake.questions).toHaveLength(1)
+    expect(fake.authCalls).toEqual([])
     fake.expectClean()
   })
 })

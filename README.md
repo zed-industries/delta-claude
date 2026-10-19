@@ -15,8 +15,9 @@ You need Claude Code **2.1.287 or newer**. Inside Claude Code, run:
 ```
 
 The plugin uses the `delta` CLI. If it isn't installed on macOS or Linux, the
-plugin installs it the first time you share or join, and Delta opens your browser
-to sign in. On Windows, install Delta from [delta.dev](https://delta.dev) first.
+plugin installs it the first time you set up syncing, share, or join, and Delta
+opens your browser to sign in. You don't need to open the Delta app first.
+On Windows, install Delta from [delta.dev](https://delta.dev) first.
 
 ## Usage
 

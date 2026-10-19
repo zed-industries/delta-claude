@@ -529,11 +529,12 @@ function validTurn(value: any): value is ThreadTurn {
 /** A reset client ledger must never cause re-import or sequence reuse. */
 export function validateThreadFrontier(
   ready: Pick<ThreadState, 'thread_id' | 'producer'>,
-  binding: { session: string; thread?: string; next: number; pending: readonly { sequence: number }[] },
+  binding: { session: string; producer?: string; thread?: string; next: number; pending: readonly { sequence: number }[] },
 ): void {
   if (binding.thread && binding.thread !== ready.thread_id)
     throw new Error('Delta returned a different conversation; the existing binding was preserved')
-  if (!ready.producer || ready.producer.source !== 'claude-code' || ready.producer.external_id !== binding.session)
+  // A continued conversation records as the session that started it; see `Binding.producer`.
+  if (!ready.producer || ready.producer.source !== 'claude-code' || ready.producer.external_id !== (binding.producer ?? binding.session))
     throw new Error('Delta returned a different or missing Claude producer; the existing binding was preserved')
   const acknowledgedThrough = binding.pending.reduce((frontier, entry) => Math.min(frontier, entry.sequence), binding.next)
   if (ready.producer.next_sequence < acknowledgedThrough)

@@ -107,6 +107,24 @@ type Binding = {
   title?: string
   /** The agent IDs of the subagents this session records, each with a binding of its own. */
   children?: string[]
+  /**
+   * The Delta producer this conversation records as, and its outbox folder: the session that
+   * started recording. A session that took the conversation over keeps it, so the thread sees one
+   * participant whose sequence continues. Absent means this session's own ID.
+   */
+  producer?: string
+  /** Where Claude last reported this session's transcript; a `/cd` can move it. */
+  transcript?: string
+  /**
+   * The session Claude Code continued this conversation in, as backgrounding does. That session
+   * owns the binding, its outbox, and its mounts from then on; this one records nothing more.
+   */
+  continuedIn?: string
+}
+
+/** The producer a binding records as; see {@link Binding.producer}. */
+function producerOf(binding: { session: string; producer?: string }): string {
+  return binding.producer ?? binding.session
 }
 /**
  * Another participant's running turn, as the band reports it: `since` is when the watch first
@@ -222,6 +240,8 @@ type CheckoutPause = 'watcher' | 'verification' | 'delivery'
 type HeldRow = { update: Update; toolId?: string; turnId?: string }
 type SessionState = {
   binding?: Binding
+  /** The first prompt of an unbound session looked again for a conversation it continues. */
+  continuationRechecked?: true
   captureFailure?: string
   /** Why checkout sharing is paused; each reason is lifted only by its own recovery. */
   pauses: Map<CheckoutPause, string | undefined>
@@ -468,7 +488,9 @@ async function consumeConversation(
     // access and checkout reads cannot delay turn cancellation.
     const inspect = (baseline: ThreadReady) => void (async () => {
       try {
-        const status = await readThreadStatus($, stateFor(session).binding?.locator ?? baseline.thread_id, session, inspection.signal)
+        const watched = stateFor(session).binding
+        const status = await readThreadStatus($, watched?.locator ?? baseline.thread_id,
+          watched ? producerOf(watched) : session, inspection.signal)
         if (!ownsConnection()) return
         await serial(async () => {
           if (!ownsConnection()) return
@@ -509,7 +531,7 @@ async function consumeConversation(
       const argv = [await resolveCli($), '--json', 'thread', 'watch', binding.locator ?? binding.thread,
         // Delta shows the signed-in person in the thread as taking part through Claude Code while this
         // watch runs; the stop below and each reconnect end and renew it.
-        '--source', 'claude-code', '--external-id', session, '--participate', PRODUCER_NAME]
+        '--source', 'claude-code', '--external-id', producerOf(binding), '--participate', PRODUCER_NAME]
       if (!ownsObserver()) return
       stream = $.process.spawn({
         argv,
@@ -1256,7 +1278,7 @@ function followUpload($: Runtime, session: string) {
     state.uploadRefresh = undefined
     const binding = state.binding
     if (active !== session || !binding?.thread) return
-    void readThreadStatus($, binding.locator ?? binding.thread, session)
+    void readThreadStatus($, binding.locator ?? binding.thread, producerOf(binding))
       .then((status) => rememberStatus($, session, status))
       // An unanswered read says nothing about the upload; ask again after the next delay.
       .catch(() => followUpload($, session))
@@ -1272,11 +1294,11 @@ async function authenticationHost($: Runtime): Promise<AuthenticationHost> {
   }
 }
 
-async function resolveCli($: Runtime, allowInstall = false) {
+async function resolveCli($: Runtime, allowInstall = false, progress = (text: string) => setProgress($, text, 'active')) {
   return cli.resolve((argv, init) => $.process.run(argv, {
     ...init, env: { ...init?.env, DELTA_CLI_INTEGRATION: 'claude_code' },
   }), allowInstall,
-    (text) => setProgress($, text, 'active'), await $.env.get('OS') === 'Windows_NT'
+    progress, await $.env.get('OS') === 'Windows_NT'
       ? { exists: (path) => $.fs.exists(path) } : false)
 }
 
@@ -1469,6 +1491,10 @@ function retryAutomaticActivation($: Runtime, session: string, runtime: SessionS
 }
 
 async function save($: Runtime, value: Binding, isCurrent = () => true) {
+  // A recording session keeps its transcript's latest path, so a continuation can find the record
+  // Claude Code appends there.
+  const transcript = transcriptPaths.get(value.session)
+  if (transcript && value.thread && value.transcript !== transcript) value = { ...value, transcript }
   await $.store.set(key(value.session), value)
   // A session already ended and pruned must not be recreated by a late write.
   const state = sessions.get(value.session)
@@ -1487,7 +1513,10 @@ async function digest(input: string): Promise<string> {
 }
 
 async function stageRecord($: Runtime, binding: Binding, body: RecordBody): Promise<Binding> {
-  return stageOutboxRecord($, binding.session, binding, body)
+  // The continuing session stages under the same producer; a second writer would reuse its sequences.
+  if (binding.continuedIn)
+    throw new Error(`this conversation continues in Claude session ${binding.continuedIn}, which records it`)
+  return stageOutboxRecord($, producerOf(binding), binding, body)
 }
 
 /** Stage one record in the outbox folder `folder`, which holds one recorded conversation's records. */
@@ -1542,9 +1571,10 @@ async function collectAcknowledgedOutbox($: Runtime, plan: CleanupPlan) {
 /** Schedule from an acknowledged saved binding, never from mutable staging state. */
 function scheduleOutboxCleanup($: Runtime, binding: Binding) {
   const runtime = sessions.get(binding.session)
-  if (!runtime) return
+  // The outbox folder belongs to the session the conversation continued in.
+  if (!runtime || binding.continuedIn) return
   runtime.cleanupPlan = {
-    session: binding.session, root: outbox, next: binding.next,
+    session: producerOf(binding), root: outbox, next: binding.next,
     pending: binding.pending.map((entry) => ({ sequence: entry.sequence, files: [...entry.files] })),
   }
   if (runtime.cleanupTask) return
@@ -1647,7 +1677,7 @@ async function verifyCheckout($: Runtime, binding: Binding) {
   if (!boundDirectory(binding))
     throw new Error('the checkout has not been attached; saved messages remain queued')
   if (binding.joined) await requireJoinedDirectory($, binding)
-  const status = await readThreadStatus($, binding.locator ?? binding.thread!, binding.session)
+  const status = await readThreadStatus($, binding.locator ?? binding.thread!, producerOf(binding))
   validateThreadFrontier(status, binding)
   if (binding.joined) validateJoinedMounts(status, binding.mounts ?? [])
   else validateThreadCheckout(status, binding)
@@ -1673,7 +1703,8 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
     const delivering = () => active === session && sessions.has(session) && !isPaused(sessions.get(session)!)
     while (delivering()) {
       const binding = await serial(async () => load($, session))
-      if (!binding.thread || !binding.pending.length) return true
+      // A conversation that continued in another session delivers from there.
+      if (!binding.thread || !binding.pending.length || binding.continuedIn) return true
       // A recovered outbox checks the CLI's contract before its first append, so an incompatible CLI
       // records nothing. An answer that arrives after the session ended or was activated again belongs
       // to that earlier lifetime: it neither appends nor reports, and the current one checks for itself.
@@ -1695,7 +1726,7 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
         if (permanent || !recordsOffline(session, binding)) throw error
       }
       const { count, fenced, failure } = await appendPending($, {
-        reference: binding.locator ?? binding.thread, thread: binding.thread, externalId: session,
+        reference: binding.locator ?? binding.thread, thread: binding.thread, externalId: producerOf(binding),
         local: recordsOffline(session, binding),
       }, binding.pending)
       if (count) {
@@ -3365,6 +3396,10 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   // Every recorded path is shown relative to the checkout this share attaches.
   const root = await checkoutRoot($)
   await assertShareSession($, request)
+  // Refused before the snapshot, so a refusal leaves no thread or staged records behind.
+  const joined = await joinedBindingAt($, root)
+  if (joined) throw new ShareRefusal(joinedCheckoutRefusal(root, joined))
+  await assertShareSession($, request)
   if (!binding.snapshot) {
     let release!: () => void
     gate = new Promise<void>((resolve) => { release = resolve })
@@ -3458,7 +3493,14 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   // A session that records offline does not wait for the watcher and takes no such pause.
   if (!recordsOffline(session, binding)) pauseCheckout(runtime, 'watcher')
   setProgress($, 'Attaching the checkout…', 'active', [3, 5])
-  const attached = await command($, ['worktree', 'attach', root, '--thread', binding.thread!], 'worktree attach', check)
+  let attached: Awaited<ReturnType<typeof command>>
+  try { attached = await command($, ['worktree', 'attach', root, '--thread', binding.thread!], 'worktree attach', check) }
+  catch (error) {
+    // A checkout Delta manages for another thread, which no session here joined.
+    if (error instanceof DeltaCommandError && error.reason === 'worktree_directory_in_use')
+      throw new Error(`${root} is a checkout Delta manages for another thread, so it can't be shared as this one. Run /delta-join with that thread's link to work there (${error.message})`)
+    throw error
+  }
   validateAttachmentReceipt(attached, root)
   await serial(async () => {
     const current = await load($, session)
@@ -3508,6 +3550,43 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
 }
 
 /**
+ * The joined session whose mounts include `directory`. A mount's path is unique to its thread and
+ * owner, so a match means the directory is that thread's checkout, not one this session can share.
+ */
+async function joinedBindingAt($: Runtime, directory: string): Promise<Binding | undefined> {
+  // A Claude build without `$.store.keys` cannot enumerate the store; Delta still refuses the attach.
+  let keys: string[]
+  try { keys = await $.store.keys() } catch { return }
+  for (const storeKey of keys) {
+    if (!storeKey.startsWith('session:')) continue
+    const binding = await $.store.get(storeKey) as Binding | undefined
+    if (!binding?.joined || !binding.thread) continue
+    if (binding.mounts?.some((mount) => samePath(mount.directory, directory))) return binding
+  }
+}
+
+/**
+ * A share this session must not make, refused before anything was staged. Its message names the
+ * step to take instead, so it is shown without the advice to retry the share.
+ */
+class ShareRefusal extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ShareRefusal'
+  }
+}
+
+/** What a failed share tells the person: why, and what to retry. */
+function shareFailureText(error: unknown, retry: string): string {
+  if (error instanceof ShareRefusal) return `Delta didn't share this session: ${error.message}.`
+  return `Delta sharing failed: ${String(error)}. Fix the issue and retry ${retry}; saved records retain their sequence.`
+}
+
+function joinedCheckoutRefusal(root: string, joined: Binding): string {
+  return `${root} is a worktree of the Delta thread ${joined.url ?? joined.thread}, mounted when a Claude session joined it. Sharing it would publish the same files as a separate thread; run /delta-join ${joined.locator ?? joined.thread} to record this conversation in that thread instead`
+}
+
+/**
  * Run a share on the clock so `/delta share` returns at once: the band reports progress, and once
  * the share succeeds it keeps the link on hand, so nothing is added to the transcript.
  */
@@ -3522,7 +3601,7 @@ async function runShare($: Runtime, request: ShareRequest) {
   } catch (error) {
     if (request.cancelled || sharing !== request) return
     const text = error instanceof AccessRequiredError ? error.message
-      : `Delta sharing failed: ${String(error)}. Fix the issue and retry ${recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
+      : shareFailureText(error, recoveryCommand(stateFor(session).binding))
     setProgress($, text, 'error')
     await $.ui.log(text, { to: 'transcript' })
   } finally {
@@ -4108,6 +4187,13 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
       await serial(() => save($, live))
       binding = live
     }
+    // A conversation Claude Code moved here from a recording session keeps recording, here.
+    if (continuationCandidate(session, binding)) {
+      const parent = await continuedFrom($, session)
+      if (!ownsActivation()) return
+      if (parent) binding = await adoptContinuation($, session, parent.session) ?? binding
+      if (!ownsActivation()) return
+    }
     const runtime = stateFor(session)
     runtime.binding = binding
     runtime.captureFailure ??= binding.captureFailure
@@ -4228,8 +4314,20 @@ async function savedOrganization($: Runtime, root: string): Promise<string | und
 
 /** The host bindings the setup wizard and onboarding run against. */
 function setupEnv($: Runtime): SetupEnv {
+  const session = active
+  const epoch = sessionEpoch
+  let cwd: string | undefined
+  const check = async () => {
+    if (active !== session || sessionEpoch !== epoch || await $.session.id() !== session ||
+        (cwd !== undefined && !samePath(await $.session.cwd(), cwd)))
+      throw new Error('The Claude session or folder changed during setup; the obsolete setup was stopped')
+  }
   return {
-    checkoutRoot: () => checkoutRoot($),
+    checkoutRoot: async () => {
+      cwd = await $.session.cwd()
+      await check()
+      return checkoutRoot($)
+    },
     // Linked worktrees share the common directory, so they share one onboarding marker. Git before
     // 2.31 has no `--path-format`, so the directory is resolved against the checkout root instead.
     gitCommonDir: async () => {
@@ -4242,7 +4340,26 @@ function setupEnv($: Runtime): SetupEnv {
         return /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(lines[0]) ? lines[0] : `${root}/${lines[0]}`
       } catch { return undefined }
     },
-    contract: () => readThreadContract($),
+    contract: async () => {
+      let progress: typeof feed.progress
+      try {
+        await check()
+        await resolveCli($, true, (text) => {
+          setProgress($, text, 'active')
+          progress = feed.progress
+        })
+        await check()
+        const contract = await readThreadContract($)
+        await check()
+        return contract
+      } finally {
+        if (progress && feed.progress === progress) clearProgress($)
+      }
+    },
+    authenticate: async (notice) => {
+      await requireAuthentication(await authenticationHost($), await resolveCli($), check, notice, '/delta-setup')
+      await check()
+    },
     organizations: () => listOrganizations($),
     login: () => readLogin($),
     createOrganization: (name) => createOrganization($, name),
@@ -4303,6 +4420,121 @@ async function notifyOnce($: Runtime, text: string) {
 
 /** The source `classic.SessionStart` reported for each session, until the session ends. */
 const sessionSources = new Map<string, string>()
+/** The transcript path Claude last reported for each session in this process. */
+const transcriptPaths = new Map<string, string>()
+
+/** How much of a transcript's end is searched for the record of a continuation. */
+const CONTINUATION_WINDOW_BYTES = 64 * 1024
+/** A session that ended longer ago than this is not the one a starting session continues. */
+const CONTINUATION_HORIZON_MS = 10 * 60 * 1000
+
+/**
+ * The session a transcript says its conversation continued in. Claude Code appends a
+ * `continued-in` record when it moves a conversation to a background session (`/background`, or
+ * opening the agents overview), and the new session starts with a copy under a new ID. The record
+ * is undocumented and written on a best-effort basis, so its absence proves nothing.
+ */
+async function continuationOf($: Runtime, transcript: string): Promise<string | undefined> {
+  const { size } = await $.fs.stat(transcript)
+  let text = ''
+  try { await readFrom($, transcript, Math.max(0, size - CONTINUATION_WINDOW_BYTES), (piece) => { text += piece }) }
+  catch {
+    if (size > FS_READ_LIMIT) return
+    text = await $.fs.read(transcript) as string
+  }
+  let continuation: string | undefined
+  for (const line of text.split('\n')) {
+    if (!line.includes('"continued-in"')) continue
+    try {
+      const row = JSON.parse(line)
+      if (row?.type === 'continued-in' && typeof row.continuedInSessionId === 'string') continuation = row.continuedInSessionId
+    } catch { /* a partial first line from the window, or another row */ }
+  }
+  return continuation
+}
+
+/**
+ * Whether `session` may continue another session's conversation: Claude Code reports a
+ * continuation's start as a `fork` of the conversation, and it has recorded nothing of its own.
+ */
+function continuationCandidate(session: string, binding: Binding): boolean {
+  return sessionSources.get(session) === 'fork' && !binding.thread && !binding.snapshot && !binding.joinTransition
+}
+
+/** The recording session whose conversation Claude Code continued as `session`, if any. */
+async function continuedFrom($: Runtime, session: string): Promise<Binding | undefined> {
+  // A Claude build without `$.store.keys` cannot enumerate the store; the continuation goes unrecorded.
+  let keys: string[]
+  try { keys = await $.store.keys() } catch { return }
+  const now = await $.clock.now()
+  for (const storeKey of keys) {
+    if (!storeKey.startsWith('session:') || storeKey === key(session)) continue
+    const candidate = await $.store.get(storeKey) as Binding | undefined
+    if (!candidate?.thread || !candidate.snapshot) continue
+    if (candidate.continuedIn === session) return candidate
+    if (candidate.continuedIn || !candidate.transcript) continue
+    if (candidate.endedAt !== undefined && candidate.endedAt < now - CONTINUATION_HORIZON_MS) continue
+    try { if (await continuationOf($, candidate.transcript) === session) return candidate }
+    catch { /* an unreadable transcript continues nothing */ }
+  }
+}
+
+/**
+ * Make `session` the recorder of the conversation it continues: it takes over the binding, keeps
+ * recording as the same producer from the same sequence, and keeps the mount owner, so restoring
+ * re-mounts the same checkouts under this process. The parent is marked first; from then on it
+ * stages and delivers nothing, so the two never write the same sequence.
+ */
+async function adoptContinuation($: Runtime, session: string, parentSession: string): Promise<Binding | undefined> {
+  return serial(async () => {
+    const current = await load($, session)
+    if (current.thread || current.snapshot) return
+    const parent = await load($, parentSession)
+    if (!parent.thread || (parent.continuedIn && parent.continuedIn !== session)) return
+    await save($, { ...parent, continuedIn: session })
+    const adopted: Binding = {
+      ...parent, session, producer: producerOf(parent),
+      owner: parent.joined ? parent.owner ?? parent.session : parent.owner,
+      transcript: transcriptPaths.get(session),
+    }
+    delete adopted.continuedIn
+    delete adopted.endedAt
+    // Subagent bindings are stored under the session that ran them, which keeps delivering them.
+    delete adopted.children
+    // The copied transcript already shows the remote items the parent added for Claude.
+    const ledger = await $.store.get(ledgerKey(parentSession))
+    if (ledger !== undefined && await $.store.get(ledgerKey(session)) === undefined)
+      await $.store.set(ledgerKey(session), ledger)
+    await save($, adopted)
+    await $.ui.log(`Delta: this conversation continued from Claude session ${parentSession}; recording carries on in this session.`, { to: 'debug' })
+    return adopted
+  })
+}
+
+/** Keep a recording session's transcript path current, since a `/cd` can move the file. */
+async function rememberTranscript($: Runtime, session: string, transcript: string) {
+  if (transcriptPaths.get(session) === transcript) return
+  transcriptPaths.set(session, transcript)
+  await serial(async () => {
+    const current = await load($, session)
+    if (current.thread && !current.continuedIn) await save($, current)
+  })
+}
+
+/** Whether this session's conversation moved to another session, which now owns its mounts. */
+async function handedOff($: Runtime, session: string): Promise<boolean> {
+  const binding = await $.store.get(key(session)) as Binding | undefined
+  if (!binding?.thread) return false
+  if (binding.continuedIn) return true
+  const transcript = transcriptPaths.get(session) ?? binding.transcript
+  if (!transcript) return false
+  let continuation: string | undefined
+  try { continuation = await continuationOf($, transcript) } catch { return false }
+  if (!continuation || continuation === session) return false
+  // Marking here lets the continuation adopt even before its own start finds the record.
+  await serial(async () => save($, { ...await load($, session), continuedIn: continuation }))
+  return true
+}
 
 function newSessionFor(session: string): boolean {
   const source = sessionSources.get(session)
@@ -4359,7 +4591,9 @@ async function startSession($: Runtime, session: string) {
     }
     if (policy.problem)
       await notifyOnce($, `Delta settings at ${path} couldn't be used (${policy.problem}). Until it's fixed, only sessions you share with /delta-share sync. Run /delta-setup to replace it.`)
-    if (newSession && recordsAutomatically(policy))
+    if (newSession && recordsAutomatically(policy) && await joinedBindingAt($, root))
+      await notifyOnce($, `${root} is a worktree of a Delta thread a Claude session joined, so this session isn't recorded automatically. Run /delta-join with that thread's link to record in it.`)
+    else if (newSession && recordsAutomatically(policy))
       await activateAutomatically($, session, root, { mode: policy.mode === 'private' ? 'private' : 'organization', organization: policy.organization! })
   } finally {
     // Nothing below records, so the session's activity never waits on the setup offer's dialog.
@@ -4476,7 +4710,7 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
             await check()
             setProgress($, 'Waiting for Delta sign-in…', 'active')
             await $.ui.log(text, { to: 'transcript' })
-          })
+          }, '/delta-share')
         } catch (error) {
           if (!ownsActivation()) return
           // A cancelled or failed login needs an explicit retry, never another browser on each prompt.
@@ -4807,7 +5041,7 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
   }
   catch (error) {
     // Only activation can fail here; the share or join itself runs on the clock and reports there.
-    const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${locator ? `/delta-join ${locator}` : recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
+    const text = shareFailureText(error, locator ? `/delta-join ${locator}` : recoveryCommand(stateFor(session).binding))
     setProgress($, text, 'error')
     return { text }
   }
@@ -4854,6 +5088,16 @@ export function register(on: On) {
       return { drop: "Delta is restoring this thread's worktrees. Wait for the band to say they are restored, then try again. The prompt was not submitted." }
     if (blocked === 'moving')
       return { drop: "Delta is moving Claude to the thread folder between turns. Try again in a moment. The prompt was not submitted." }
+    // Claude Code can start a continuation before the parent's transcript names it; look once more.
+    if (runtime.binding && continuationCandidate(session, runtime.binding) && !runtime.continuationRechecked) {
+      runtime.continuationRechecked = true
+      const parent = await continuedFrom($, session)
+      if (parent && await adoptContinuation($, session, parent.session)) {
+        try { await activate($, session) }
+        catch (error) { return { drop: `Delta couldn't continue recording this conversation: ${String(error)}. The prompt was not submitted.` } }
+        if (runtime.restoring) return { drop: "Delta is restoring this thread's worktrees for the continued conversation. Wait for the band to say they are restored, then try again. The prompt was not submitted." }
+      }
+    }
     if (!runtime.binding?.snapshot) return next(e)
     // A session that records offline does not wait for the watcher and never drops a prompt for a
     // delivery pause: the pause stops delivery, and this prompt retries delivery and any incomplete
@@ -5308,9 +5552,10 @@ export function register(on: On) {
         await $.store.set(key(e.sessionId), { ...stored, endedAt: await $.clock.now() })
     } catch { /* a session that cannot record its end is simply never pruned */ }
     // Exiting ends the session's use of its checkouts. A clear is the join's own transition and a
-    // resume only switches sessions, so neither releases them.
+    // resume only switches sessions, so neither releases them. A conversation that moved to another
+    // session keeps its checkouts there; its subagents' stay with this session and are released.
     if (releasesMounts(e.reason)) {
-      await releaseMounts($, e.sessionId)
+      if (!await handedOff($, e.sessionId)) await releaseMounts($, e.sessionId)
       const ended = await $.store.get(key(e.sessionId)).catch(() => undefined) as Binding | undefined
       await releaseThreadMounts($, e.sessionId, ended?.children ?? [])
     }
@@ -5355,6 +5600,8 @@ export function register(on: On) {
   // when a turn ends: the title Claude chose for the first prompt, or a `/rename` made since.
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
+    if (typeof e.transcript_path === 'string' && e.transcript_path)
+      void $.session.id().then((session) => rememberTranscript($, session, e.transcript_path)).catch(() => {})
     // The turn's end never waits for the title, and nothing about the title can fail it.
     if (typeof e.transcript_path === 'string' && e.transcript_path)
       void $.session.id().then((session) => recordTitle($, session, e.transcript_path)).catch(() => {})
@@ -5363,6 +5610,7 @@ export function register(on: On) {
 
   on('classic.SessionStart', async ($, e, next) => {
     sessionSources.set(e.session_id, typeof e.source === 'string' ? e.source : '')
+    if (typeof e.transcript_path === 'string' && e.transcript_path) transcriptPaths.set(e.session_id, e.transcript_path)
     // A new session's capture boundary opens before anything can reach a hook, and `startSession`
     // resolves it once the policy and contract decision is made.
     if (newSessionFor(e.session_id)) beginCaptureDecision(e.session_id)
