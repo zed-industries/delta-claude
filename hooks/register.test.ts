@@ -152,6 +152,9 @@ describe('thread commands', () => {
     expect(records[0]).toMatchObject({ update: { content: [{ text: 'first' }] } })
     expect(records.at(-1)).toMatchObject({ update: { content: [{ text: 'third' }] } })
     expect(records.every((record) => record.turnSequence === undefined)).toBe(true)
+    expect(records.every((record) => record.update?._meta?.delta === undefined)).toBe(true)
+    // Every append names the producer; its identity stays the source and session.
+    expect([...new Set(fake.producerNames())]).toEqual(['Claude Code'])
 
     fake.messages = [text('changed export must not be imported')]
     expect(await fake.share($)).toBe(url)
@@ -160,6 +163,61 @@ describe('thread commands', () => {
     expect(fake.records()).toEqual(records)
     expect(fake.exports).toBe(1)
     expect(fake.server.mount).toMatchObject({ thread: fake.threadId, directory: CHECKOUT })
+    fake.expectClean()
+  })
+
+  test('marks recorded live Claude messages and tool activity', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.prompt.submit(prompt('change it'))
+    await $.session.append({
+      door: 'prompt', uuid: 'live-user',
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'change it' }] },
+    })
+    await $.turn.start(turnStart('native-live'))
+    await $.session.append({
+      door: 'response', uuid: 'live-agent',
+      message: { type: 'assistant', role: 'assistant', content: [
+        { type: 'thinking', thinking: 'inspect', signature: 'opaque' },
+        { type: 'text', text: 'I will edit it.' },
+        { type: 'tool_use', id: 'edit-live', name: 'Edit', input: { file_path: '/repo/a' } },
+      ] },
+    })
+    fake.toolResult = {
+      filePath: '/repo/a', structuredPatch: [
+        { oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-old', '+new'] },
+      ],
+    }
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'edit-live', file_path: '/repo/a' })
+    await fake.clock.settle()
+
+    const live = fake.records().filter((record) =>
+      ['user_message', 'agent_message', 'agent_thought', 'tool_call_update']
+        .includes(record.update?.sessionUpdate))
+    expect(live.map((record) => [record.update?.sessionUpdate, record.update?._meta])).toEqual([
+      ['user_message', { delta: {
+        work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'user_message',
+      } }],
+      ['agent_thought', {
+        claudeCode: { block: { type: 'thinking', thinking: 'inspect', signature: 'opaque' } },
+        delta: { work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'agent_thought' },
+      }],
+      ['agent_message', { delta: {
+        work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'agent_message',
+      } }],
+      ['tool_call_update', { delta: {
+        work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+      } }],
+      ['tool_call_update', { delta: {
+        work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'edit',
+      } }],
+    ])
+    expect(live.filter((record) => record.update?.sessionUpdate === 'tool_call_update')
+      .map((record) => record.update?.toolCallId)).toEqual(['edit-live', 'edit-live'])
+
+    await $.turn.complete(turnComplete('native-live'))
+    await fake.clock.settle()
     fake.expectClean()
   })
 
@@ -292,6 +350,8 @@ describe('thread commands', () => {
     await fake.clock.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     expectStagedRecords(fake, [])
+    // Each retry names the producer again, rather than only the append that first carried the record.
+    expect([...new Set(fake.producerNames())]).toEqual(['Claude Code'])
     expect(fake.statuses.at(-1)).toBeUndefined()
     // Delivery recovered, so the band is back to connected.
     expect(await drawn($)).toContain('"color":"green"')
@@ -884,6 +944,8 @@ describe('thread commands', () => {
     expect(await drawn($)).toContain(PENDING)
     const idle = fake.watches.at(-1)!
     expect(idle.closed).toBe(false)
+    // Participation lasts as long as a watch, so every reconnection asks for it again.
+    expect(fake.watches.slice(first).every((watch) => watch.argv.includes('--participate'))).toBe(true)
     await $.session.end(sessionEnd(fake.session))
     await fake.clock.settle()
     expect(idle.closed).toBe(true)
@@ -995,7 +1057,7 @@ describe('thread commands', () => {
     fake.expectClean()
   })
 
-  test('an acknowledgment that cannot be saved keeps its record and replays it', async ($, on) => {
+  test('an acknowledgment that cannot be saved replays the exact marked record after restart', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
@@ -1007,8 +1069,17 @@ describe('thread commands', () => {
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     const second = [...fake.files.keys()].filter((path) => /\/2-\d+\.json$/.test(path))
     expect(second.length).toBeGreaterThan(0)
+    const immutable = second.map((path) => fake.files.get(path)).join('')
+    expect(JSON.parse(immutable).update._meta).toEqual({ delta: {
+      work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+    } })
+    const appendCalls = fake.appendCalls
     fake.failStoreSet = false
-    expect(await fake.share($)).toBe(`https://delta.dev/join/${fake.shareId}`)
+    await $.session.end(sessionEnd(fake.session))
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    expect(fake.appendCalls).toBeGreaterThan(appendCalls)
+    expect(fake.server.records.get(2)?.line + '\n').toBe(immutable)
     await $.tool.call(bash('after', 'echo after'))
     await fake.clock.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
@@ -1020,6 +1091,7 @@ describe('thread commands', () => {
     await $.session.start(sessionStart)
     fake.contractRange = { min: 0, max: 0 }
     expect(await fake.share($)).toContain('Update Delta')
+    expect(fake.watches).toEqual([])
     // Nothing was created, attached, published, or imported, and no record was appended.
     expect(fake.server.thread).toBeUndefined()
     expect(fake.server.mount).toBeUndefined()
@@ -1038,7 +1110,7 @@ describe('thread commands', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 6, max: 7 }
+    fake.contractRange = { min: 7, max: 8 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -1136,13 +1208,73 @@ describe('thread commands', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 6, max: 7 }
+    fake.contractRange = { min: 7, max: 8 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
     expect(await drawn($)).toContain('Update the Delta plugin')
     expect(fake.logs.join('\n')).toContain('Update the Delta plugin')
     expect((await $.prompt.submit(prompt('blocked'))).drop).toContain('Update the Delta plugin')
+    fake.expectClean()
+  })
+
+  test('an interrupted share negotiates the contract before recovering its outbox', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    // A thread and a queued first record, but no committed snapshot: activation recovers the
+    // outbox without starting participation, which is where the contract is otherwise read.
+    await seedPending(fake, [{ schemaVersion: 1, sequence: 1, update: { sessionUpdate: 'state_update', state: 'idle' } }])
+    fake.store.set(`session:${fake.session}`, { ...fake.store.get(`session:${fake.session}`) as object, snapshot: false })
+    const checksAtAppend: number[] = []
+    fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
+    // An incompatible CLI is refused before anything is appended.
+    fake.contractRange = { min: 7, max: 8 }
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    expect(checksAtAppend).toEqual([])
+    expect(fake.logs.join('\n')).toContain('Update the Delta plugin')
+    await $.session.end(sessionEnd(fake.session))
+    // Against a compatible CLI the recovered first record names the producer, since Delta keeps that name.
+    fake.contractRange = undefined
+    const checks = fake.contractChecks
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    expect(checksAtAppend).toEqual([checks + 1])
+    expect(fake.producerNames()).toEqual(['Claude Code'])
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ pending: [] })
+    fake.expectClean()
+  })
+
+  test('a contract answer for an ended session is neither remembered nor used once it resumes', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    await seedPending(fake, [{ schemaVersion: 1, sequence: 1, update: { sessionUpdate: 'state_update', state: 'idle' } }])
+    fake.store.set(`session:${fake.session}`, { ...fake.store.get(`session:${fake.session}`) as object, snapshot: false })
+    // Recovery asks a CLI too old for this plugin, and the session ends and resumes before the answer arrives.
+    let answer!: () => void
+    const held = new Promise<void>((resolve) => { answer = resolve })
+    fake.holdRun = (operation) => {
+      if (operation !== 'contract') return
+      fake.holdRun = undefined
+      return held
+    }
+    fake.contractRange = { min: 1, max: 4 }
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    await $.session.end(sessionEnd(fake.session))
+    fake.contractRange = undefined
+    const checks = fake.contractChecks
+    await $.session.start(sessionStart)
+    answer()
+    await fake.clock.settle()
+    // The stale refusal is neither remembered nor shown: the resumed session asked again and appended once.
+    expect(fake.contractChecks).toBe(checks + 1)
+    expect(fake.producerNames()).toEqual(['Claude Code'])
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ pending: [] })
     fake.expectClean()
   })
 })
@@ -1756,6 +1888,18 @@ describe('native turns', () => {
         ] } })
       await receive()
       expect(consumed).toBe(3)
+      const lifecycle = fake.updates().filter((record) => record.update.toolCallId === 'remote-bash')
+      expect(lifecycle.map((record) => [record.update.toolCallId, record.update._meta])).toEqual([
+        ['remote-bash', { delta: {
+          work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+        } }],
+        ['remote-bash', { delta: {
+          work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+        } }],
+        ['remote-bash', { delta: {
+          work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+        } }],
+      ])
       expect(rows).toHaveLength(1)
       expect(rows[0]!.text).toContain('tool call echo output (completed)')
       expect(rows[0]!.text).toContain('tool output')
@@ -1955,9 +2099,17 @@ describe('native turns', () => {
     // on its turn.complete. Neither may bind this session's turn, so the main turn keeps running.
     await $.turn.start({ ...turnStart('child'), agentId: 'child-agent' })
     await $.turn.complete({ ...turnComplete('child'), agentId: 'child-agent' })
+    await $.session.append({ door: 'response', uuid: 'child-message', agentId: 'child-agent',
+      message: { type: 'assistant', role: 'assistant', content: [
+        { type: 'text', text: 'child output' },
+        { type: 'tool_use', id: 'tool-child', name: 'Bash', input: { command: 'echo child' } },
+      ] } })
+    await $.tool.call({ ...bash('tool-child', 'echo child'), agentId: 'child-agent' })
     await $.tool.call(bash('tool-main', 'echo main'))
     await fake.clock.settle()
     expect(fake.starts()).toEqual([first, second])
+    expect(JSON.stringify(fake.records())).not.toContain('child output')
+    expect(JSON.stringify(fake.records())).not.toContain('tool-child')
     // This turn's output names the main sequence the child's turn never took over.
     expect(fake.updates().find((record) => record.update?.toolCallId === 'tool-main')?.turnSequence)
       .toBe(second)

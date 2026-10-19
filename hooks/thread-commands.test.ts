@@ -383,7 +383,7 @@ describe('operation receipts', () => {
 
 describe('recording contract', () => {
   test('decodes a contract range and refuses a malformed one', () => {
-    expect(parseThreadContract(JSON.stringify(cliFixture('contract')))).toEqual({ operation: 'contract', min: 1, max: 5 })
+    expect(parseThreadContract(JSON.stringify(cliFixture('contract')))).toEqual({ operation: 'contract', min: 1, max: 6 })
     expect(parseThreadContract('{"operation":"contract","min":1,"max":4}')).toEqual({ operation: 'contract', min: 1, max: 4 })
     for (const bad of [
       '{"operation":"status","min":1,"max":1}',
@@ -398,11 +398,11 @@ describe('recording contract', () => {
 
   test('records only against a CLI whose range covers the current contract', () => {
     const at = (min: number, max: number) => ({ operation: 'contract' as const, min, max })
-    for (const range of [at(1, 5), at(5, 6)]) expect(contractRefusal(range)).toBeUndefined()
-    for (const range of [at(1, 4), undefined]) expect(contractRefusal(range)).toContain('Update Delta')
-    expect(contractRefusal(at(6, 7))).toContain('Update the Delta plugin')
+    for (const range of [at(1, 6), at(6, 7)]) expect(contractRefusal(range)).toBeUndefined()
+    for (const range of [at(1, 5), undefined]) expect(contractRefusal(range)).toContain('Update Delta')
+    expect(contractRefusal(at(7, 8))).toContain('Update the Delta plugin')
     // A later capability is gated on the version both sides speak.
-    expect(contractVersion(at(3, 9))).toBe(5)
+    expect(contractVersion(at(3, 9))).toBe(6)
   })
 })
 

@@ -16,6 +16,7 @@ import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
   ContractRefusalError, JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
   validateJoinedMounts, parseThreadFork, validateThreadFrontier, validateThreadCheckout,
+  PRODUCER_NAME,
   type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadStatus, type ThreadTurn, type ThreadUpload, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
 import {
@@ -126,6 +127,11 @@ function commandFormEnv(form: CommandForm | undefined): Record<string, string> {
 }
 
 const encoder = new TextEncoder()
+const LIVE_ACTIVITY_ORIGIN = {
+  work_origin: 'external_agent',
+  interaction_surface: 'cli',
+} as const
+type LiveActivityKind = 'user_message' | 'agent_message' | 'agent_thought' | 'tool_call' | 'edit'
 const cli = new DeltaCli()
 const MAX_LINE = 16 * 1024 * 1024
 const MAX_RECONNECT_DELAY = 30_000
@@ -491,7 +497,9 @@ async function consumeConversation(
       if (!boundDirectory(binding))
         throw new Error('No attached thread selected; run /delta-share from the intended Git checkout')
       const argv = [await resolveCli($), '--json', 'thread', 'watch', binding.locator ?? binding.thread,
-        '--source', 'claude-code', '--external-id', session]
+        // Delta shows the signed-in person in the thread as taking part through Claude Code while this
+        // watch runs; the stop below and each reconnect end and renew it.
+        '--source', 'claude-code', '--external-id', session, '--participate', PRODUCER_NAME]
       if (!ownsObserver()) return
       stream = $.process.spawn({
         argv,
@@ -1273,15 +1281,21 @@ async function readCommand($: Runtime, args: string[], name: string, signal: Abo
 }
 
 /**
- * Refuse to record against a CLI whose recording contract this plugin does not speak. Runs once per
- * session; a refusal or a process failure is not remembered, so updating Delta and retrying re-checks.
+ * Refuse to record against a CLI whose recording contract this plugin does not speak, and return
+ * the newest version both speak. Runs once per session; a refusal or a process failure is not
+ * remembered, so updating Delta and retrying re-checks. Nor is an answer that arrives after the
+ * session ended or was activated again, even under the same ID, so a resumed session renegotiates.
  */
-async function requireContract($: Runtime, session: string) {
-  if (contractVerified.has(session)) return
+async function requireContract($: Runtime, session: string): Promise<number> {
+  const verified = contractVerified.get(session)
+  if (verified !== undefined) return verified
+  const epoch = sessionEpoch
   const range = await readThreadContract($)
   const refusal = contractRefusal(range)
   if (refusal) throw new ContractRefusalError(refusal)
-  contractVerified.set(session, contractVersion(range!))
+  const version = contractVersion(range!)
+  if (active === session && sessionEpoch === epoch) contractVerified.set(session, version)
+  return version
 }
 
 /**
@@ -1382,6 +1396,28 @@ function holdRows(runtime: SessionState, updates: Update[], turnId?: string) {
     toolId: update.sessionUpdate === 'tool_call_update' && typeof update.toolCallId === 'string'
       ? update.toolCallId : undefined,
   }))]
+}
+
+/** Mark a row observed live in this Claude host, without changing imported history. */
+function liveActivity(update: Update): Update {
+  let activityKind: LiveActivityKind | undefined
+  if (update.sessionUpdate === 'user_message' || update.sessionUpdate === 'agent_message' ||
+      update.sessionUpdate === 'agent_thought') activityKind = update.sessionUpdate
+  else if (update.sessionUpdate === 'tool_call_update') {
+    const structuredEdit = Array.isArray(update.content) && update.content.some((item) =>
+      item !== null && typeof item === 'object' && !Array.isArray(item) &&
+      (item as Record<string, unknown>).type === 'diff')
+    activityKind = structuredEdit ? 'edit' : 'tool_call'
+  }
+  if (!activityKind) return update
+  const metadata = update._meta !== null && typeof update._meta === 'object' && !Array.isArray(update._meta)
+    ? update._meta as Record<string, unknown> : {}
+  const delta = metadata.delta !== null && typeof metadata.delta === 'object' && !Array.isArray(metadata.delta)
+    ? metadata.delta as Record<string, unknown> : {}
+  return {
+    ...update,
+    _meta: { ...metadata, delta: { ...delta, ...LIVE_ACTIVITY_ORIGIN, activity_kind: activityKind } },
+  }
 }
 
 function key(session: string) { return `session:${session}` }
@@ -1605,11 +1641,26 @@ async function verifyCheckout($: Runtime, binding: Binding) {
   return status
 }
 
-/** Resolves true only when every pending record was delivered; stopping early because of a pause or session change is not success. */
+/**
+ * Resolves true only when every pending record was delivered; stopping early because of a pause or
+ * session change is not success. Rejects with the refusal, and appends nothing, when the CLI's
+ * recording contract is one this plugin does not speak.
+ */
 async function drainPending($: Runtime, session: string): Promise<boolean> {
-    while (active === session && sessions.has(session) && !isPaused(sessions.get(session)!)) {
+    const delivering = () => active === session && sessions.has(session) && !isPaused(sessions.get(session)!)
+    while (delivering()) {
       const binding = await serial(async () => load($, session))
       if (!binding.thread || !binding.pending.length) return true
+      // A recovered outbox checks the CLI's contract before its first append, so an incompatible CLI
+      // records nothing. An answer that arrives after the session ended or was activated again belongs
+      // to that earlier lifetime: it neither appends nor reports, and the current one checks for itself.
+      const epoch = sessionEpoch
+      try { await requireContract($, session) }
+      catch (error) {
+        if (!delivering() || sessionEpoch !== epoch) return false
+        throw error
+      }
+      if (!delivering() || sessionEpoch !== epoch) return false
       try { await verifyCheckout($, binding) }
       catch (error) {
         // An unanswered check says nothing about the checkout. A session that records offline still
@@ -1634,9 +1685,11 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
         turnSequences.push(turnSequence)
         if (collected.bytes >= 2_000_000) break
       }
+      // Every append names the producer, retries included, so attribution never depends on a live watch.
       const argv = [await resolveCli($), '--json', 'thread', 'append', binding.locator ?? binding.thread,
         '--source', 'claude-code', '--external-id', session,
-        ...recordsOffline(session, binding) ? ['--acknowledge', 'local'] : []]
+        ...recordsOffline(session, binding) ? ['--acknowledge', 'local'] : [],
+        '--producer-name', PRODUCER_NAME]
       let result: Awaited<ReturnType<Runtime['process']['run']>>
       try {
         result = await $.process.run(argv, {
@@ -2311,9 +2364,8 @@ async function join($: Runtime, request: JoinRequest) {
       throw new Error('Stop background agents and teammates before joining; an idle main turn is not sufficient')
     // Refuse a CLI this plugin cannot record against before any transition, mount, or clear.
     await resolveCli($, true)
-    await requireContract($, request.session)
-    // `/clear` ends the old session and removes its negotiated version before the fresh session mounts.
-    request.contractVersion = contractVerified.get(request.session)
+    // `/clear` ends the old session and removes its cached contract before the fresh session mounts.
+    request.contractVersion = await requireContract($, request.session)
     const check = async () => {
       await assertJoinSession($, request.session, request)
       if (await $.session.cwd() !== request.cwd)
@@ -2625,8 +2677,7 @@ async function claimHandoff($: Runtime, session: string, handoff: Handoff) {
   const request: JoinRequest = { session, cwd: handoff.directory, locator: handoff.locator }
   try {
     setProgress($, 'Joining the shared thread…', 'active')
-    await requireContract($, session)
-    request.contractVersion = contractVerified.get(session)
+    request.contractVersion = await requireContract($, session)
     await takeOverHandoff($, request, handoff)
   } catch (error) {
     if (request.cancelled) return
@@ -3048,7 +3099,12 @@ function claudeInteraction($: Runtime): Interaction {
       const wrapped = answer as { label?: string; value?: string }
       return wrapped.label ?? wrapped.value ?? ''
     },
-    log: async (text, to) => { await $.ui.log(text, to ? { to } : undefined) },
+    log: async (text, to) => {
+      // The transcript flattens an embedded newline to U+FFFD (see `showToPerson`), so a multi-line
+      // message, like the policy file setup previews, goes out one entry per line.
+      if (to !== 'transcript') return await $.ui.log(text, to ? { to } : undefined)
+      for (const line of text.replace(/\n+$/, '').split('\n')) await $.ui.log(line, { to })
+    },
   }
 }
 
@@ -4013,7 +4069,7 @@ export function register(on: On) {
         if (message) {
           rememberToolResults(runtime, message)
           const updates = messageUpdates(message, stored.uuid, runtime.tools.structuredResults,
-            { root: boundDirectory(runtime.binding), omitted: runtime.tools.omitted })
+            { root: boundDirectory(runtime.binding), omitted: runtime.tools.omitted }).map(liveActivity)
           // Output from the turn Claude is running waits for that turn's scoped start record, so
           // it names its own turn rather than the turn before it. The prompt starting a turn is
           // held the same way, because its start record is written after its row.
@@ -4069,13 +4125,13 @@ export function register(on: On) {
       const update = resultUpdate(e.tool_use_id, e.tool, result.result, !!result.isError, root)
       runtime.tools.structuredResults.set(e.tool_use_id, update)
       const row = runtime.tools.toolResults.get(e.tool_use_id)
-      const updates = row
+      const updates = (row
         ? messageUpdates({ role: 'user', content: [row] }, `tool-result:${e.tool_use_id}`, runtime.tools.structuredResults)
         // Keep structured output visible in Delta without closing before the model's result text arrives.
         // The call's input row may not be stored yet, so this record names the call itself; the event
         // carries the tool's arguments beside its reserved keys.
         : [{ ...update, status: 'in_progress', name: e.tool,
-          ...toolInfo(e.tool, e, root) }]
+          ...toolInfo(e.tool, e, root) }]).map(liveActivity)
       if (hold) holdRows(runtime, updates, runtime.currentTurnId)
       else await persistUpdates($, session, updates, turnSequence)
       if (!hold && !runtime.captureFailure && runtime.binding.thread)

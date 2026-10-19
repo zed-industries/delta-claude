@@ -288,6 +288,7 @@ export function fakeThreads(on: On, options: {
     ignoreReadCancellation: false,
     /** API export used by the initial share. */
     messages: options.messages ?? [] as ApiMessage[],
+    toolResult: { stdout: 'tool output', stderr: '', interrupted: false } as unknown,
     exports: 0,
     appendFaults: [] as AppendFault[],
     /** Every append fails before accepting anything until cleared. */
@@ -310,7 +311,7 @@ export function fakeThreads(on: On, options: {
     /** Replaces the default watch readiness and snapshot. */
     onWatch: undefined as ((watch: Watch, index: number) => void) | undefined,
     commandFault: undefined as { operation: string; message: string; code?: string; reason?: string; retryable?: boolean; after?: boolean; exitCode?: number } | undefined,
-    /** The recording-contract range `thread contract` reports; overrides the fixture's `{min:1,max:5}`. */
+    /** The recording-contract range `thread contract` reports; overrides the fixture's `{min:1,max:6}`. */
     contractRange: undefined as { min?: number; max?: number } | undefined,
     /** Answers `thread contract` like a CLI that predates it: clap error on stderr, exit 2, no JSON. */
     contractUnknownSubcommand: false,
@@ -414,6 +415,11 @@ export function fakeThreads(on: On, options: {
     },
     delta(): string[][] { return fake.commands.filter((argv) => argv[0] === '/selected/delta') },
     operations(): (string | undefined)[] { return fake.delta().map((argv) => cliArguments(argv)?.positionals[1]) },
+    /** The `--producer-name` each `append` passed, in order; undefined where it passed none. */
+    producerNames(): (string | undefined)[] {
+      return fake.delta().map(cliArguments).filter((parsed) => parsed?.positionals[1] === 'append')
+        .map((parsed) => parsed!.options['--producer-name'] as string | undefined)
+    },
     live(): Watch | undefined { return fake.watches.findLast((watch) => !watch.closed) },
     /** Another client records or changes an item; a live watch sees the whole item. */
     upsert(item: WatchItem) {
@@ -625,7 +631,7 @@ export function fakeThreads(on: On, options: {
       return { deny: 'the person dismissed the question' } as never
     }
     if (fake.holdTool) await fake.holdTool
-    return { result: { stdout: 'tool output', stderr: '', interrupted: false } } as any
+    return { result: fake.toolResult } as any
   })
   on('fs.write', ($, e) => {
     if (fake.failWrite) throw new Error('disk full')
@@ -701,11 +707,13 @@ export function fakeThreads(on: On, options: {
     // plugin's recording commands through `commands`/`delta()`/`operations()` stay unaffected by it.
     if (operation === 'contract') {
       // A test may hold policy discovery or the contract check itself, as it holds create/upload/attach.
+      // The answer is fixed when asked, so a held check reports the CLI that was asked.
+      fake.contractChecks++
+      const answer = fake.contractUnknownSubcommand ? output('', 2, "error: unrecognized subcommand 'contract'")
+        : output(JSON.stringify(cliFixture('contract', fake.contractRange ?? {})))
       const contractHold = await fake.holdRun?.(operation)
       if (contractHold) await contractHold
-      fake.contractChecks++
-      if (fake.contractUnknownSubcommand) return output('', 2, "error: unrecognized subcommand 'contract'")
-      return output(JSON.stringify(cliFixture('contract', fake.contractRange ?? {})))
+      return answer
     }
     fake.commands.push(argv)
     if (argv[0] === '/selected/delta' && argv[1] === 'org')
@@ -769,6 +777,7 @@ export function fakeThreads(on: On, options: {
     const options = operation === 'attach' ? { '--thread': fake.server.thread }
       : operation === 'share' ? { '--visibility': 'organization' }
       : operation === 'fork' || operation === 'discard' ? { ...operation === 'discard' ? { '--force': true as any } : {} }
+      : operation === 'append' ? { ...source, '--producer-name': 'Claude Code' }
       : source
     // Create carries its upload intent for an automatic session, and omits it for an explicit share.
     const optional = operation === 'append' ? ['--acknowledge']
@@ -935,7 +944,7 @@ export function fakeThreads(on: On, options: {
     const watch = createWatch(e)
     fake.watches.push(watch)
     if (!matchesCommand(e.argv, ['thread', 'watch', threadLocator(cliArguments(e.argv)?.positionals[2])], {
-      '--source': 'claude-code', '--external-id': fake.session,
+      '--source': 'claude-code', '--external-id': fake.session, '--participate': 'Claude Code',
     })) fake.violations.push(`forbidden spawn: ${e.argv.join(' ')}`)
     if (fake.onWatch) fake.onWatch(watch, fake.watches.length - 1)
     else watch.observe()
@@ -1095,7 +1104,7 @@ function cliArguments(argv: readonly string[]) {
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
     if (argument === '--json' || argument === '--folder' || argument === '--force' || argument === '--join') { options[argument] = true; continue }
-    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge'].includes(argument)) return undefined
+    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined
     options[argument] = value

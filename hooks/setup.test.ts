@@ -47,7 +47,7 @@ function harness(options: {
       return root
     },
     gitCommonDir: async () => options.commonDir,
-    contract: async () => ({ operation: 'contract', min: 1, max: options.contractMax ?? 5 }),
+    contract: async () => ({ operation: 'contract', min: 1, max: options.contractMax ?? 6 }),
     organizations: async () => options.organizations ?? [{ id: 'org-1', name: 'Zed', current: true }],
     login: async () => options.login,
     createOrganization: async (name) => {

@@ -149,6 +149,26 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
+  test("a join's fresh session participates and names its producer", async ($, on) => {
+    const fake = sharedThread(on, $)
+    await $.session.start(sessionStart)
+    const previous = fake.session
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    expect(fake.session).not.toBe(previous)
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ joined: true, snapshot: true })
+    // The `/clear` ended the session that negotiated the contract; the fresh one uses its version.
+    expect(fake.watches.map((watch) => watch.argv.includes('--participate'))).toEqual([true])
+    expect((await $.prompt.submit(prompt('recorded'))).drop).toBeUndefined()
+    await $.tool.call(bash('recorded', 'echo recorded'))
+    await fake.clock.advance(0)
+    expect(fake.updates().map((record) => record.update?.toolCallId)).toContain('recorded')
+    expect(fake.producerNames().length).toBeGreaterThan(0)
+    expect([...new Set(fake.producerNames())]).toEqual(['Claude Code'])
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
   test("a Desktop tab hands the join to a new session in the thread's folder, changing nothing here", async ($, on) => {
     const fake = desktopTab(on, $)
     const before = fake.session
@@ -274,6 +294,8 @@ describe('joining', () => {
     await $.tool.call(bash('nested', 'grep -n fn worktree_text.rs'))
     await fake.clock.advance(0)
     expect(fake.updates().map((record) => record.update?.toolCallId)).toContain('nested')
+    // The fresh session records under the producer name the join's negotiated contract allows.
+    expect([...new Set(fake.producerNames())]).toEqual(['Claude Code'])
     expect(fake.logs.join('\n')).not.toContain('must run in')
     // A sibling that only shares the path's prefix is another directory.
     fake.cwd = `${directory}-other`

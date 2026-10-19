@@ -367,13 +367,19 @@ function inspectionUnavailableMessage(error: { code: string; reason?: string; me
  * The oldest recording-output contract version this plugin speaks. Neither the plugin nor the CLI
  * has shipped, so nothing older is supported; raise this rather than keep a gate for an old CLI.
  */
-export const PLUGIN_CONTRACT_MIN = 5
+export const PLUGIN_CONTRACT_MIN = 6
 /**
  * The newest recording-output contract version this plugin speaks. A capability added by a later
  * version is gated on the session's negotiated version (`contractVersion`) until `PLUGIN_CONTRACT_MIN`
  * reaches it.
  */
-export const PLUGIN_CONTRACT_MAX = 5
+export const PLUGIN_CONTRACT_MAX = 6
+/**
+ * The name Delta shows for this producer: the recording's attribution (`append --producer-name`)
+ * and the harness beside a present person (`watch --participate`). Identity stays the source and
+ * external id; this is only presentation.
+ */
+export const PRODUCER_NAME = 'Claude Code'
 
 /** The range of recording-output contract versions a CLI build speaks. */
 export type ThreadContract = { operation: 'contract'; min: number; max: number }
