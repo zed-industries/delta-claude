@@ -562,7 +562,8 @@ export function fakeThreads(on: On, options: {
       // a failure in the transcript, or the link the band shows, which only the debug log names.
       const link = fake.waitForShareLink()
       await fake.clock.advance(0)
-      return Promise.race([fake.waitForLog(start, (log) => log.startsWith('Delta sharing failed')), link])
+      return Promise.race([fake.waitForLog(start, (log) =>
+        log.startsWith('Delta sharing failed') || log.startsWith("Delta didn't share")), link])
     },
     /** Script an attachment event; tests separately script the daemon's next mount answer. */
     addWorktree(name: string, reference = `${name}-history#t=0`) {

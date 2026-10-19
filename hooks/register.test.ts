@@ -261,6 +261,18 @@ describe('thread commands', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
+  test("a checkout Delta manages for another thread is named in the share failure, which a retry can still finish", async ($, on) => {
+    const fake = fakeThreads(on, { messages: [text('initial')] })
+    await $.session.start(sessionStart)
+    fake.commandFault = { operation: 'attach', code: 'failed', reason: 'worktree_directory_in_use', message: `${CHECKOUT} is a checkout Delta manages for worktree w#t=1` }
+    expect(await fake.share($)).toContain('manages for another thread')
+    fake.commandFault = undefined
+    expect(await fake.share($)).toBe(`https://delta.dev/join/${fake.shareId}`)
+    expect(fake.exports).toBe(1)
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
   for (const failure of ['record write']) test(`a staging ${failure} failure contacts no Delta command and leaves no partial import`, async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     await $.session.start(sessionStart)

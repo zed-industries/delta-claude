@@ -307,6 +307,32 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
+  test("another session in a joined thread's mount is refused before it snapshots, creates, or attaches", async ($, on) => {
+    const fake = sharedThread(on, $)
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    const joined = fake.session
+    const directory = `${MOUNTS}/${joined}/delta`
+    await $.session.end({ ...sessionEnd(joined), reason: 'resume' })
+    fake.session = 'unbound-session'
+    fake.root = directory
+    fake.cwd = directory
+    fake.checkoutRoot = directory
+    await $.session.start({ ...sessionStart, cwd: directory })
+    const commands = fake.delta().length
+    const refusal = await fake.share($)
+    expect(refusal).toContain(`/delta-join ${link(fake)}`)
+    // Retrying the share would be refused again, and the refusal staged nothing.
+    expect(refusal).not.toContain('retry /delta-share')
+    expect(refusal).not.toContain('saved records')
+    expect(fake.operations().slice(commands).filter((operation) => ['create', 'attach', 'share'].includes(operation!))).toEqual([])
+    expect(fake.store.get('session:unbound-session')).toBeUndefined()
+    // A refused share leaves nothing that blocks the session.
+    expect((await $.prompt.submit(prompt('still usable'))).drop).toBeUndefined()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
   test('resume mounts again, moves Claude from its launch directory, and records only new rows', async ($, on) => {
     const fake = sharedThread(on, $)
     await $.session.start(sessionStart)

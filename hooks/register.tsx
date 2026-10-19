@@ -3365,6 +3365,10 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   // Every recorded path is shown relative to the checkout this share attaches.
   const root = await checkoutRoot($)
   await assertShareSession($, request)
+  // Refused before the snapshot, so a refusal leaves no thread or staged records behind.
+  const joined = await joinedBindingAt($, root)
+  if (joined) throw new ShareRefusal(joinedCheckoutRefusal(root, joined))
+  await assertShareSession($, request)
   if (!binding.snapshot) {
     let release!: () => void
     gate = new Promise<void>((resolve) => { release = resolve })
@@ -3458,7 +3462,14 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   // A session that records offline does not wait for the watcher and takes no such pause.
   if (!recordsOffline(session, binding)) pauseCheckout(runtime, 'watcher')
   setProgress($, 'Attaching the checkout…', 'active', [3, 5])
-  const attached = await command($, ['worktree', 'attach', root, '--thread', binding.thread!], 'worktree attach', check)
+  let attached: Awaited<ReturnType<typeof command>>
+  try { attached = await command($, ['worktree', 'attach', root, '--thread', binding.thread!], 'worktree attach', check) }
+  catch (error) {
+    // A checkout Delta manages for another thread, which no session here joined.
+    if (error instanceof DeltaCommandError && error.reason === 'worktree_directory_in_use')
+      throw new Error(`${root} is a checkout Delta manages for another thread, so it can't be shared as this one. Run /delta-join with that thread's link to work there (${error.message})`)
+    throw error
+  }
   validateAttachmentReceipt(attached, root)
   await serial(async () => {
     const current = await load($, session)
@@ -3508,6 +3519,43 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
 }
 
 /**
+ * The joined session whose mounts include `directory`. A mount's path is unique to its thread and
+ * owner, so a match means the directory is that thread's checkout, not one this session can share.
+ */
+async function joinedBindingAt($: Runtime, directory: string): Promise<Binding | undefined> {
+  // A Claude build without `$.store.keys` cannot enumerate the store; Delta still refuses the attach.
+  let keys: string[]
+  try { keys = await $.store.keys() } catch { return }
+  for (const storeKey of keys) {
+    if (!storeKey.startsWith('session:')) continue
+    const binding = await $.store.get(storeKey) as Binding | undefined
+    if (!binding?.joined || !binding.thread) continue
+    if (binding.mounts?.some((mount) => samePath(mount.directory, directory))) return binding
+  }
+}
+
+/**
+ * A share this session must not make, refused before anything was staged. Its message names the
+ * step to take instead, so it is shown without the advice to retry the share.
+ */
+class ShareRefusal extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ShareRefusal'
+  }
+}
+
+/** What a failed share tells the person: why, and what to retry. */
+function shareFailureText(error: unknown, retry: string): string {
+  if (error instanceof ShareRefusal) return `Delta didn't share this session: ${error.message}.`
+  return `Delta sharing failed: ${String(error)}. Fix the issue and retry ${retry}; saved records retain their sequence.`
+}
+
+function joinedCheckoutRefusal(root: string, joined: Binding): string {
+  return `${root} is a worktree of the Delta thread ${joined.url ?? joined.thread}, mounted when a Claude session joined it. Sharing it would publish the same files as a separate thread; run /delta-join ${joined.locator ?? joined.thread} to record this conversation in that thread instead`
+}
+
+/**
  * Run a share on the clock so `/delta share` returns at once: the band reports progress, and once
  * the share succeeds it keeps the link on hand, so nothing is added to the transcript.
  */
@@ -3522,7 +3570,7 @@ async function runShare($: Runtime, request: ShareRequest) {
   } catch (error) {
     if (request.cancelled || sharing !== request) return
     const text = error instanceof AccessRequiredError ? error.message
-      : `Delta sharing failed: ${String(error)}. Fix the issue and retry ${recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
+      : shareFailureText(error, recoveryCommand(stateFor(session).binding))
     setProgress($, text, 'error')
     await $.ui.log(text, { to: 'transcript' })
   } finally {
@@ -4359,7 +4407,9 @@ async function startSession($: Runtime, session: string) {
     }
     if (policy.problem)
       await notifyOnce($, `Delta settings at ${path} couldn't be used (${policy.problem}). Until it's fixed, only sessions you share with /delta-share sync. Run /delta-setup to replace it.`)
-    if (newSession && recordsAutomatically(policy))
+    if (newSession && recordsAutomatically(policy) && await joinedBindingAt($, root))
+      await notifyOnce($, `${root} is a worktree of a Delta thread a Claude session joined, so this session isn't recorded automatically. Run /delta-join with that thread's link to record in it.`)
+    else if (newSession && recordsAutomatically(policy))
       await activateAutomatically($, session, root, { mode: policy.mode === 'private' ? 'private' : 'organization', organization: policy.organization! })
   } finally {
     // Nothing below records, so the session's activity never waits on the setup offer's dialog.
@@ -4773,7 +4823,7 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
   }
   catch (error) {
     // Only activation can fail here; the share or join itself runs on the clock and reports there.
-    const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${locator ? `/delta-join ${locator}` : recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
+    const text = shareFailureText(error, locator ? `/delta-join ${locator}` : recoveryCommand(stateFor(session).binding))
     setProgress($, text, 'error')
     return { text }
   }
