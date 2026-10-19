@@ -510,7 +510,7 @@ export async function releaseOnboarding(store: OnboardingStore, key: string): Pr
 /** The onboarding question, which also names the command that reopens setup later. */
 export const ONBOARDING_QUESTION =
   'The Delta plugin is installed, but nothing in this repository syncs until you set it up. ' +
-  'You\'ll pick a team and which sessions sync. Set it up now?'
+  'You\'ll configure your team and which sessions to sync. Set it up now?'
 /** What declining the onboarding offer leaves in the transcript, since the offer does not return. */
 export const ONBOARDING_DECLINED =
   'Delta isn\'t set up here, so nothing syncs. Run /delta-setup to set it up, or /delta-share to sync and share just this session.'
