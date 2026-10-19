@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code'
 import {
   CHECKOUT, abovePrompt, fakeThreads, prompt, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
 } from './fake-thread-commands'
+import { ONBOARDING_DECLINED, ONBOARDING_QUESTION } from './setup'
 
 tier('user')
 
@@ -857,7 +858,7 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith('Set up Delta syncing') ? 'Set it up'
+      const answer = text === ONBOARDING_QUESTION ? 'Set it up'
         : offered.find((label: string) => label === 'Zed' || label.startsWith('Manual'))
       return { result: { answers: { [text]: answer } } }
     }
@@ -884,6 +885,33 @@ describe('setup dialogs and notices', () => {
     await $.session.end(sessionEnd(fake.session))
     await startup()
     expect(fake.questions).toHaveLength(1)
+    fake.expectClean()
+  })
+
+  test('a plugin installed into a running session offers setup there, and declining names /delta-setup', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = (question: any) => ({
+      result: { answers: { [question.questions[0].question]: 'Not now' } },
+    })
+    // Claude reports no start (`classic.SessionStart`) to a plugin enabled in a running session.
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(fake.questions.map((question) => question.questions[0].question)).toEqual([ONBOARDING_QUESTION])
+    expect(fake.logs).toContain(ONBOARDING_DECLINED)
+    fake.expectClean()
+  })
+
+  test('a plugin installed into a running session never starts recording it automatically', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('private', 'org-1'))
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(fake.operations()).not.toContain('create')
+    expect(fake.questions).toEqual([])
     fake.expectClean()
   })
 })

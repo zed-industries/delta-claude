@@ -32,6 +32,9 @@ Run `/delta-setup` in a repository to choose its team and which sessions sync:
 Setup can create a team and invite teammates by email. It saves your choice to
 `.delta/settings.json` and keeps that file out of Git, since the choice is yours.
 
+The plugin offers setup once per repository: right after you install it, or the
+first time you start a session in a repository that isn't set up yet.
+
 ### Sharing
 
 `/delta-share` asks who should see the session: your team, just you, or people

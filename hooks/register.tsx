@@ -4541,9 +4541,11 @@ async function captureDecided(session: string): Promise<void> {
 /**
  * Read a checkout's policy at a session's start: show a policy problem once, auto-activate a new
  * session when the policy records automatically, and offer setup when nothing configures the repo.
+ * A running session the plugin was just loaded into (`loadedMidSession`) is offered setup like a
+ * new one but never auto-activated, since part of it already happened unrecorded.
  * Everything here runs off the startup hook's critical path.
  */
-async function startSession($: Runtime, session: string) {
+async function startSession($: Runtime, session: string, loadedMidSession = false) {
   const env = setupEnv($)
   const newSession = newSessionFor(session)
   let root: string
@@ -4574,7 +4576,8 @@ async function startSession($: Runtime, session: string) {
   $.ui.invalidate('ui.render')
   try {
     await offerOnboarding(env, claudeInteraction($), onboardingStore($), {
-      root, configured: policy.configured, newSession, joined: !!stateFor(session).binding?.joined, joining: !!joining,
+      root, configured: policy.configured, newToPlugin: newSession || loadedMidSession,
+      joined: !!stateFor(session).binding?.joined, joining: !!joining,
     }, (key) => { openOnboarding.set(session, key) })
   } finally {
     openOnboarding.delete(session)
@@ -5528,6 +5531,15 @@ export function register(on: On) {
     // the Delta commands the join runs here are `$` calls, which that budget never counts. The
     // claim reports its own failure.
     await stateFor(session).handoffClaim
+    // Claude reports a session's start (`classic.SessionStart`) just before this hook, but not to a
+    // plugin enabled in a running session, as right after `/plugin install`. Such a session is
+    // offered setup now rather than at the next startup or `/clear`. The check waits a tick, so a
+    // start report that arrives just after this hook still counts, and a session that ended meanwhile
+    // is offered nothing.
+    $.clock.after(0, () => {
+      if (active !== session || sessionSources.has(session) || joining) return
+      void startSession($, session, true).catch((error) => { void report($, error) })
+    })
     return result
   })
 

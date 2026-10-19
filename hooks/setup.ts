@@ -401,8 +401,12 @@ export type OnboardingFlags = {
   root: string
   /** The checkout's policy file deliberately configures a mode, which suppresses the offer. */
   configured: boolean
-  /** A new session, not a resume, compaction, or fork. */
-  newSession: boolean
+  /**
+   * The plugin is seeing the session's beginning: a new session (startup or `/clear`), or a running
+   * one the plugin was just loaded into, as right after it is installed. Not a resume, compaction,
+   * or fork.
+   */
+  newToPlugin: boolean
   joined: boolean
   joining: boolean
 }
@@ -427,7 +431,7 @@ export async function offerOnboarding(
   env: SetupEnv, interaction: Interaction, store: OnboardingStore, flags: OnboardingFlags,
   claimed: (key: string) => void = () => {},
 ): Promise<OnboardingOutcome> {
-  if (flags.configured || flags.joined || flags.joining || !flags.newSession) return 'skipped'
+  if (flags.configured || flags.joined || flags.joining || !flags.newToPlugin) return 'skipped'
   const key = `setup-offered:${await env.gitCommonDir() ?? flags.root}`
   if (await store.get(key)) return 'skipped'
   await store.set(key, true)
@@ -447,18 +451,29 @@ export async function releaseOnboarding(store: OnboardingStore, key: string): Pr
   await store.set(key, false)
 }
 
+/** The onboarding question, which also names the command that reopens setup later. */
+export const ONBOARDING_QUESTION =
+  'Delta is ready. Set up syncing for this repository? You\'ll choose a team and whether sessions here sync ' +
+  'automatically. Nothing is uploaded until you choose, and you can run /delta-setup anytime.'
+/** What declining the onboarding offer leaves in the transcript, since the offer does not return. */
+export const ONBOARDING_DECLINED =
+  'Delta isn\'t syncing this repository. Run /delta-setup when you\'re ready, or /delta-share to share just this session.'
+
 /** Ask the onboarding question and run the setup it opens; `settled` when the person decided. */
 async function askOnboarding(env: SetupEnv, interaction: Interaction): Promise<'settled' | 'unfinished' | 'unavailable'> {
   let answer: string | undefined
   try {
-    answer = await interaction.ask('Set up Delta syncing for this repository?', { options: ['Set it up', 'Not now'], header: HEADER })
+    answer = await interaction.ask(ONBOARDING_QUESTION, { options: ['Set it up', 'Not now'], header: HEADER })
   }
   catch (error) {
     return error instanceof InteractionUnavailable ? 'unavailable' : 'unfinished'
   }
   // Only "Not now" declines. Anything typed instead, such as a slash command entered while the dialog
   // was open, decides nothing, so the offer comes back.
-  if (answer === 'Not now') return 'settled'
+  if (answer === 'Not now') {
+    await interaction.log(ONBOARDING_DECLINED, 'transcript')
+    return 'settled'
+  }
   if (answer !== 'Set it up') return 'unfinished'
   let text: string
   let wrote = false

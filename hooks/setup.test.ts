@@ -279,7 +279,7 @@ describe('onboarding', () => {
 
   test('never offers in a configured, joined, joining, or resumed repository', async () => {
     const { backend } = memoryStore()
-    for (const flags of [{ configured: true }, { newSession: false }, { joined: true }, { joining: true }]) {
+    for (const flags of [{ configured: true }, { newToPlugin: false }, { joined: true }, { joining: true }]) {
       const h = harness({ answers: ['Set it up'] })
       expect(await offerOnboarding(h.env, h.interaction, backend, newSession(flags))).toBe('skipped')
       expect(h.asks).toEqual([])
@@ -341,7 +341,7 @@ describe('onboarding', () => {
 
 /** Onboarding flags for a new, unconfigured session in `/repo`, with `overrides` applied. */
 function newSession(overrides: Partial<Parameters<typeof offerOnboarding>[3]> = {}) {
-  return { root: '/repo', configured: false, newSession: true, joined: false, joining: false, ...overrides }
+  return { root: '/repo', configured: false, newToPlugin: true, joined: false, joining: false, ...overrides }
 }
 
 function memoryStore() {
