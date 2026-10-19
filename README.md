@@ -36,7 +36,8 @@ Setup can create a team and invite teammates by email. It saves your choice to
 If automatic sync needs you to sign in, an interactive session asks before opening
 your browser. If Delta's beta terms still need accepting, it offers to open them too.
 You can keep working while you finish; that same session then syncs, including
-messages recorded while it waited. Headless sessions never open a browser.
+messages recorded while it waited. To stop waiting, run `/delta-share` again.
+Headless sessions never open a browser.
 
 ### Sharing
 

@@ -38,7 +38,7 @@ import {
   HISTORY_BUDGET, adoptionPrompt, deltaTurnReport, finishedReport, historyText, isOwnItem, itemsSince,
   looksLikeThreadLink, namedThread, resumePrompt, threadsNote, type ThreadTarget,
 } from './delta-threads'
-import { AccessRequiredError, requireAuthentication, type AuthenticationHost } from './auth'
+import { AccessRequiredError, requireAuthentication, type AuthenticationHost, type BrowserWait } from './auth'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
 } from './handoff'
@@ -1286,15 +1286,48 @@ function followUpload($: Runtime, session: string) {
 }
 
 /** Sign-in's view of the session; `$` stays in this file, as Claude Code's loader requires. */
+/** The sign-in waiting on the person's browser, which running a Delta command again offers to stop. */
+let browserWait: { on: BrowserWait; stop: AbortController } | undefined
+
 async function authenticationHost($: Runtime): Promise<AuthenticationHost> {
   const windows = await $.env.get('OS') === 'Windows_NT'
+  const stop = new AbortController()
+  let progress: typeof feed.progress
   return {
     windows,
     sleep: (milliseconds, signal) => $.clock.sleep(milliseconds, { signal }),
     spawn: (argv) => $.process.spawn({ argv }),
     ask: (question, options) => claudeInteraction($).ask(question, { options, header: 'Delta' }),
     open: (url) => openInBrowser($, url, windows),
+    waiting: (on) => {
+      if (on) {
+        browserWait = { on, stop }
+        setProgress($, on === 'terms' ? "Waiting for Delta's beta terms…" : 'Waiting for Delta sign-in…', 'active')
+        progress = feed.progress
+        return
+      }
+      if (browserWait?.stop === stop) browserWait = undefined
+      // What follows sets its own progress; a band still showing the wait would outlive it.
+      if (progress && feed.progress === progress) clearProgress($)
+    },
+    stop: stop.signal,
   }
+}
+
+/**
+ * Offer to stop a sign-in waiting on the browser, answering whether one was waiting. Whatever waited
+ * reports the outcome itself, so the command that asked adds nothing of its own.
+ */
+async function offerToStopWaiting($: Runtime): Promise<boolean> {
+  const wait = browserWait
+  if (!wait) return false
+  const stop = 'Stop waiting'
+  const answer = await claudeInteraction($).ask(wait.on === 'terms'
+    ? 'Delta is waiting for you to accept its beta terms in your browser. Stop waiting?'
+    : 'Delta is waiting for you to finish signing in with your browser. Stop waiting?',
+  { options: [stop, 'Keep waiting'], header: 'Delta' }).catch(() => undefined)
+  if (answer === stop) wait.stop.abort()
+  return true
 }
 
 /**
@@ -5008,6 +5041,8 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
 
 /** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
 async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
+  // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
+  if (/^(?:setup|share|join)\b/.test(action) && await offerToStopWaiting($)) return {}
   // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
   if (action === 'setup') return { text: await setupCommand($) }
   const locator = /^join\s+(\S+)$/.exec(action)?.[1]

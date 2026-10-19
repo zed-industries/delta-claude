@@ -21,7 +21,14 @@ export type AuthenticationHost = {
   ask: (question: string, options: string[]) => Promise<string>
   /** Open a web page in the person's browser, answering whether it opened. */
   open: (url: string) => Promise<boolean>
+  /** Told what sign-in waits on in the browser, and `undefined` once it no longer waits. */
+  waiting: (on: BrowserWait | undefined) => void
+  /** Aborted when the person asks to stop waiting on the browser. */
+  stop: AbortSignal
 }
+
+/** What sign-in can wait on the person to finish in their browser. */
+export type BrowserWait = 'sign-in' | 'terms'
 
 /** How often, and for how long, sign-in waits for the person to accept the beta terms on the web. */
 const TERMS_POLL_MS = 2_000
@@ -55,6 +62,13 @@ export async function requireAuthentication(
     }
   }
   void monitor().catch(() => stopped.abort())
+  const stop = () => stopped.abort()
+  host.stop.addEventListener('abort', stop, { once: true })
+  let waitingOn: BrowserWait | undefined
+  const wait = (on: BrowserWait) => {
+    waitingOn = on
+    host.waiting(on)
+  }
   const request = async (args: string[], timeout = 60_000) => {
     await check()
     if (stopped.signal.aborted) throw new Error('Delta sign-in stopped')
@@ -87,6 +101,7 @@ export async function requireAuthentication(
     if (answer !== accept)
       throw new AccessRequiredError(`Delta's beta terms aren't accepted. Accept them at ${url}, then run ${retry} again.`)
     if (!await host.open(url)) await notice(`Accept Delta's beta terms in your browser to continue: ${url}`)
+    wait('terms')
     // The app keeps the denied sign-in and hears when the terms are accepted, so its status turns
     // signed in on its own: continue then, with no retry for the person to run.
     for (let waited = 0; waited < TERMS_WAIT_MS; waited += TERMS_POLL_MS) {
@@ -121,11 +136,20 @@ export async function requireAuthentication(
     await notice(`Finish signing in to Delta in your browser; this link expires at ${login.expires_at}: ${login.url}`)
     // Detached attempts can be shared by other clients. Stop our waiter, never
     // cancel the app's attempt or sign the account out when Claude changes session.
+    wait('sign-in')
     const result = await request(['wait', login.login_id], 16 * 60_000)
     if (result.status === 'access_denied') return await resolveAccess(result)
     if (result.status !== 'signed_in') throw authFailure(result, recovery, retry)
+  } catch (error) {
+    // Stopping is the person's choice, so it is reported as one, not as a failure.
+    if (host.stop.aborted && waitingOn) throw new AccessRequiredError(waitingOn === 'terms'
+      ? `Stopped waiting for Delta's beta terms. Run ${retry} again to accept them.`
+      : `Stopped waiting for Delta sign-in. Run ${retry} again to sign in.`)
+    throw error
   } finally {
     stopped.abort()
+    host.stop.removeEventListener('abort', stop)
+    if (waitingOn) host.waiting(undefined)
   }
 }
 

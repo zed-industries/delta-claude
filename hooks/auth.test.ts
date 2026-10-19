@@ -265,6 +265,85 @@ test('declining sign-in for automatic sync leaves the session unsynced without o
   fake.expectClean()
 })
 
+/** Answer the beta-terms offer by opening them, and an offer to stop waiting with `stop`. */
+function answerWait(fake: ReturnType<typeof fakeThreads>, stop: string) {
+  fake.answerQuestion = (question: any) => {
+    const text = question.questions[0].question
+    if (text.startsWith('Delta needs you to accept its beta terms')) return { result: { answers: { [text]: 'Open the beta terms' } } }
+    if (text.endsWith('Stop waiting?')) return { result: { answers: { [text]: stop } } }
+  }
+}
+
+test('running /delta-share again while the beta terms are awaited offers to stop waiting', async ($, on) => {
+  const fake = fakeThreads(on)
+  await $.session.start(sessionStart)
+  fake.authReplies = [TERMS_DENIAL, TERMS_DENIAL, TERMS_DENIAL]
+  answerWait(fake, 'Stop waiting')
+  await $.command.run(shareCommand)
+  await fake.clock.advance(0)
+  await fake.clock.settle()
+  expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain("Waiting for Delta's beta terms")
+  expect((await $.command.run(shareCommand)).text).toBeUndefined()
+  await fake.clock.settle()
+  expect(fake.questions.at(-1)?.questions[0].question).toBe('Delta is waiting for you to accept its beta terms in your browser. Stop waiting?')
+  expect(fake.logs).toContain('Stopped waiting for Delta\'s beta terms. Run /delta-share or /delta-join <link> again to accept them.')
+  expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')
+  // Nothing polls once stopped, and a new share can start.
+  const polls = fake.authCalls.length
+  await fake.clock.advance(10_000)
+  await fake.clock.settle()
+  expect(fake.authCalls).toHaveLength(polls)
+  expect(fake.server.thread).toBeUndefined()
+  fake.authReplies = []
+  await $.command.run(shareCommand)
+  await fake.clock.advance(0)
+  await fake.clock.settle()
+  expect(fake.server.thread).toBeDefined()
+  fake.expectClean()
+})
+
+test('keeping the wait leaves the share waiting for the beta terms, without a second share', async ($, on) => {
+  const fake = fakeThreads(on)
+  await $.session.start(sessionStart)
+  fake.authReplies = [TERMS_DENIAL, TERMS_DENIAL]
+  answerWait(fake, 'Keep waiting')
+  await $.command.run(shareCommand)
+  await fake.clock.advance(0)
+  await fake.clock.settle()
+  expect((await $.command.run(shareCommand)).text).toBeUndefined()
+  await fake.clock.settle()
+  expect(fake.questions.at(-1)?.questions[0].question).toBe('Delta is waiting for you to accept its beta terms in your browser. Stop waiting?')
+  await fake.clock.advance(2_000)
+  await fake.clock.settle()
+  await fake.clock.advance(2_000)
+  await fake.clock.settle()
+  expect(fake.server.thread).toBeDefined()
+  expect(fake.logs.join('\n')).not.toContain('Stopped waiting')
+  expect(fake.logs.join('\n')).not.toContain('already in progress')
+  fake.expectClean()
+})
+
+test('stopping automatic sync while sign-in waits closes the waiter and leaves the session unsynced', async ($, on) => {
+  const fake = fakeThreads(on)
+  fake.failOrgList = true
+  fake.authReplies = loginReplies()
+  fake.holdAuth = new Promise(() => {})
+  answerWait(fake, 'Stop waiting')
+  await startAutomatic($, fake)
+  expect(fake.authCalls.at(-1)?.[3]).toBe('wait')
+  expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain('Waiting for Delta sign-in')
+  await $.command.run(shareCommand)
+  await fake.clock.advance(0)
+  await fake.clock.settle()
+  expect(fake.questions.at(-1)?.questions[0].question).toBe('Delta is waiting for you to finish signing in with your browser. Stop waiting?')
+  expect(fake.authWaitClosed).toBe(true)
+  expect(fake.authCalls.some((argv) => ['cancel', 'logout'].includes(argv[3]!))).toBe(false)
+  expect(fake.logs).toContain('Stopped waiting for Delta sign-in. Run /delta-share again to sign in.')
+  expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain('Not syncing')
+  expect(fake.server.thread).toBeUndefined()
+  fake.expectClean()
+})
+
 test('declined beta terms leave a one-line explanation with the terms link, without a failure or a new sign-in', async ($, on) => {
   const fake = fakeThreads(on)
   await $.session.start(sessionStart)
