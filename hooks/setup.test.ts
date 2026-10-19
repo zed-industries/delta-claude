@@ -307,7 +307,7 @@ describe('setup wizard', () => {
       organizations: [{ id: 'org-ada', name: "ada's Organization", current: true }],
       file: JSON.stringify({ threads: { mode: 'private', organization: 'org-ada' } }) })
     await runSetupWizard(personal.env, personal.interaction)
-    expect(modeQuestion(personal)).toContain('Currently: Private sync with your personal space.')
+    expect(modeQuestion(personal)).toContain("Currently: Private sync with ada's Organization.")
   })
 
   test('a policy naming an organization the account is not in is called out before the first question', async () => {
