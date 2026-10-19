@@ -257,10 +257,13 @@ function matchOrganization(answer: string, organizations: readonly Organization[
 }
 
 /** Describe a repository's current policy for the wizard's first question. */
-function currentPolicy(policy: PolicyFile['policy']): string {
+function currentPolicy(policy: PolicyFile['policy'], organizations: readonly Organization[], login: string | undefined): string {
   if (!policy.configured) return 'Delta isn\'t set up for this repository yet.'
   if (policy.mode === 'manual') return 'Currently: Manual (only sessions you share with /delta-share).'
-  return `Currently: ${MODE_NAMES[policy.mode]}${policy.organization ? ` (${policy.organization})` : ''}.`
+  // A person knows a team by its name; the id is shown only for a team this account can't see.
+  const team = organizations.find((org) => org.id === policy.organization)
+  const where = team ? (isPersonalOrganization(team, login) ? 'your personal space' : team.name) : policy.organization
+  return `Currently: ${MODE_NAMES[policy.mode]}${where ? ` with ${where}` : ''}.`
 }
 
 /**
@@ -354,7 +357,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
 
   const labels = modeLabels(team, isPersonalOrganization(team, login))
   const answer = await interaction.ask(
-    `${currentPolicy(file.policy)} When Delta syncs a Claude Code session, it stores the conversation and ` +
+    `${currentPolicy(file.policy, organizations, login)} When Delta syncs a Claude Code session, it stores the conversation and ` +
     'a copy of this checkout\'s code, including uncommitted changes, in DeltaDB. This applies to new ' +
     'sessions, not this one. Which sessions should Delta sync?',
     { options: labels.map(([, label]) => label), header: HEADER })

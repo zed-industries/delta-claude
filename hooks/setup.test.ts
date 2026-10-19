@@ -298,6 +298,18 @@ describe('setup wizard', () => {
     }
   })
 
+  test('the mode question names the current team, never its id', async () => {
+    const modeQuestion = (h: ReturnType<typeof harness>) => h.asks.find((ask) => ask.question.includes('Which sessions should Delta sync?'))!.question
+    const team = harness({ answers: ['Zed', 'Manual'], file: JSON.stringify({ threads: { mode: 'private', organization: 'org-1' } }) })
+    await runSetupWizard(team.env, team.interaction)
+    expect(modeQuestion(team)).toContain('Currently: Private sync with Zed.')
+    const personal = harness({ answers: ['Skip this step (keep sessions to myself)', 'Manual'], login: 'ada',
+      organizations: [{ id: 'org-ada', name: "ada's Organization", current: true }],
+      file: JSON.stringify({ threads: { mode: 'private', organization: 'org-ada' } }) })
+    await runSetupWizard(personal.env, personal.interaction)
+    expect(modeQuestion(personal)).toContain('Currently: Private sync with your personal space.')
+  })
+
   test('a policy naming an organization the account is not in is called out before the first question', async () => {
     const h = harness({ file: JSON.stringify({ threads: { mode: 'organization', organization: 'org-other' } }) })
     await runSetupWizard(h.env, h.interaction)
