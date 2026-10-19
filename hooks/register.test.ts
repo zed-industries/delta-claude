@@ -109,7 +109,8 @@ describe('thread commands', () => {
     } else fake.cwd = change === 'Windows path spelling' ? 'C:/repo' : 'C:/different-checkout'
     release()
     await running
-    await fake.clock.settle()
+    // A continuing share has a whole chain of steps left to run.
+    await fake.settleUntil(() => change !== 'Windows path spelling' || fake.records().length > 0)
     if (change === 'Windows path spelling') {
       expect(fake.exports).toBe(1)
       expect(fake.server.shared).toBe(true)
@@ -1240,7 +1241,7 @@ describe('thread commands', () => {
     fake.contractRange = undefined
     const checks = fake.contractChecks
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settleUntil(() => checksAtAppend.length > 0)
     expect(checksAtAppend).toEqual([checks + 1])
     expect(fake.producerNames()).toEqual(['Claude Code'])
     expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ pending: [] })
@@ -1270,7 +1271,7 @@ describe('thread commands', () => {
     const checks = fake.contractChecks
     await $.session.start(sessionStart)
     answer()
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.producerNames().length > 0)
     // The stale refusal is neither remembered nor shown: the resumed session asked again and appended once.
     expect(fake.contractChecks).toBe(checks + 1)
     expect(fake.producerNames()).toEqual(['Claude Code'])

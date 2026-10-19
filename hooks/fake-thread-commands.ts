@@ -497,6 +497,14 @@ export function fakeThreads(on: On, options: {
       announceWorktrees()
     },
     expectClean() { expect(fake.violations).toEqual([]) },
+    /**
+     * Settle the clock until `done` holds; the test's timeout bounds the wait. One settle can return
+     * while a chain of host calls (a contract check, a status read, then an append) is still between
+     * steps on a loaded machine, and any fixed number of settles can run out first.
+     */
+    async settleUntil(done: () => boolean) {
+      while (!done()) await fake.clock.settle()
+    },
     /** Resolves with the first log at or after `start` that `match` accepts, now or later. */
     waitForLog(start: number, match: (log: string) => boolean): Promise<string> {
       const found = fake.logs.slice(start).find(match)
