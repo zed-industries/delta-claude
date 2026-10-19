@@ -367,15 +367,13 @@ function inspectionUnavailableMessage(error: { code: string; reason?: string; me
  * The oldest recording-output contract version this plugin speaks. Neither the plugin nor the CLI
  * has shipped, so nothing older is supported; raise this rather than keep a gate for an old CLI.
  */
-export const PLUGIN_CONTRACT_MIN = 4
+export const PLUGIN_CONTRACT_MIN = 5
 /**
  * The newest recording-output contract version this plugin speaks. A capability added by a later
  * version is gated on the session's negotiated version (`contractVersion`) until `PLUGIN_CONTRACT_MIN`
  * reaches it.
  */
 export const PLUGIN_CONTRACT_MAX = 5
-/** The first contract version whose CLI has `thread invite`. */
-export const INVITE_CONTRACT = 5
 
 /** The range of recording-output contract versions a CLI build speaks. */
 export type ThreadContract = { operation: 'contract'; min: number; max: number }

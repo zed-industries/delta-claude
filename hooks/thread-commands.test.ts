@@ -398,12 +398,11 @@ describe('recording contract', () => {
 
   test('records only against a CLI whose range covers the current contract', () => {
     const at = (min: number, max: number) => ({ operation: 'contract' as const, min, max })
-    for (const range of [at(4, 4), at(1, 5), at(5, 6)]) expect(contractRefusal(range)).toBeUndefined()
-    for (const range of [at(1, 3), undefined]) expect(contractRefusal(range)).toContain('Update Delta')
+    for (const range of [at(1, 5), at(5, 6)]) expect(contractRefusal(range)).toBeUndefined()
+    for (const range of [at(1, 4), undefined]) expect(contractRefusal(range)).toContain('Update Delta')
     expect(contractRefusal(at(6, 7))).toContain('Update the Delta plugin')
     // A later capability is gated on the version both sides speak.
     expect(contractVersion(at(3, 9))).toBe(5)
-    expect(contractVersion(at(1, 4))).toBe(4)
   })
 })
 

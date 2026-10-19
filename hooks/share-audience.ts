@@ -26,8 +26,6 @@ export type AudienceChoices = {
    * keep its audience but no longer become private to its owner.
    */
   synced: boolean
-  /** The CLI can invite people by email. */
-  invites: boolean
 }
 
 /** The tag above the question; Claude Code allows at most 12 characters. */
@@ -40,26 +38,22 @@ const CANCEL = 'Cancel'
 /**
  * Ask who should see the session. A string means nothing should be shared: why, for the transcript,
  * or empty when the person chose not to. Rejects with the interaction's `InteractionDismissed` or
- * `InteractionUnavailable`. With one possible answer and no addresses to type, nothing is asked.
+ * `InteractionUnavailable`.
  */
 export async function chooseShareAudience(interaction: Interaction, choices: AudienceChoices): Promise<ShareAudience | string> {
   const team = choices.team === undefined ? undefined : `Share with ${choices.team}`
   const options = [...team ? [team] : [], choices.synced ? KEEP : JUST_ME]
-  if (!choices.invites && options.length < 2) return choices.synced ? { kind: 'unchanged' } : { kind: 'private' }
   const answer = await interaction.ask(
     'Who should see this session? Delta syncs its conversation and a copy of this checkout\'s code, ' +
-    'including uncommitted changes, to DeltaDB.' +
-    (choices.invites ? ' To invite people, type their email addresses, separated by commas.' : ''),
+    'including uncommitted changes, to DeltaDB. To invite people, type their email addresses, separated by commas.',
     { options: options.length < 2 ? [...options, CANCEL] : options, header: HEADER })
   if (answer === CANCEL) return ''
   if (answer === team) return { kind: 'organization' }
   if (answer === JUST_ME) return { kind: 'private' }
   if (answer === KEEP) return { kind: 'unchanged' }
-  const emails = choices.invites ? emailsIn(answer) : []
+  const emails = emailsIn(answer)
   if (emails.length) return { kind: 'invite', emails }
-  return choices.invites
-    ? `No email addresses found in "${answer.trim()}", so nothing was shared. Run /delta-share again to choose.`
-    : 'Nothing was shared. Run /delta-share again to choose.'
+  return `No email addresses found in "${answer.trim()}", so nothing was shared. Run /delta-share again to choose.`
 }
 
 /**

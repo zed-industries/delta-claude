@@ -21,22 +21,18 @@ describe('share audience', () => {
     const team = 'Share with Zed'
     const justMe = 'Just me (sync privately)'
     const cases: { choices: AudienceChoices; answer?: string; result: unknown; offered: string[] }[] = [
-      { choices: { team: 'Zed', synced: false, invites: true }, answer: team, result: { kind: 'organization' }, offered: [team, justMe] },
-      { choices: { team: 'Zed', synced: false, invites: true }, answer: justMe, result: { kind: 'private' }, offered: [team, justMe] },
+      { choices: { team: 'Zed', synced: false }, answer: team, result: { kind: 'organization' }, offered: [team, justMe] },
+      { choices: { team: 'Zed', synced: false }, answer: justMe, result: { kind: 'private' }, offered: [team, justMe] },
       // A synced session can widen its audience or keep it, never become private again.
-      { choices: { team: 'Zed', synced: true, invites: true }, answer: 'Keep current sharing', result: { kind: 'unchanged' }, offered: [team, 'Keep current sharing'] },
+      { choices: { team: 'Zed', synced: true }, answer: 'Keep current sharing', result: { kind: 'unchanged' }, offered: [team, 'Keep current sharing'] },
       // A personal organization has no team, so "just me" is paired with Cancel.
-      { choices: { synced: false, invites: true }, answer: 'Cancel', result: '', offered: [justMe, 'Cancel'] },
-      { choices: { team: 'Zed', synced: false, invites: true }, answer: 'ada@example.com, bo@example.com',
+      { choices: { synced: false }, answer: 'Cancel', result: '', offered: [justMe, 'Cancel'] },
+      { choices: { team: 'Zed', synced: false }, answer: 'ada@example.com, bo@example.com',
         result: { kind: 'invite', emails: ['ada@example.com', 'bo@example.com'] }, offered: [team, justMe] },
-      { choices: { team: 'Zed', synced: false, invites: true }, answer: 'ada', result: expect.stringContaining('No email addresses'), offered: [team, justMe] },
-      // A CLI that cannot invite never reads typed text as addresses.
-      { choices: { team: 'Zed', synced: false, invites: false }, answer: 'ada@example.com', result: expect.stringContaining('Nothing was shared'), offered: [team, justMe] },
-      // With one possible answer and no addresses to type, nothing is asked.
-      { choices: { synced: false, invites: false }, result: { kind: 'private' }, offered: [] },
+      { choices: { team: 'Zed', synced: false }, answer: 'ada', result: expect.stringContaining('No email addresses'), offered: [team, justMe] },
     ]
     for (const { choices, answer, result, offered } of cases)
-      expect(await ask(choices, answer)).toEqual({ result, offered: offered.length ? [offered] : [] })
+      expect(await ask(choices, answer)).toEqual({ result, offered: [offered] })
     expect(() => threadInvitationsFrom(cliFixture('invite'), 'other-thread')).toThrow('matching CLI and plugin builds')
   })
 })

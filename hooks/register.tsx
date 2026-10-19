@@ -14,7 +14,7 @@ import { pathKey, samePath } from './paths'
 import { PresenceTracker } from './presence'
 import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
-  ContractRefusalError, INVITE_CONTRACT, JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
+  ContractRefusalError, JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
   validateJoinedMounts, parseThreadFork, validateThreadFrontier, validateThreadCheckout,
   type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadStatus, type ThreadTurn, type ThreadUpload, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
@@ -3451,10 +3451,7 @@ async function setupCommand($: Runtime): Promise<string> {
  * the person's answer to the question. A string is the command's answer when nothing is shared.
  */
 async function chooseAudience($: Runtime, session: string, typed: string[]): Promise<ShareAudience | string> {
-  // The share has checked the CLI's contract, which says whether it has `thread invite`.
-  const invites = (contractVerified.get(session) ?? 0) >= INVITE_CONTRACT
-  if (typed.length) return invites ? { kind: 'invite', emails: typed }
-    : 'This Delta cannot invite people by email yet. Update Delta, or run /delta-share without addresses.'
+  if (typed.length) return { kind: 'invite', emails: typed }
   const binding = stateFor(session).binding
   await loadOrganizationDirectory($)
   const organization = (binding ? threadOrganization(binding) : undefined) ??
@@ -3463,7 +3460,7 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
   const team = personalOrganizationIds.has(organization ?? '') || binding?.visibility === 'organization' ? undefined
     : organizationName(organization) ?? 'your organization'
   try {
-    return await chooseShareAudience(claudeInteraction($), { team, invites, synced: sessionSyncs(binding) })
+    return await chooseShareAudience(claudeInteraction($), { team, synced: sessionSyncs(binding) })
   } catch (error) {
     if (error instanceof InteractionDismissed) return ''
     if (error instanceof InteractionUnavailable)

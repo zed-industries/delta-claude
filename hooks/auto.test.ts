@@ -796,19 +796,9 @@ describe('setup dialogs and notices', () => {
     fake.expectClean()
   })
 
-  test('/delta share with addresses invites them, and a Delta without invitations refuses before anything syncs', async ($, on) => {
+  test('/delta share with addresses invites them without publishing', async ($, on) => {
     const fake = fakeThreads(on)
     fake.inviteFailures = { 'bo@example.com': 'already a member' }
-    await $.session.start(sessionStart)
-    fake.contractRange = { max: 4 }
-    await runShare($, fake, 'share ada@example.com')
-    expect(fake.logs.join('\n')).toContain('cannot invite people by email yet')
-    expect(fake.server.thread).toBeUndefined()
-    expect(fake.exports).toBe(0)
-    fake.contractRange = undefined
-    // The contract is checked once per session, so a new session sees the updated Delta.
-    await $.session.end(sessionEnd(fake.session))
-    fake.session = 'updated'
     await $.session.start(sessionStart)
     await runShare($, fake, 'share ada@example.com, bo@example.com')
     expect(fake.server.invited).toEqual(['ada@example.com', 'bo@example.com'])

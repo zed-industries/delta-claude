@@ -47,7 +47,7 @@ function harness(options: {
       return root
     },
     gitCommonDir: async () => options.commonDir,
-    contract: async () => ({ operation: 'contract', min: 1, max: options.contractMax ?? 4 }),
+    contract: async () => ({ operation: 'contract', min: 1, max: options.contractMax ?? 5 }),
     organizations: async () => options.organizations ?? [{ id: 'org-1', name: 'Zed', current: true }],
     login: async () => options.login,
     createOrganization: async (name) => {
@@ -150,7 +150,7 @@ describe('setup wizard', () => {
   })
 
   test('an account with only a personal organization is recommended a team, and may keep its sessions personal', async () => {
-    const keep = 'Skip: keep sessions in my personal organization, where no team can see them'
+    const keep = 'Skip: keep sessions personal; share one by email with /delta-share'
     const options = (h: ReturnType<typeof harness>, index: number) => (h.asks[index]!.options as { options: string[] }).options
     // Without the CLI's flag, the personal organization is recognised by the name Delta gives it.
     const named = harness({ answers: [keep, 'Private sync'], login: 'ada',
@@ -167,12 +167,6 @@ describe('setup wizard', () => {
     expect(JSON.parse(flagged.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
     expect(options(flagged, 2)).toEqual(['Private sync (every new session, only you see it until you share)',
       'Organization sharing (every new session, visible to Acme)', 'Manual (only sessions you share with /delta-share)'])
-    // A Delta that can invite by email says a personal session can still be shared that way.
-    const invites = 'Skip: keep sessions personal; share one by email with /delta-share'
-    const inviting = harness({ answers: [invites, 'Private sync'], login: 'ada', contractMax: 5,
-      organizations: [{ id: 'org-ada', name: "ada's Organization", current: true }] })
-    expect((await runSetupWizard(inviting.env, inviting.interaction)).status).toBe('wrote')
-    expect(options(inviting, 0)).toEqual(['Create a new organization', invites])
   })
 
   test('an account with several teams can still create a new one, or go back to the list', async () => {
