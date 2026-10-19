@@ -387,6 +387,8 @@ export function fakeThreads(on: On, options: {
     failWrite: false,
     /** `git rev-parse` fails, as outside a checkout. */
     failGit: false,
+    /** What `git remote` lists for the checkout. */
+    gitRemotes: ['origin'] as string[],
     /** The organizations `delta --json org list` reports. */
     organizations: undefined as { id: string; name: string; current: boolean }[] | undefined,
     /** `delta --json org list` fails with a typed error envelope. */
@@ -827,6 +829,7 @@ export function fakeThreads(on: On, options: {
       return { value: fake.organizationResult }
     if (argv[0] === 'git') {
       if (fake.failGit) return output('', 128, 'not a git repository')
+      if (argv[1] === 'remote') return output(fake.gitRemotes.map((name) => `${name}\n`).join(''))
       if (argv.includes('--git-common-dir')) return output(`${fake.gitCommonDir}\n`)
       // A subagent's isolated worktree is a checkout of its own.
       const cwd = String((e as any).init?.cwd ?? '')

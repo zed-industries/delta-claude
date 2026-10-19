@@ -51,6 +51,8 @@ export type SetupEnv = {
   checkoutRoot(): Promise<string>
   /** The absolute Git common directory, shared by linked worktrees. */
   gitCommonDir(): Promise<string | undefined>
+  /** The checkout's Git remote names, or undefined when Git cannot list them. */
+  remotes(): Promise<string[] | undefined>
   /**
    * The recording contract this CLI speaks, or undefined when it predates `thread contract`. A missing
    * CLI is installed first; rejects when that fails.
@@ -128,6 +130,19 @@ export function invitationSummary(results: readonly InviteResult[], target: stri
     invited.length ? `Invited ${invited.join(', ')} to ${target}.` : '',
     failed.length ? `Couldn't invite ${failed.join(', ')}.` : '',
   ].filter(Boolean).join(' ')
+}
+
+/**
+ * Why Delta can't sync a checkout with these Git remotes, ending without a period, or undefined when
+ * it can. Delta identifies a repository by its remote, so it refuses a checkout with none, or with
+ * several and none named `origin`. Unknown remotes (Git couldn't list them) are left to Delta.
+ */
+export function remoteRefusal(remotes: readonly string[] | undefined, command: string): string | undefined {
+  if (!remotes) return
+  if (!remotes.length)
+    return `This repository has no Git remote, and Delta needs one to sync it. Add a remote and push to it, then run ${command} again`
+  if (remotes.length > 1 && !remotes.includes('origin'))
+    return `This repository has several Git remotes and none is named origin, so Delta can't tell which one it is. Name the main one origin, then run ${command} again`
 }
 
 /** Delta's web dashboard, where an organization's members are managed in bulk. */
@@ -253,6 +268,9 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   let root: string
   try { root = await env.checkoutRoot() }
   catch (error) { return { status: 'no-checkout', text: `/delta-setup needs a Git checkout: ${String(error)}` } }
+  // Nothing below can work in a repository Delta can't identify, so that is said before any question.
+  const unidentified = remoteRefusal(await env.remotes(), '/delta-setup')
+  if (unidentified) return { status: 'failed', text: `${unidentified}.` }
   const path = policyPath(root)
   let file: PolicyFile
   try { file = readProjectPolicy(await env.readFile(path)) }

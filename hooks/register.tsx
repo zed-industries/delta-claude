@@ -28,7 +28,7 @@ import { TitleScanner, transcriptRead } from './title'
 import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
 import {
   DASHBOARD_URL, HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, emailsIn, invitationSummary, inviteResultsFrom, isPersonalOrganization, membersUrl, offerOnboarding,
-  organizationsFrom, releaseOnboarding, runSetupWizard,
+  organizationsFrom, releaseOnboarding, remoteRefusal, runSetupWizard,
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
@@ -3376,6 +3376,9 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   binding = await serial(() => load($, session))
   if (runtime.captureFailure || binding.captureFailure)
     throw new Error(`a stored Claude row could not be saved locally (${runtime.captureFailure ?? binding.captureFailure}); sharing is paused to avoid an incomplete transcript`)
+  // A repository Delta can't identify fails at the attach, after everything else; say so before asking.
+  const unidentified = remoteRefusal(await gitRemotes($, await checkoutRoot($)), '/delta-share')
+  if (unidentified) throw new ShareRefusal(unidentified)
   // Refuse a CLI this plugin cannot record against before its snapshot fills the local outbox.
   await resolveCli($, true)
   await assertShareSession($, request)
@@ -3579,7 +3582,16 @@ class ShareRefusal extends Error {
 /** What a failed share tells the person: why, and what to retry. */
 function shareFailureText(error: unknown, retry: string): string {
   if (error instanceof ShareRefusal) return `Delta didn't share this session: ${error.message}.`
-  return `Delta sharing failed: ${String(error)}. Fix the issue and retry ${retry}; saved records retain their sequence.`
+  // The message alone, without the error's class name or a second full stop after its own.
+  const reason = (error instanceof Error ? error.message : String(error)).replace(/[.\s]+$/, '')
+  return `Delta sharing failed: ${reason}. Fix the issue and retry ${retry}; saved records retain their sequence.`
+}
+
+/** A checkout's Git remote names, or undefined when Git cannot list them. */
+async function gitRemotes($: Runtime, root: string): Promise<string[] | undefined> {
+  const result = await $.process.run(['git', 'remote'], { cwd: root }).catch(() => undefined)
+  if (!result || result.exitCode !== 0 || result.isStdoutTruncated) return undefined
+  return result.stdout.split('\n').map((name) => name.trim()).filter(Boolean)
 }
 
 function joinedCheckoutRefusal(root: string, joined: Binding): string {
@@ -4328,6 +4340,7 @@ function setupEnv($: Runtime): SetupEnv {
         return /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(lines[0]) ? lines[0] : `${root}/${lines[0]}`
       } catch { return undefined }
     },
+    remotes: async () => gitRemotes($, await checkoutRoot($)),
     contract: async () => {
       try { await resolveCli($, true) }
       finally { clearSetupProgress($) }

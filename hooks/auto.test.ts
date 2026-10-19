@@ -790,6 +790,18 @@ describe('setup dialogs and notices', () => {
     fake.expectClean()
   })
 
+  test('/delta share in a repository without a Git remote says so before asking or uploading anything', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.gitRemotes = []
+    await $.session.start(sessionStart)
+    const outcome = await fake.share($)
+    expect(outcome).toBe("Delta didn't share this session: This repository has no Git remote, and Delta needs one to sync it. Add a remote and push to it, then run /delta-share again.")
+    expect(fake.questions.filter((question) => question.questions[0].header === 'Delta share')).toEqual([])
+    expect(fake.cliSetups).toEqual([])
+    expect(fake.server.thread).toBeUndefined()
+    fake.expectClean()
+  })
+
   test('/delta setup installs a missing Delta and signs in before asking anything', async ($, on) => {
     const fake = fakeThreads(on)
     fake.cliMissing = true

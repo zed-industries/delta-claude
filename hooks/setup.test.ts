@@ -22,6 +22,8 @@ function harness(options: {
   failSignIn?: Error
   /** Whether `openLink` can open a browser; true unless set. */
   canOpen?: boolean
+  /** The checkout's Git remotes; `origin` unless set. */
+  remotes?: string[]
   others?: Record<string, string>
 } = {}) {
   const answers = [...options.answers ?? []]
@@ -56,6 +58,7 @@ function harness(options: {
       return root
     },
     gitCommonDir: async () => options.commonDir,
+    remotes: async () => options.remotes ?? ['origin'],
     contract: async () => {
       if (options.failInstall) throw new Error('Delta installation failed: no network')
       return { operation: 'contract', min: 1, max: options.contractMax ?? 6 }
@@ -248,6 +251,22 @@ describe('setup wizard', () => {
     expect(h.writes).toEqual([])
     // A Delta too old to record against is not asked to sign in.
     expect(h.signIns()).toBe(0)
+  })
+
+  test('a repository Delta cannot identify by its remote stops setup before any question, saying why', async () => {
+    const cases = [
+      { remotes: [], text: 'This repository has no Git remote, and Delta needs one to sync it. Add a remote and push to it, then run /delta-setup again.' },
+      { remotes: ['fork', 'upstream'], text: "This repository has several Git remotes and none is named origin, so Delta can't tell which one it is. Name the main one origin, then run /delta-setup again." },
+    ]
+    for (const { remotes, text } of cases) {
+      const h = harness({ answers: ['Zed', 'Manual'], remotes })
+      expect(await runSetupWizard(h.env, h.interaction)).toEqual({ status: 'failed', text })
+      expect(h.asks).toEqual([])
+      expect(h.signIns()).toBe(0)
+    }
+    // Several remotes are fine when one is origin, as Delta then uses it.
+    const named = harness({ answers: ['Zed', 'Manual'], remotes: ['upstream', 'origin'] })
+    expect((await runSetupWizard(named.env, named.interaction)).status).toBe('wrote')
   })
 
   test('a Delta that cannot be installed or signed in to stops setup before any question, saying why', async () => {
