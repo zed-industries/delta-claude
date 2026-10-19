@@ -163,28 +163,16 @@ describe('thread commands', () => {
     fake.expectClean()
   })
 
-  test('share without an interactive surface returns failures and confirmed success through the command', async ($, on) => {
+  test('share and join refuse a session without an interactive surface before contacting Delta', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     fake.surfaces = []
     await $.session.start(sessionStart)
-    fake.commandFault = { operation: 'share', code: 'authentication_required', message: 'Sign in to Delta' }
-    expect(await $.command.run(shareCommand)).toEqual({
-      text: 'Delta sharing failed: DeltaCommandError: thread share: authentication_required: Sign in to Delta. Fix the issue and retry /delta-share; saved records retain their sequence.',
-    })
-
-    fake.commandFault = undefined
-    let release!: () => void
-    fake.holdAppend = new Promise<void>((resolve) => { release = resolve })
-    let completed = false
-    const result = $.command.run(shareCommand).then((result) => { completed = true; return result })
-    await fake.clock.settle()
-    expect(completed).toBe(false)
-    release()
-    expect(await result).toEqual({ text: `Delta share link: https://delta.dev/join/${fake.shareId}` })
-    // Completion releases the command's prompt gate without relying on a redraw or a timer.
-    expect((await $.prompt.submit(prompt('after sharing'))).drop).toBeUndefined()
+    for (const args of ['share', 'share ada@example.com', 'join some-link'])
+      expect((await $.command.run(typedDelta(args))).text).toContain('needs an interactive Claude Code terminal or Desktop Code tab')
+    await fake.clock.advance(0)
+    expect(fake.delta()).toEqual([])
+    expect(fake.exports).toBe(0)
     fake.expectClean()
-    await $.session.end(sessionEnd(fake.session))
   })
 
   test('each menu command runs its /delta form, and both forms keep working', async ($, on) => {
@@ -197,8 +185,13 @@ describe('thread commands', () => {
     // A menu command missing its argument explains that command's own format.
     expect((await run('delta-join', '')).text).toContain('Usage: /delta-join <link>')
     expect((await run('delta-org', '')).text).toContain('Usage: /delta-org list')
-    expect(await run('delta-share', '')).toEqual({ text: `Delta share link: https://delta.dev/join/${fake.shareId}` })
-    expect(await run('delta', 'share')).toEqual({ text: `Delta share link: https://delta.dev/join/${fake.shareId}` })
+    fake.surfaces = ['terminal']
+    for (const [command, args] of [['delta-share', ''], ['delta', 'share']]) {
+      const link = fake.waitForShareLink()
+      expect(await run(command!, args!)).toEqual({})
+      await fake.clock.advance(0)
+      expect(await link).toBe(`https://delta.dev/join/${fake.shareId}`)
+    }
     expect(fake.commandRuns).toEqual([])
     // Only the command a share reports tells Delta which form ran it.
     expect(fake.cliIntegrations.filter((call) => call.commandForm)).toEqual([

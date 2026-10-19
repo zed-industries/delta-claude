@@ -22,8 +22,7 @@ Each explicit `/delta share` or `/delta join <link>` checks sign-in after findin
 or installing Delta. If needed, Delta opens your browser and Claude shows a
 sign-in link. Finish signing in there; the command waits and then continues
 automatically. The link expires after 15 minutes; retry the command if sign-in
-expires or is cancelled. Without an interactive surface, share returns the
-sign-in link immediately; finish sign-in and run `/delta share` again.
+expires or is cancelled.
 Loading or resuming the plugin never installs Delta or
 starts sign-in. Changing Claude sessions stops the command, not a sign-in another
 Delta client may also be using.
@@ -95,8 +94,9 @@ before staging anything:
   was not, and why. Requires contract version 5.
 
 `/delta share ada@example.com bo@example.com` skips the question and invites those addresses.
-Dismissing the question shares nothing. A headless host, or a Claude without the question API,
-shares with the organization, as do the band's share control and setup's offer.
+Dismissing the question shares nothing. A Claude without the question API can only invite
+typed addresses. The band's share control and setup's offer share with the organization without
+asking: their labels already name it.
 
 The plugin's own questions run as `AskUserQuestion` tool calls; they are never recorded into the
 thread.
@@ -108,11 +108,10 @@ root, publishes to your organization, starts the read-only watcher, and drains
 the immutable outbox. Success returns the organization-shared URL only after
 the watcher's initial snapshot and server-confirmed delivery.
 
-On terminal and Desktop hosts, the command returns immediately and the status band
-reports progress and the result. Without an interactive surface, as on a cloud
-runner, `/delta share` waits and returns the share link or failure directly as
-command output; it does not rely on the band or a background transcript notice.
-This reporting fallback does not establish full cloud or print/SDK compatibility.
+The command returns immediately and the status band reports progress and the result.
+Sharing and joining need an interactive Claude Code terminal or Desktop Code tab; print
+mode, SDK sessions, and cloud runners aren't supported, and both commands refuse there
+before contacting Delta.
 
 Repeating `/delta share` finishes an interrupted operation using the same session
 binding and staged records. It never resets sequence numbers or reimports a

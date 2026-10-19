@@ -32,7 +32,7 @@ import {
 } from './setup'
 import { DeltaCli } from './cli'
 import { chooseShareAudience, invitationSummary, threadInvitationsFrom, type ShareAudience } from './share-audience'
-import { AccessRequiredError, PendingAuthenticationError, requireAuthentication, type AuthenticationHost } from './auth'
+import { AccessRequiredError, requireAuthentication, type AuthenticationHost } from './auth'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
 } from './handoff'
@@ -111,7 +111,7 @@ type JoinRequest = { session: string; cwd: string; locator: string; fresh?: stri
 /**
  * A share to run. With `choose`, the share decides who sees the session once the CLI is checked: the
  * addresses typed after `/delta share`, or else the person's answer. Without it, it shares with the
- * organization, as the band's control, setup, and headless hosts ask.
+ * organization, as the band's control and setup's offer ask.
  */
 type ShareRequest = { session: string; cwd: string; cancelled?: boolean; form?: CommandForm; choose?: { emails: string[] } }
 /** How a person ran a share or join: `/delta share` (`delta_subcommand`) or `/delta-share` (`dedicated_command`). */
@@ -1239,7 +1239,6 @@ function followUpload($: Runtime, session: string) {
 /** Sign-in's view of the session; `$` stays in this file, as Claude Code's loader requires. */
 async function authenticationHost($: Runtime): Promise<AuthenticationHost> {
   return {
-    interactive: hasInteractiveSurface(await $.session.surfaces()),
     windows: await $.env.get('OS') === 'Windows_NT',
     sleep: (milliseconds, signal) => $.clock.sleep(milliseconds, { signal }),
     spawn: (argv) => $.process.spawn({ argv }),
@@ -3465,8 +3464,8 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
     return await chooseShareAudience(claudeInteraction($), { team, invites, synced: sessionSyncs(binding) })
   } catch (error) {
     if (error instanceof InteractionDismissed) return ''
-    // A Claude without the question API shares with the organization, as before the question existed.
-    if (error instanceof InteractionUnavailable) return { kind: 'organization' }
+    if (error instanceof InteractionUnavailable)
+      return 'This Claude build cannot show /delta-share\'s question. Update Claude Code, or type the email addresses to invite after /delta-share.'
     throw error
   }
 }
@@ -3497,12 +3496,12 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
     return organizationCommand($, ['invite', '--', ...emails])
   }
   const session = await $.session.id()
-  let shareRequest: ShareRequest | undefined
   try {
     if (session !== active || !stateFor(session).binding) await activate($, session)
+    // Sharing and joining report through the band and ask through dialogs, which only these surfaces have.
+    if (!hasInteractiveSurface(await $.session.surfaces()))
+      return { text: `${locator ? '/delta-join' : '/delta-share'} needs an interactive Claude Code terminal or Desktop Code tab. Print mode, SDK sessions, and cloud runners aren't supported.` }
     if (locator) {
-      if (!hasInteractiveSurface(await $.session.surfaces()))
-        return { text: '/delta-join requires an interactive Claude Code terminal or Desktop Code tab. Print mode and SDK sessions have no interactive surface for the session transition.' }
       if (stateFor(session).currentTurnId || stateFor(session).promptEntering)
         return { text: 'Wait for the current Claude turn to finish before joining.' }
       const request = { session, cwd: await $.session.cwd(), locator, form }
@@ -3514,36 +3513,17 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
     }
     if (stateFor(session).currentTurnId)
       return { text: 'Wait for the current Claude turn to finish before sharing.' }
-    const interactive = hasInteractiveSurface(await $.session.surfaces())
-    // A headless host cannot ask, so without typed addresses it shares with the organization as it always has.
-    const request: ShareRequest = {
-      session, cwd: await $.session.cwd(), form,
-      ...shareEmails.length || interactive ? { choose: { emails: shareEmails } } : {},
-    }
-    sharing = shareRequest = request
+    const request: ShareRequest = { session, cwd: await $.session.cwd(), form, choose: { emails: shareEmails } }
+    sharing = request
     setProgress($, 'Preparing to share…', 'active', [1, 5])
-    if (interactive) {
-      $.clock.after(0, () => runShare($, request))
-      return {}
-    }
-    // Cloud and other headless hosts cannot show the band or be relied on to forward
-    // background UI notices. Keep the command open so its caller receives the outcome.
-    const outcome = await share($, request)
-    if (outcome.skipped) clearProgress($)
-    else finishProgress($, outcome.band, 'done')
-    if (sharing === request) sharing = undefined
-    return { text: [outcome.notice, outcome.url ? `Delta share link: ${outcome.url}` : ''].filter(Boolean).join('\n') || outcome.band }
+    $.clock.after(0, () => runShare($, request))
+    // Progress belongs to the band; a command with no text adds no transcript row.
+    return {}
   }
   catch (error) {
-    if (error instanceof PendingAuthenticationError || error instanceof AccessRequiredError) {
-      if (sharing === shareRequest) sharing = undefined
-      return { text: error.message }
-    }
+    // Only activation can fail here; the share or join itself runs on the clock and reports there.
     const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${locator ? `/delta-join ${locator}` : recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
-    if (!shareRequest || sharing === shareRequest) {
-      if (sharing === shareRequest) sharing = undefined
-      setProgress($, text, 'error')
-    }
+    setProgress($, text, 'error')
     return { text }
   }
 }

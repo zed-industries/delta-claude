@@ -2,8 +2,6 @@ import type { EngineInterface } from 'claude-code'
 import { readCommandStream } from './command-reader'
 import { commandErrorFromEnvelope } from './thread-commands'
 
-export class PendingAuthenticationError extends Error {}
-
 /**
  * The account is signed in but Delta needs something from the person first, such as accepting its
  * beta terms on the web. The message is complete, ready to show as is, never wrapped in a failure.
@@ -15,7 +13,6 @@ export class AccessRequiredError extends Error {}
  * module that passes `$` across an import, so `register.tsx` builds this from `$` itself.
  */
 export type AuthenticationHost = {
-  interactive: boolean
   windows: boolean
   sleep: (milliseconds: number, signal: AbortSignal) => Promise<void>
   spawn: (argv: string[]) => ReturnType<EngineInterface['process']['spawn']>
@@ -28,14 +25,17 @@ export function authLoginCommand(executable: string, windows: boolean): string {
     : `'${executable.replace(/'/g, "'\"'\"'")}' auth login`
 }
 
-/** Authenticate only an explicit command, using the CLI's app-owned browser login. */
+/**
+ * Authenticate only an explicit command, using the CLI's app-owned browser login. Only interactive
+ * sessions share or join, so sign-in always opens the browser and waits for it.
+ */
 export async function requireAuthentication(
   host: AuthenticationHost,
   executable: string,
   check: () => Promise<void>,
   notice: (text: string) => Promise<void>,
 ) {
-  const { interactive, windows } = host
+  const { windows } = host
   const recovery = `Resolve access${windows ? ', then run in PowerShell' : ', then run in your shell'}: ${authLoginCommand(executable, windows)}. After signing in again, retry /delta-share or /delta-join <link>.`
   const stopped = new AbortController()
   const monitor = async () => {
@@ -69,16 +69,14 @@ export async function requireAuthentication(
     const status = await request(['status'])
     if (status.status === 'signed_in') return
     if (status.status !== 'signed_out' && status.status !== 'signing_in') throw authFailure(status, recovery)
-    if (interactive) await notice('Signing in to Delta… Complete sign-in in your browser to continue.')
-    const login = await request(['login', '--no-wait', ...interactive ? [] : ['--no-browser']])
+    await notice('Signing in to Delta… Complete sign-in in your browser to continue.')
+    const login = await request(['login', '--no-wait'])
     if (login.status === 'signed_in') return
     if (login.status !== 'pending') throw authFailure(login, recovery)
     const expires = Date.parse(login.expires_at)
     if (typeof login.login_id !== 'string' || !login.login_id || typeof login.url !== 'string' ||
         !/^https?:\/\//.test(login.url) || !Number.isFinite(expires))
       throw new Error('Delta returned an invalid sign-in link; update Delta and retry')
-    if (!interactive)
-      throw new PendingAuthenticationError(`Delta sign-in is pending. Open ${login.url} in your browser and finish signing in, then retry /delta-share. This link expires at ${login.expires_at}. No thread has been shared by this command.`)
     await notice(`Finish signing in to Delta in your browser: ${login.url}\nWaiting for sign-in; this link expires at ${login.expires_at}.`)
     // Detached attempts can be shared by other clients. Stop our waiter, never
     // cancel the app's attempt or sign the account out when Claude changes session.
