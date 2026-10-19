@@ -192,18 +192,26 @@ describe('setup wizard', () => {
       'Team sharing (every new session, visible to Acme)', 'Manual (only sessions you share with /delta-share)'])
   })
 
-  test('an account with several teams can still create a new one, or go back to the list', async () => {
+  test('an account with teams creates a new one by typing its name, once confirmed, or skips teams', async () => {
     const teams = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Guild', current: false }]
-    const created = harness({ organizations: teams, answers: ['Create a team', 'Acme', 'Invite later', 'Team sharing', 'Not now'] })
+    const created = harness({ organizations: teams, answers: ['Acme', 'Create it', 'Invite later', 'Team sharing', 'Not now'] })
     expect((await runSetupWizard(created.env, created.interaction)).status).toBe('wrote')
     expect(created.creates).toEqual(['Acme'])
+    expect(created.asks[1]!.question).toBe('Create a new team called \u201cAcme\u201d?')
     expect(JSON.parse(created.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
-    // Going back from the name asks which team again; Cancel ends setup.
-    const back = harness({ organizations: teams, answers: ['Create a team', 'Back to the list', 'Zed', 'Private sync'] })
+    // Going back from the confirmation asks which team again, and creates nothing.
+    const back = harness({ organizations: teams, answers: ['Acme', 'Back to the list', 'Zed', 'Private sync'] })
     expect((await runSetupWizard(back.env, back.interaction)).status).toBe('wrote')
     expect(back.creates).toEqual([])
     expect(JSON.parse(back.current()!).threads.organization).toBe('org-1')
-    const cancelled = harness({ organizations: teams, answers: ['Create a team', 'Cancel'] })
+    // The question offers the teams, then keeping sessions personal, with no separate create option.
+    const personal = { id: 'org-ada', name: "ada's Organization", current: false }
+    const skipped = harness({ organizations: [...teams, personal], login: 'ada', answers: ['Skip this step (keep sessions to myself)', 'Private sync'] })
+    expect((await runSetupWizard(skipped.env, skipped.interaction)).status).toBe('wrote')
+    expect((skipped.asks[0]!.options as { options: string[] }).options).toEqual(['Zed', 'Guild', 'Skip this step (keep sessions to myself)'])
+    expect(JSON.parse(skipped.current()!).threads.organization).toBe('org-ada')
+    // Without a personal organization to keep sessions in, the alternative is Cancel, which ends setup.
+    const cancelled = harness({ organizations: teams, answers: ['Cancel'] })
     expect((await runSetupWizard(cancelled.env, cancelled.interaction)).status).toBe('cancelled')
   })
 
@@ -297,17 +305,17 @@ describe('setup wizard', () => {
     const six = Array.from({ length: 6 }, (_, index) => ({ id: `org-${index}`, name: `Organization ${index}`, current: index === 0 }))
     const twins = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Zed', current: false }]
     const cases: { answers: string[]; organizations?: typeof six; chosen: string; offered?: string[] }[] = [
-      // Even a single team is offered beside a new one.
-      { answers: ['Zed', 'Private sync'], chosen: 'org-1', offered: ['Zed', 'Create a team'] },
-      // At most three are offered, then a new one; the rest are reached by typing a name or an id.
+      // Even a single team is offered beside a second answer.
+      { answers: ['Zed', 'Private sync'], chosen: 'org-1', offered: ['Zed', 'Cancel'] },
+      // At most three are offered; the rest are reached by typing a name or an id.
       { answers: ['Organization 5', 'Private sync'], organizations: six, chosen: 'org-5',
-        offered: ['Organization 0', 'Organization 1', 'Organization 2', 'Create a team'] },
+        offered: ['Organization 0', 'Organization 1', 'Organization 2', 'Cancel'] },
       { answers: ['org-3', 'Private sync'], organizations: six, chosen: 'org-3' },
-      // An unknown answer asks again instead of guessing.
-      { answers: ['nobody', 'Organization 2', 'Private sync'], organizations: six, chosen: 'org-2' },
+      // A name several organizations share asks again instead of guessing or creating another.
+      { answers: ['Zed', 'Zed (org-2)', 'Private sync'], organizations: twins, chosen: 'org-2' },
       // Organizations sharing a name are offered with their ids, so choosing one never loops.
       { answers: ['Zed (org-2)', 'Private sync'], organizations: twins, chosen: 'org-2',
-        offered: ['Zed (org-1)', 'Zed (org-2)', 'Create a team'] },
+        offered: ['Zed (org-1)', 'Zed (org-2)', 'Cancel'] },
     ]
     for (const { answers, organizations, chosen, offered } of cases) {
       const h = harness({ answers, organizations })

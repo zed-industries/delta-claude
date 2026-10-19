@@ -184,9 +184,9 @@ function modeLabels(organization: Organization | undefined, personal: boolean): 
     ['manual', 'Manual (only sessions you share with /delta-share)'],
   ]
 }
-/** The organization picker's last option, offered alongside every existing team. */
+/** The team question's first option for an account with no team yet. */
 const CREATE_ORGANIZATION = 'Create a team'
-/** The team question's alternative for an account with only a personal organization. */
+/** The team question's last option, keeping sessions in the account's personal organization. */
 const KEEP_PERSONAL = 'Skip this step (keep sessions to myself)'
 /** The tag above each setup question; Claude Code allows at most 12 characters. */
 const HEADER = 'Delta setup'
@@ -312,28 +312,30 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   const login = await env.login().catch(() => undefined)
   const teams = organizations.filter((org) => !isPersonalOrganization(org, login))
   const personalOrganization = organizations.find((org) => isPersonalOrganization(org, login))
-  // The list always offers the current team and up to two others, then a new one; an account with no
-  // team may instead keep its personal organization. Any organization is still reachable by typing its
-  // exact name or id, an unmatched or ambiguous answer asks again, and going back from a new team's
-  // name returns here.
+  // An account with teams is offered the current one and up to two others; one with none is offered
+  // to create one. Either may instead keep its sessions in its personal organization. A typed answer
+  // names a team: an existing one by its exact name or id (an ambiguous name asks again), or else a new
+  // one, created once confirmed. Going back from a new team returns here.
   const current = teams.find((org) => org.current) ?? teams[0]
   const offered = current ? [current, ...teams.filter((org) => org !== current)].slice(0, MAX_ORGANIZATION_OPTIONS) : []
-  const alternative = teams.length ? [] : [personalOrganization ? KEEP_PERSONAL : 'Cancel']
+  const alternative = personalOrganization ? KEEP_PERSONAL : 'Cancel'
   const question = teams.length
     ? 'Which team should sessions from this repository sync to? Only you see a session until you share it. ' +
-      `For a team that isn't listed, select ${TYPE_SOMETHING} and enter its name.`
+      `To create a new team, select ${TYPE_SOMETHING} and enter its name; creating a team makes sharing easier.`
     : 'Create a team to more easily share sessions with others. Only you see a session until you share it, ' +
       'or skip this step to keep sessions to yourself.'
+  const options = teams.length
+    ? [...offered.map((org) => organizationLabel(org, organizations)), alternative]
+    : [CREATE_ORGANIZATION, alternative]
   let chosen: Organization | SetupOutcome | 'declined' | undefined
   while (!chosen || chosen === 'declined') {
-    const answer = await interaction.ask(question,
-      { options: [...offered.map((org) => organizationLabel(org, organizations)), CREATE_ORGANIZATION, ...alternative], header: 'Team' })
+    const answer = await interaction.ask(question, { options, header: 'Team' })
     if (answer === 'Cancel') return CANCELLED
     chosen = answer === KEEP_PERSONAL ? personalOrganization
       : answer === CREATE_ORGANIZATION ? await offerNewOrganization(env, interaction, TEAM_NAME_QUESTION, 'Back to the list')
       // With no team to choose, a typed answer is the new team's name.
       : !teams.length ? await createTeam(env, interaction, answer)
-      : matchOrganization(answer, organizations)
+      : matchOrganization(answer, organizations) ?? await confirmNewTeam(env, interaction, answer, organizations)
   }
   if ('status' in chosen) return chosen
   const team = chosen
@@ -390,6 +392,20 @@ async function offerNewOrganization(env: SetupEnv, interaction: Interaction, que
   if (answer === decline) return 'declined'
   if (answer === 'Cancel') return CANCELLED
   return createTeam(env, interaction, answer)
+}
+
+/**
+ * Offer to create a team under a typed name that matches no organization, so a mistyped name of an
+ * existing team doesn't silently create another. Undefined for a name several organizations share,
+ * or an answer that is not a name, so the team question asks again.
+ */
+async function confirmNewTeam(env: SetupEnv, interaction: Interaction, answer: string, organizations: readonly Organization[]): Promise<Organization | SetupOutcome | 'declined' | undefined> {
+  const name = answer.trim()
+  if (!name || name.startsWith('/') || organizations.some((org) => org.name.toLowerCase() === name.toLowerCase())) return undefined
+  const create = 'Create it'
+  if (await interaction.ask(`Create a new team called “${name}”?`, { options: [create, 'Back to the list'], header: HEADER }) !== create)
+    return 'declined'
+  return createTeam(env, interaction, name)
 }
 
 /**
