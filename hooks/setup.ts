@@ -142,8 +142,15 @@ export function remoteRefusal(remotes: readonly string[] | undefined, command: s
   if (!remotes.length)
     return `This repository has no Git remote, and Delta needs one to sync it. Add a remote and push to it, then run ${command} again`
   if (remotes.length > 1 && !remotes.includes('origin'))
-    return `This repository has several Git remotes and none is named origin, so Delta can't tell which one it is. Name the main one origin, then run ${command} again`
+    return `Delta can't sync this repository because it has several Git remotes (${remotes.join(', ')}) and none is named origin, ` +
+      `so Delta can't tell which one is the repository. Rename the one you push to: git remote rename <name> origin. Then run ${command} again`
 }
+
+/**
+ * How questions name Claude Code's free-text row. The dialog always draws it last, under this label,
+ * and a plugin can neither move nor rename it, so a question that expects typing points at it.
+ */
+export const TYPE_SOMETHING = '“Type something”'
 
 /** Delta's web dashboard, where an organization's members are managed in bulk. */
 export const DASHBOARD_URL = 'https://dashboard.zed.dev'
@@ -178,16 +185,13 @@ function modeLabels(organization: Organization | undefined, personal: boolean): 
   ]
 }
 /** The organization picker's last option, offered alongside every existing team. */
-const CREATE_ORGANIZATION = 'Create a new team'
+const CREATE_ORGANIZATION = 'Create a team'
 /** The team question's alternative for an account with only a personal organization. */
-const KEEP_PERSONAL = 'Skip: keep sessions to myself'
+const KEEP_PERSONAL = 'Skip this step (keep sessions to myself)'
 /** The tag above each setup question; Claude Code allows at most 12 characters. */
 const HEADER = 'Delta setup'
-/**
- * The new team's name question. Claude Code puts its free-text row below the options and offers no
- * way to move it, so the question says where to type.
- */
-const TEAM_NAME_QUESTION = "What's your team called? Type its name below."
+/** The new team's name question, which is answered in Claude Code's free-text row. */
+const TEAM_NAME_QUESTION = `Create a team: select ${TYPE_SOMETHING} and enter its name.`
 /** The setting's file, relative to the checkout root, as people see it named. */
 const SETTINGS_FILE = '.delta/settings.json'
 /** The setting's line in the repository-local `info/exclude`, anchored to the checkout root as the app's are. */
@@ -316,10 +320,10 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   const offered = current ? [current, ...teams.filter((org) => org !== current)].slice(0, MAX_ORGANIZATION_OPTIONS) : []
   const alternative = teams.length ? [] : [personalOrganization ? KEEP_PERSONAL : 'Cancel']
   const question = teams.length
-    ? 'Which team should sessions from this repository go to? A team is who you can share sessions with; ' +
-      "only you see a session until you share it. To use a team that isn't listed, type its name below."
-    : 'Delta keeps your sessions in a team: the people you can share them with. Only you see a session ' +
-      "until you share it. What's your team called? Type its name below, or skip to keep sessions to yourself."
+    ? 'Which team should sessions from this repository sync to? Only you see a session until you share it. ' +
+      `For a team that isn't listed, select ${TYPE_SOMETHING} and enter its name.`
+    : 'Create a team to more easily share sessions with others. Only you see a session until you share it, ' +
+      'or skip this step to keep sessions to yourself.'
   let chosen: Organization | SetupOutcome | 'declined' | undefined
   while (!chosen || chosen === 'declined') {
     const answer = await interaction.ask(question,
@@ -415,7 +419,7 @@ async function offerInvites(env: SetupEnv, interaction: Interaction, organizatio
   const members = membersUrl(organization.id)
   let answer: string
   try {
-    answer = await interaction.ask(`Who should join ${organization.name}? Type their email addresses below, separated by commas.`,
+    answer = await interaction.ask(`Who should join ${organization.name}? Select ${TYPE_SOMETHING} and enter their email addresses, separated by commas.`,
       { options: [later, manage], header: HEADER })
   } catch (error) {
     if (error instanceof InteractionDismissed) return

@@ -778,7 +778,7 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith('Delta keeps your sessions in a team') ? 'Acme'
+      const answer = text.startsWith('Create a team to more easily share') ? 'Acme'
         : text.startsWith('Who should join') ? 'Invite later'
         : offered.find((label) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }

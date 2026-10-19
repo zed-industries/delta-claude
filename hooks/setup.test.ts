@@ -173,13 +173,13 @@ describe('setup wizard', () => {
   })
 
   test('an account with only a personal organization is recommended a team, and may keep its sessions personal', async () => {
-    const keep = 'Skip: keep sessions to myself'
+    const keep = 'Skip this step (keep sessions to myself)'
     const options = (h: ReturnType<typeof harness>, index: number) => (h.asks[index]!.options as { options: string[] }).options
     // Without the CLI's flag, the personal organization is recognised by the name Delta gives it.
     const named = harness({ answers: [keep, 'Private sync'], login: 'ada',
       organizations: [{ id: 'org-ada', name: "ada's Organization", current: true }] })
     expect((await runSetupWizard(named.env, named.interaction)).status).toBe('wrote')
-    expect(options(named, 0)).toEqual(['Create a new team', keep])
+    expect(options(named, 0)).toEqual(['Create a team', keep])
     expect(JSON.parse(named.current()!).threads).toEqual({ mode: 'private', organization: 'org-ada' })
     // Nobody else is in a personal organization, so it offers no Team sharing.
     expect(options(named, 1).some((label) => label.startsWith('Team sharing'))).toBe(false)
@@ -194,16 +194,16 @@ describe('setup wizard', () => {
 
   test('an account with several teams can still create a new one, or go back to the list', async () => {
     const teams = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Guild', current: false }]
-    const created = harness({ organizations: teams, answers: ['Create a new team', 'Acme', 'Invite later', 'Team sharing', 'Not now'] })
+    const created = harness({ organizations: teams, answers: ['Create a team', 'Acme', 'Invite later', 'Team sharing', 'Not now'] })
     expect((await runSetupWizard(created.env, created.interaction)).status).toBe('wrote')
     expect(created.creates).toEqual(['Acme'])
     expect(JSON.parse(created.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
     // Going back from the name asks which team again; Cancel ends setup.
-    const back = harness({ organizations: teams, answers: ['Create a new team', 'Back to the list', 'Zed', 'Private sync'] })
+    const back = harness({ organizations: teams, answers: ['Create a team', 'Back to the list', 'Zed', 'Private sync'] })
     expect((await runSetupWizard(back.env, back.interaction)).status).toBe('wrote')
     expect(back.creates).toEqual([])
     expect(JSON.parse(back.current()!).threads.organization).toBe('org-1')
-    const cancelled = harness({ organizations: teams, answers: ['Create a new team', 'Cancel'] })
+    const cancelled = harness({ organizations: teams, answers: ['Create a team', 'Cancel'] })
     expect((await runSetupWizard(cancelled.env, cancelled.interaction)).status).toBe('cancelled')
   })
 
@@ -256,7 +256,7 @@ describe('setup wizard', () => {
   test('a repository Delta cannot identify by its remote stops setup before any question, saying why', async () => {
     const cases = [
       { remotes: [], text: 'This repository has no Git remote, and Delta needs one to sync it. Add a remote and push to it, then run /delta-setup again.' },
-      { remotes: ['fork', 'upstream'], text: "This repository has several Git remotes and none is named origin, so Delta can't tell which one it is. Name the main one origin, then run /delta-setup again." },
+      { remotes: ['fork', 'upstream'], text: "Delta can't sync this repository because it has several Git remotes (fork, upstream) and none is named origin, so Delta can't tell which one is the repository. Rename the one you push to: git remote rename <name> origin. Then run /delta-setup again." },
     ]
     for (const { remotes, text } of cases) {
       const h = harness({ answers: ['Zed', 'Manual'], remotes })
@@ -298,16 +298,16 @@ describe('setup wizard', () => {
     const twins = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Zed', current: false }]
     const cases: { answers: string[]; organizations?: typeof six; chosen: string; offered?: string[] }[] = [
       // Even a single team is offered beside a new one.
-      { answers: ['Zed', 'Private sync'], chosen: 'org-1', offered: ['Zed', 'Create a new team'] },
+      { answers: ['Zed', 'Private sync'], chosen: 'org-1', offered: ['Zed', 'Create a team'] },
       // At most three are offered, then a new one; the rest are reached by typing a name or an id.
       { answers: ['Organization 5', 'Private sync'], organizations: six, chosen: 'org-5',
-        offered: ['Organization 0', 'Organization 1', 'Organization 2', 'Create a new team'] },
+        offered: ['Organization 0', 'Organization 1', 'Organization 2', 'Create a team'] },
       { answers: ['org-3', 'Private sync'], organizations: six, chosen: 'org-3' },
       // An unknown answer asks again instead of guessing.
       { answers: ['nobody', 'Organization 2', 'Private sync'], organizations: six, chosen: 'org-2' },
       // Organizations sharing a name are offered with their ids, so choosing one never loops.
       { answers: ['Zed (org-2)', 'Private sync'], organizations: twins, chosen: 'org-2',
-        offered: ['Zed (org-1)', 'Zed (org-2)', 'Create a new team'] },
+        offered: ['Zed (org-1)', 'Zed (org-2)', 'Create a team'] },
     ]
     for (const { answers, organizations, chosen, offered } of cases) {
       const h = harness({ answers, organizations })
