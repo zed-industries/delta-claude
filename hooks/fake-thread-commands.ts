@@ -393,6 +393,8 @@ export function fakeThreads(on: On, options: {
     failOrgList: false,
     /** What `git rev-parse --show-toplevel` reports, so a test can simulate a linked worktree. */
     checkoutRoot: CHECKOUT,
+    /** The producer Delta expects, when a continued conversation records as an earlier session. */
+    producer: undefined as string | undefined,
     /** What `git rev-parse --git-common-dir` reports, shared by worktrees. */
     gitCommonDir: `${CHECKOUT}/.git`,
     failStoreSet: false as boolean | (() => boolean),
@@ -451,7 +453,7 @@ export function fakeThreads(on: On, options: {
           reference: fake.server.mount.reference,
           checkouts: [{ directory: fake.server.mount.directory, state: fake.server.checkout }],
         }] : []) },
-        producer: { source: 'claude-code', external_id: fake.session, next_sequence: fake.server.next,
+        producer: { source: 'claude-code', external_id: fake.producer ?? fake.session, next_sequence: fake.server.next,
           turn: fake.server.turn ? { ...fake.server.turn } : null },
       }
     },
@@ -861,7 +863,7 @@ export function fakeThreads(on: On, options: {
       fake.server.groups.delete(String(parsed!.options['--owner']))
       return output(JSON.stringify(cliFixture('unmount', { thread_id: fake.server.thread, owner: parsed!.options['--owner'] })))
     }
-    const source = { '--source': 'claude-code', '--external-id': fake.session }
+    const source = { '--source': 'claude-code', '--external-id': fake.producer ?? fake.session }
     const positionals = operation === 'create' ? [] : operation === 'attach' ? [CHECKOUT] : [threadLocator(parsed?.positionals[2])]
     if (operation === 'invite') {
       const emails = parsed!.positionals.slice(3)
@@ -1051,7 +1053,7 @@ export function fakeThreads(on: On, options: {
     if (operation === 'status') {
       fake.commands.push([...e.argv])
       if (!matchesCommand(e.argv, ['thread', operation, threadLocator(cliArguments(e.argv)?.positionals[2])], {
-        '--source': 'claude-code', '--external-id': fake.session,
+        '--source': 'claude-code', '--external-id': fake.producer ?? fake.session,
       })) fake.violations.push(`forbidden status spawn: ${e.argv.join(' ')}`)
       const read = { closed: false, emittedBytes: 0 }
       fake.statusProcesses.push(read)
@@ -1111,7 +1113,7 @@ export function fakeThreads(on: On, options: {
     const watch = createWatch(e)
     fake.watches.push(watch)
     if (!matchesCommand(e.argv, ['thread', 'watch', threadLocator(cliArguments(e.argv)?.positionals[2])], {
-      '--source': 'claude-code', '--external-id': fake.session, '--participate': 'Claude Code',
+      '--source': 'claude-code', '--external-id': fake.producer ?? fake.session, '--participate': 'Claude Code',
     })) fake.violations.push(`forbidden spawn: ${e.argv.join(' ')}`)
     if (fake.onWatch) fake.onWatch(watch, fake.watches.length - 1)
     else watch.observe()

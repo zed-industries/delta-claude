@@ -333,6 +333,58 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
+  for (const order of ['agents overview', 'background'] as const)
+    test(`a conversation Claude continues in a new session (${order}) records there as the same producer and keeps the mounts`, async ($, on) => {
+      const fake = sharedThread(on, $)
+      await $.session.start(sessionStart)
+      await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+      await finishJoin(fake)
+      const parent = fake.session
+      const directory = `${MOUNTS}/${parent}/delta`
+      const transcript = `/claude/projects/${parent}.jsonl`
+      fake.files.set(transcript, '{"type":"user"}\n')
+      await $.classic.Stop({ transcript_path: transcript, stop_hook_active: false } as any)
+      await fake.clock.settle()
+      expect((fake.store.get(`session:${parent}`) as any).transcript).toBe(transcript)
+      // Claude Code moves the conversation to a new session and says so at the end of the old transcript.
+      fake.files.set(transcript, `{"type":"user"}\n{"type":"continued-in","sessionId":"${parent}","continuedInSessionId":"continued"}\n`)
+      // `/background` ends the old session first; the agents overview keeps it open behind the new one.
+      if (order === 'background') {
+        await $.session.end({ ...sessionEnd(parent), reason: 'other' })
+        expect(fake.unmounts).toEqual([])
+        expect(fake.store.get(`session:${parent}`)).toMatchObject({ continuedIn: 'continued' })
+      }
+      const mounts = fake.operations().filter((operation) => operation === 'mount').length
+      fake.session = 'continued'
+      fake.producer = parent
+      await $.session.start({ ...sessionStart, cwd: directory })
+      await $.classic.SessionStart({ session_id: 'continued', source: 'fork', cwd: directory, transcript_path: '/claude/projects/continued.jsonl' } as never)
+      await fake.clock.advance(0)
+      expect(fake.store.get('session:continued')).toMatchObject({
+        thread: fake.threadId, joined: true, producer: parent, owner: parent, directory,
+      })
+      expect(fake.store.get(`session:${parent}`)).toMatchObject({ continuedIn: 'continued' })
+      // Restoring mounts again under the same owner, which records this process as its owner.
+      expect(fake.operations().filter((operation) => operation === 'mount')).toHaveLength(mounts + 1)
+      expect(fake.delta().filter((argv) => argv[3] === 'mount').at(-1)).toContain(parent)
+      expect(fake.operations().some((operation) => ['create', 'attach', 'share'].includes(operation!))).toBe(false)
+      expect((await $.prompt.submit(prompt('after the move'))).drop).toBeUndefined()
+      await $.tool.call(bash('continued-tool', 'echo continued'))
+      await fake.clock.advance(0)
+      expect(fake.updates().map((record) => record.update?.toolCallId)).toContain('continued-tool')
+      const appends = fake.delta().filter((argv) => argv[3] === 'append')
+      expect(appends.at(-1)![appends.at(-1)!.indexOf('--external-id') + 1]).toBe(parent)
+      if (order === 'agents overview') {
+        // The old session exits later; its checkouts belong to the new one now.
+        await $.session.end({ ...sessionEnd(parent), reason: 'prompt_input_exit' })
+        expect(fake.unmounts).toEqual([])
+      }
+      expect(fake.server.groups.has(parent)).toBe(true)
+      await $.session.end(sessionEnd('continued'))
+      // The continuation's own exit releases the checkouts it took over.
+      expect(fake.unmounts).toEqual([{ thread: fake.threadId, owner: parent }])
+    })
+
   test('resume mounts again, moves Claude from its launch directory, and records only new rows', async ($, on) => {
     const fake = sharedThread(on, $)
     await $.session.start(sessionStart)
