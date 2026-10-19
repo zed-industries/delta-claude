@@ -33,6 +33,7 @@ import {
 } from './setup'
 import { DeltaCli } from './cli'
 import { chooseShareAudience, threadInvitationsFrom, type ShareAudience } from './share-audience'
+import { chooseDeltaAction } from './delta-menu'
 import { childKey, childName, childOutbox, recordsSubagent, sentBy, type ChildBinding, type Entry } from './children'
 import {
   HISTORY_BUDGET, adoptionPrompt, deltaTurnReport, finishedReport, historyText, isOwnItem, itemsSince,
@@ -5102,6 +5103,22 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
   }
 }
 
+/**
+ * Answer bare `/delta` with a menu of its actions and run the chosen one. A surface that can't ask
+ * gets the usage text instead, and choosing nothing adds nothing to the transcript.
+ */
+async function deltaMenu($: Runtime): Promise<{ text?: string }> {
+  if (!hasInteractiveSurface(await $.session.surfaces())) return runDeltaCommand($, '', 'delta_subcommand')
+  let action: string | undefined
+  try { action = await chooseDeltaAction(claudeInteraction($)) }
+  catch (error) {
+    if (error instanceof InteractionDismissed) return {}
+    if (error instanceof InteractionUnavailable) return runDeltaCommand($, '', 'delta_subcommand')
+    throw error
+  }
+  return action ? runDeltaCommand($, action, 'delta_subcommand') : {}
+}
+
 /** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
 async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
@@ -5769,6 +5786,7 @@ export function register(on: On) {
     // person or another plugin, and gets the usage text below.
     if (internal !== undefined && e.origin?.kind === 'plugin' && e.origin.name === $.plugin.name)
       return { text: SHOW_ANSWER }
+    if (!action) return deltaMenu($)
     return runDeltaCommand($, action, 'delta_subcommand')
   })
   on('command.run', { command: 'delta-share' }, async ($, e) => runDeltaCommand($, `share ${e.args.trim()}`.trim(), 'dedicated_command'))

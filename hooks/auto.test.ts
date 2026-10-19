@@ -835,6 +835,24 @@ describe('setup dialogs and notices', () => {
     fake.expectClean()
   })
 
+  test('bare /delta opens a menu that runs the chosen action, and a headless session gets the usage text', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = (question: any) => {
+      const text = question.questions[0].question
+      const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
+      const answer = text === 'What would you like to do with Delta?' ? 'Set up this repository'
+        : offered.find((label) => label === 'Zed' || label.startsWith('Manual'))
+      return { result: { answers: { [text]: answer } } }
+    }
+    // A resumed session, so the setup offer a newly loaded plugin makes stays out of the way.
+    await startAuto($, fake, 'resume')
+    const { text } = await $.command.run({ ...typedDelta('') } as never)
+    expect(text).toContain('Saved Manual with Zed')
+    fake.surfaces = []
+    expect((await $.command.run({ ...typedDelta('') } as never)).text).toMatch(/^Usage: \/delta share/)
+    fake.expectClean()
+  })
+
   test('syncing this session from /delta setup after Private sync uploads it privately, never to the team', async ($, on) => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {

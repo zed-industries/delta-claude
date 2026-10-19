@@ -49,7 +49,8 @@ you name by email address. `/delta-share ada@example.com` invites them directly.
 
 ### Commands
 
-Each command also works as `/delta <command>`, such as `/delta share`.
+Each command also works as `/delta <command>`, such as `/delta share`. `/delta` on
+its own opens a menu of these actions.
 
 | Command | Description |
 | --- | --- |
