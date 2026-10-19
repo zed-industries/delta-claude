@@ -802,6 +802,25 @@ describe('setup dialogs and notices', () => {
     fake.expectClean()
   })
 
+  test('syncing this session from /delta setup after Private sync uploads it privately, never to the team', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = (question: any) => {
+      const text = question.questions[0].question
+      const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
+      return { result: { answers: { [text]: offered.find((label) => label === 'Zed' || label.startsWith('Private sync') || label === 'Sync it') } } }
+    }
+    await $.session.start(sessionStart)
+    const { text } = await $.command.run({ ...typedDelta('setup') } as never)
+    expect(text).toContain('Syncing this session now.')
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(fake.server.upload).toMatchObject({ visibility: 'private' })
+    expect(fake.operations()).not.toContain('share')
+    expect(fake.server.shared).toBe(false)
+    fake.expectClean()
+  })
+
   test('/delta setup installs a missing Delta and signs in before asking anything', async ($, on) => {
     const fake = fakeThreads(on)
     fake.cliMissing = true

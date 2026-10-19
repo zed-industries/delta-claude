@@ -12,7 +12,8 @@ function harness(options: {
   contractMax?: number
   organizations?: { id: string; name: string; current: boolean; personal?: boolean }[]
   login?: string
-  shared?: boolean
+  /** Who already sees this session; nobody unless set. */
+  audience?: 'none' | 'private' | 'shared'
   failWrite?: boolean
   failCreate?: boolean
   failInvite?: string
@@ -33,7 +34,7 @@ function harness(options: {
   const writes: { path: string; text: string }[] = []
   // Files other than the setting itself, such as the repository's Git exclude list, by path.
   const others = new Map<string, string>(Object.entries(options.others ?? {}))
-  let shares = 0
+  const shares: string[] = []
   const creates: string[] = []
   const invites: { organization: string; emails: string[] }[] = []
   const opened: string[] = []
@@ -90,8 +91,8 @@ function harness(options: {
       writes.push({ path, text })
       file = text
     },
-    sessionShared: async () => options.shared ?? false,
-    shareSession: async () => { shares++; return true },
+    sessionAudience: async () => options.audience ?? 'none',
+    shareSession: async (audience) => { shares.push(audience); return true },
   }
   return { env, interaction, asks, logs, writes, creates, invites, others, opened, current: () => file, shares: () => shares, signIns: () => signIns }
 }
@@ -134,25 +135,31 @@ describe('setup wizard', () => {
     expect(JSON.parse(replaced.current()!)).toEqual({ threads: { mode: 'manual', organization: 'org-1' } })
   })
 
-  test('after saving, only Team sharing offers to sync this session, and only while it is unshared', async () => {
-    const synced = harness({ answers: ['Zed', 'Team sharing', 'Sync it'] })
-    expect((await runSetupWizard(synced.env, synced.interaction)).status).toBe('wrote')
-    expect(synced.asks.at(-1)?.question).toContain('Sync this session to Zed')
-    expect(synced.shares()).toBe(1)
-
-    const declined = harness({ answers: ['Zed', 'Team sharing'] })
-    expect((await runSetupWizard(declined.env, declined.interaction)).status).toBe('wrote')
-    expect(declined.shares()).toBe(0)
-
-    // A share would publish to the organization, which Private sync and Manual did not ask for.
-    for (const answers of [['Zed', 'Private sync'], ['Zed', 'Manual']]) {
-      const other = harness({ answers })
-      expect((await runSetupWizard(other.env, other.interaction)).status).toBe('wrote')
-      expect(other.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
+  test('after saving an automatic mode, setup offers to sync this session the way that mode would', async () => {
+    const cases = [
+      { mode: 'Team sharing', question: 'Sync this session to Zed too?', audience: 'organization' },
+      { mode: 'Private sync', question: 'Sync this session privately too?', audience: 'private' },
+    ]
+    for (const { mode, question, audience } of cases) {
+      const synced = harness({ answers: ['Zed', mode, 'Sync it'] })
+      expect(await runSetupWizard(synced.env, synced.interaction)).toMatchObject({ status: 'wrote', text: expect.stringContaining('Syncing this session now.') })
+      expect(synced.asks.at(-1)?.question).toContain(question)
+      expect(synced.shares()).toEqual([audience])
+      // Declining says why this session isn't syncing, so a quiet status line doesn't look broken.
+      const declined = harness({ answers: ['Zed', mode, 'Not now'] })
+      expect(await runSetupWizard(declined.env, declined.interaction)).toMatchObject({ status: 'wrote', text: expect.stringContaining("This session isn't syncing; run /delta-share") })
+      expect(declined.shares()).toEqual([])
     }
-    const already = harness({ answers: ['Zed', 'Team sharing'], shared: true })
-    await runSetupWizard(already.env, already.interaction)
-    expect(already.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
+    // Manual shares by hand, so it only says how.
+    const manual = harness({ answers: ['Zed', 'Manual'] })
+    expect(await runSetupWizard(manual.env, manual.interaction)).toMatchObject({ text: expect.stringContaining("This session isn't syncing; run /delta-share") })
+    expect(manual.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
+    // A session that already syncs the way the mode would isn't asked; a private one may still go to the team.
+    for (const [mode, audience, asked] of [['Team sharing', 'shared', false], ['Private sync', 'private', false], ['Private sync', 'shared', false], ['Team sharing', 'private', true]] as const) {
+      const h = harness({ answers: ['Zed', mode, 'Not now'], audience })
+      await runSetupWizard(h.env, h.interaction)
+      expect(h.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(asked)
+    }
   })
 
   test('an account with no team is asked to name one before choosing a mode', async () => {

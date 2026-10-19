@@ -77,10 +77,16 @@ export type SetupEnv = {
   readFile(path: string): Promise<string | undefined>
   /** Write a policy file; the wizard does not commit it. */
   writeFile(path: string, text: string): Promise<void>
-  /** Whether this session's conversation is already shared with the organization. */
-  sessionShared(): Promise<boolean>
-  /** Start sharing this session with the organization, as `/delta share` does; false when it cannot start now. */
-  shareSession(): Promise<boolean>
+  /**
+   * Who already sees this session: nobody (`none`, it doesn't sync), only its owner (`private`), or
+   * people beyond its owner (`shared`, including a joined thread).
+   */
+  sessionAudience(): Promise<'none' | 'private' | 'shared'>
+  /**
+   * Start syncing this session privately or with the organization, as `/delta share` does; false when
+   * it cannot start now.
+   */
+  shareSession(audience: 'private' | 'organization'): Promise<boolean>
 }
 
 /** Validate the parsed body of `delta --json org list`, keeping the CLI's typed error envelope. */
@@ -363,20 +369,25 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     await interaction.log(`Delta couldn't keep ${SETTINGS_FILE} out of Git; add it to .gitignore if you don't want to commit it.`, 'transcript')
   const summary = `${MODE_NAMES[mode]} with ${organizationName}`
   const saved = `Saved ${summary} to ${SETTINGS_FILE}. New sessions follow it from now on; run /delta-setup to change it.`
-  // The setting never applies to the session that saved it. Only Organization sharing offers to sync
-  // this one now: sharing it is what that choice asked for, while a share would contradict Private sync
-  // (it publishes to the organization) and Manual (sessions are shared by hand).
-  if (mode !== 'organization' || await env.sessionShared()) return { status: 'wrote', text: saved }
+  // The setting never applies to the session that saved it, so an automatic mode offers to sync this
+  // one the way it chose, privately or with the team, unless it already syncs that way. Manual syncs
+  // sessions by hand, so it only says how.
+  const notSyncing = `${saved} This session isn't syncing; run /delta-share to sync and share it.`
+  const audience = await env.sessionAudience()
+  if (mode === 'manual') return { status: 'wrote', text: audience === 'none' ? notSyncing : saved }
+  if (audience === 'shared' || (mode === 'private' && audience === 'private')) return { status: 'wrote', text: saved }
   let share: string | undefined
   try {
-    share = await interaction.ask(`Your new setting starts with your next session. Sync this session to ${organizationName} too?`,
-      { options: ['Sync it', 'Not now'], header: HEADER })
+    share = await interaction.ask(mode === 'private'
+      ? 'Your new setting starts with your next session. Sync this session privately too?'
+      : `Your new setting starts with your next session. Sync this session to ${organizationName} too?`,
+    { options: ['Sync it', 'Not now'], header: HEADER })
   }
   catch (error) { if (!(error instanceof InteractionDismissed || error instanceof InteractionUnavailable)) throw error }
-  if (share !== 'Sync it') return { status: 'wrote', text: `${saved} This session isn't syncing; use /delta-share to share it.` }
+  if (share !== 'Sync it') return { status: 'wrote', text: notSyncing }
   return {
     status: 'wrote',
-    text: await env.shareSession()
+    text: await env.shareSession(mode === 'private' ? 'private' : 'organization')
       ? `${saved} Syncing this session now.`
       : `${saved} This session couldn't start syncing now; use /delta-share once Claude is idle.`,
   }

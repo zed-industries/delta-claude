@@ -141,7 +141,13 @@ type JoinRequest = { session: string; cwd: string; locator: string; fresh?: stri
  * addresses typed after `/delta share`, or else the person's answer. Without it, it shares with the
  * organization, as the band's control and setup's offer ask.
  */
-type ShareRequest = { session: string; cwd: string; cancelled?: boolean; form?: CommandForm; choose?: { emails: string[] } }
+/**
+ * A share to run. `choose` asks who should see the session; otherwise `audience` decides, and with
+ * neither it is shared with the organization.
+ */
+type ShareRequest = {
+  session: string; cwd: string; cancelled?: boolean; form?: CommandForm; choose?: { emails: string[] }; audience?: ShareAudience
+}
 /** How a person ran a share or join: `/delta share` (`delta_subcommand`) or `/delta-share` (`dedicated_command`). */
 type CommandForm = 'delta_subcommand' | 'dedicated_command'
 
@@ -192,8 +198,8 @@ let pluginData = ''
 let outbox = ''
 let joining: JoinRequest | undefined
 let sharing: ShareRequest | undefined
-/** The session whose share the band asked for while its turn ran; it starts when the turn ends. */
-let shareAfterTurn: string | undefined
+/** A share asked for while its session's turn ran, and for whom; it starts when the turn ends. */
+let shareAfterTurn: { session: string; audience?: ShareAudience } | undefined
 /** A Keep or Discard the band started, so its two controls cannot both run at once. */
 let resolving = false
 /**
@@ -937,7 +943,7 @@ async function statusView($: Runtime): Promise<StatusState> {
     // Sharing waits for Claude's turn to finish, so the control says so rather than ignoring a press.
     // A personal organization has nobody to share with, so its threads offer no share control.
     share: binding?.visibility === 'private' && !personalOrganizationIds.has(threadOrganization(binding) ?? currentOrganizationId ?? '') ? {
-      label: shareAfterTurn === active && state?.currentTurnId ? 'Sharing after this turn'
+      label: shareAfterTurn?.session === active && state?.currentTurnId ? 'Sharing after this turn'
         : state?.currentTurnId ? 'Share after this turn'
         : `Share with ${organizationName(threadOrganization(binding)) ?? 'organization'}`,
     } : undefined,
@@ -3385,7 +3391,8 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   await requireContract($, session)
   await assertShareSession($, request)
   // Asked before anything is staged, so declining leaves the session exactly as it was.
-  const chosen: ShareAudience | string = request.choose ? await chooseAudience($, session, request.choose.emails) : { kind: 'organization' }
+  const chosen: ShareAudience | string = request.choose
+    ? await chooseAudience($, session, request.choose.emails) : request.audience ?? { kind: 'organization' }
   if (typeof chosen === 'string') return chosen ? { notice: chosen } : {}
   const audience = chosen
   await assertShareSession($, request)
@@ -4373,11 +4380,12 @@ function setupEnv($: Runtime): SetupEnv {
     writeFile: (path, text) => $.fs.write(path, text) as Promise<void>,
     // A joined thread is someone else's shared thread; an organization or unlisted one is already
     // visible beyond this account.
-    sessionShared: async () => {
+    sessionAudience: async () => {
       const binding = stateFor(await $.session.id()).binding
-      return !!binding?.joined || (!!binding?.visibility && binding.visibility !== 'private')
+      if (binding?.joined || (binding?.visibility && binding.visibility !== 'private')) return 'shared'
+      return sessionSyncs(binding) ? 'private' : 'none'
     },
-    shareSession: async () => beginShare($, await $.session.id()),
+    shareSession: async (audience) => beginShare($, await $.session.id(), { kind: audience }),
   }
 }
 
@@ -4866,14 +4874,14 @@ async function pruneStore($: Runtime) {
 }
 
 /** Begin the same publication flow `/delta share` runs, for the band's share control. */
-function beginShare($: Runtime, session: string): boolean {
+function beginShare($: Runtime, session: string, audience?: ShareAudience): boolean {
   if (sharing) return false
   if (stateFor(session).currentTurnId) {
-    shareAfterTurn = session
+    shareAfterTurn = { session, ...audience ? { audience } : {} }
     $.ui.invalidate('ui.render')
     return true
   }
-  const request: ShareRequest = { session, cwd: '' }
+  const request: ShareRequest = { session, cwd: '', ...audience ? { audience } : {} }
   sharing = request
   setProgress($, 'Preparing to share…', 'active', [1, 5])
   $.clock.after(0, async () => {
@@ -5321,9 +5329,10 @@ export function register(on: On) {
     if (runtime.currentTurnId === undefined) {
       void settleRemote($, session)?.catch((error) => report($, error))
       scheduleMove($, session)
-      if (shareAfterTurn === session) {
+      if (shareAfterTurn?.session === session) {
+        const { audience } = shareAfterTurn
         shareAfterTurn = undefined
-        beginShare($, session)
+        beginShare($, session, audience)
       }
     }
     return result
@@ -5484,7 +5493,7 @@ export function register(on: On) {
       sharing.cancelled = true
       sharing = undefined
     }
-    if (shareAfterTurn === e.sessionId) shareAfterTurn = undefined
+    if (shareAfterTurn?.session === e.sessionId) shareAfterTurn = undefined
     // The session's subagents end with it. Their saved state stays, so the next activation closes
     // a turn left open and delivers what they queued.
     for (const [agentId, child] of children) {
