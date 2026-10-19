@@ -3389,7 +3389,7 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   if (runtime.currentTurnId) throw new Error('Wait for the current Claude turn to finish before sharing or reattaching')
   await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
     await check()
-    setProgress($, 'Waiting for Delta sign-in…', 'active')
+    setProgress($, SIGN_IN_PROGRESS, 'active')
     await $.ui.log(text, { to: 'transcript' })
   })
   await check()
@@ -3635,7 +3635,7 @@ async function join($: Runtime, request: JoinRequest) {
     }
     await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
       await check()
-      setProgress($, 'Waiting for Delta sign-in…', 'active')
+      setProgress($, SIGN_IN_PROGRESS, 'active')
       await $.ui.log(text, { to: 'transcript' })
     })
     await check()
@@ -4328,7 +4328,29 @@ function setupEnv($: Runtime): SetupEnv {
         return /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(lines[0]) ? lines[0] : `${root}/${lines[0]}`
       } catch { return undefined }
     },
-    contract: () => readThreadContract($),
+    contract: async () => {
+      try { await resolveCli($, true) }
+      finally { clearSetupProgress($) }
+      return readThreadContract($)
+    },
+    signIn: async () => {
+      const session = await $.session.id()
+      const check = async () => {
+        if (active !== session) throw new Error('The session changed during sign-in; run /delta-setup again')
+      }
+      try {
+        await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
+          await check()
+          setProgress($, SIGN_IN_PROGRESS, 'active')
+          await $.ui.log(text, { to: 'transcript' })
+        })
+      } finally { clearSetupProgress($) }
+    },
+    // Opening links from a plugin needs macOS's `open`; anywhere else the person opens it.
+    openLink: async (url) => {
+      const opened = await $.process.run(['open', url], { timeoutMs: 10_000 }).catch(() => undefined)
+      return opened?.exitCode === 0
+    },
     organizations: () => listOrganizations($),
     login: () => readLogin($),
     createOrganization: (name) => createOrganization($, name),
@@ -4344,6 +4366,17 @@ function setupEnv($: Runtime): SetupEnv {
     },
     shareSession: async () => beginShare($, await $.session.id()),
   }
+}
+
+const SIGN_IN_PROGRESS = 'Waiting for Delta sign-in…'
+
+/**
+ * Take down the band line setup showed while installing Delta or waiting for sign-in. Share and join
+ * replace those lines with their next step, but setup has none to show.
+ */
+function clearSetupProgress($: Runtime) {
+  const text = feed.progress?.text ?? ''
+  if (text.startsWith('Installing Delta') || text === SIGN_IN_PROGRESS) clearProgress($)
 }
 
 /**

@@ -194,8 +194,8 @@ describe('automatic activation', () => {
     fake.answerQuestion = () => new Promise((resolve) => { answers.push(resolve) })
     await startAuto($, fake)
     // Claude draws only plain-text options; an option it cannot read would show as nonsense or fail.
-    expect(fake.questions[0].questions[0].options.map((option: { label: string }) => option.label)).toEqual(['Set it up', 'Not now'])
-    answers[0]!({ result: { answers: { [fake.questions[0].questions[0].question]: 'Set it up' } } })
+    expect(fake.questions[0].questions[0].options.map((option: { label: string }) => option.label)).toEqual(['Set up now', 'Not now'])
+    answers[0]!({ result: { answers: { [fake.questions[0].questions[0].question]: 'Set up now' } } })
     await fake.clock.settle()
     // The wizard's first question is open and never answered.
     expect(fake.questions).toHaveLength(2)
@@ -778,8 +778,8 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith('Delta syncs your sessions into a team') ? 'Acme'
-        : text.startsWith('Invite teammates') ? 'Not now'
+      const answer = text.startsWith('Delta keeps your sessions in a team') ? 'Acme'
+        : text.startsWith('Who should join') ? 'Invite later'
         : offered.find((label) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
     }
@@ -787,6 +787,32 @@ describe('setup dialogs and notices', () => {
     await $.command.run({ ...typedDelta('setup') } as never)
     expect(fake.commands.filter((argv) => argv.includes('create'))).toEqual([[expect.any(String), '--json', 'org', 'create', '--', 'Acme']])
     expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-created' } })
+    fake.expectClean()
+  })
+
+  test('/delta setup installs a missing Delta and signs in before asking anything', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.cliMissing = true
+    fake.authReplies = [
+      { status: 'signed_out' },
+      { status: 'pending', login_id: 'attempt', url: 'https://example.com/login', expires_at: '2099-01-01T00:15:00Z' },
+      { status: 'signed_in', account: { account_id: 'user' } },
+    ]
+    let readyAtFirstQuestion: boolean | undefined
+    fake.answerQuestion = (question: any) => {
+      readyAtFirstQuestion ??= fake.cliSetups.includes('install') && fake.authCalls.length === 3
+      const text = question.questions[0].question
+      const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
+      return { result: { answers: { [text]: offered.find((label) => label === 'Zed' || label.startsWith('Private sync')) } } }
+    }
+    await $.session.start(sessionStart)
+    const { text } = await $.command.run({ ...typedDelta('setup') } as never)
+    expect(readyAtFirstQuestion).toBe(true)
+    expect(fake.logs.join('\n')).toContain('https://example.com/login')
+    expect(text).toContain('Saved Private sync with Zed')
+    // Neither step leaves its band line behind.
+    expect(await drawn($)).not.toContain('Installing Delta')
+    expect(await drawn($)).not.toContain('Waiting for Delta sign-in')
     fake.expectClean()
   })
 
@@ -858,7 +884,7 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text === ONBOARDING_QUESTION ? 'Set it up'
+      const answer = text === ONBOARDING_QUESTION ? 'Set up now'
         : offered.find((label: string) => label === 'Zed' || label.startsWith('Manual'))
       return { result: { answers: { [text]: answer } } }
     }

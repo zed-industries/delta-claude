@@ -45,7 +45,8 @@ export async function chooseShareAudience(interaction: Interaction, choices: Aud
   const options = [...team ? [team] : [], choices.synced ? KEEP : JUST_ME]
   const answer = await interaction.ask(
     'Who should see this session? Delta syncs its conversation and a copy of this checkout\'s code, ' +
-    'including uncommitted changes, to DeltaDB. To invite people, type their email addresses, separated by commas.',
+    'including uncommitted changes, to DeltaDB. To invite people by email instead, type their addresses below, ' +
+    'separated by commas.',
     { options: options.length < 2 ? [...options, CANCEL] : options, header: HEADER })
   if (answer === CANCEL) return ''
   if (answer === team) return { kind: 'organization' }

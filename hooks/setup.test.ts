@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
+import { AccessRequiredError } from './auth'
 import { InteractionDismissed, InteractionUnavailable, inviteResultsFrom, offerOnboarding, runSetupWizard, type Interaction, type SetupEnv } from './setup'
 
 /** An environment over an in-memory file, with the questions answered from a queue. */
@@ -15,6 +16,12 @@ function harness(options: {
   failWrite?: boolean
   failCreate?: boolean
   failInvite?: string
+  /** `contract` rejects, as when installing a missing CLI fails. */
+  failInstall?: boolean
+  /** `signIn` rejects with this error. */
+  failSignIn?: Error
+  /** Whether `openLink` can open a browser; true unless set. */
+  canOpen?: boolean
   others?: Record<string, string>
 } = {}) {
   const answers = [...options.answers ?? []]
@@ -27,6 +34,8 @@ function harness(options: {
   let shares = 0
   const creates: string[] = []
   const invites: { organization: string; emails: string[] }[] = []
+  const opened: string[] = []
+  let signIns = 0
   const interaction: Interaction = {
     async ask(question, askOptions) {
       // Claude's `$.ui.ask` shows plain-text options only; anything else cannot be drawn.
@@ -47,7 +56,18 @@ function harness(options: {
       return root
     },
     gitCommonDir: async () => options.commonDir,
-    contract: async () => ({ operation: 'contract', min: 1, max: options.contractMax ?? 6 }),
+    contract: async () => {
+      if (options.failInstall) throw new Error('Delta installation failed: no network')
+      return { operation: 'contract', min: 1, max: options.contractMax ?? 6 }
+    },
+    signIn: async () => {
+      signIns++
+      if (options.failSignIn) throw options.failSignIn
+    },
+    openLink: async (url) => {
+      opened.push(url)
+      return options.canOpen ?? true
+    },
     organizations: async () => options.organizations ?? [{ id: 'org-1', name: 'Zed', current: true }],
     login: async () => options.login,
     createOrganization: async (name) => {
@@ -70,7 +90,7 @@ function harness(options: {
     sessionShared: async () => options.shared ?? false,
     shareSession: async () => { shares++; return true },
   }
-  return { env, interaction, asks, logs, writes, creates, invites, others, current: () => file, shares: () => shares }
+  return { env, interaction, asks, logs, writes, creates, invites, others, opened, current: () => file, shares: () => shares, signIns: () => signIns }
 }
 
 describe('setup wizard', () => {
@@ -134,7 +154,7 @@ describe('setup wizard', () => {
 
   test('an account with no team is asked to name one before choosing a mode', async () => {
     const cases: { answers: string[]; created: string[]; status: string; failCreate?: boolean }[] = [
-      { answers: ['Acme Team', 'Not now', 'Team sharing'], created: ['Acme Team'], status: 'wrote' },
+      { answers: ['Acme Team', 'Invite later', 'Team sharing'], created: ['Acme Team'], status: 'wrote' },
       { answers: ['Cancel'], created: [], status: 'cancelled' },
       // A slash command typed while the dialog was open is not a name.
       { answers: ['/delta-share'], created: [], status: 'cancelled' },
@@ -150,7 +170,7 @@ describe('setup wizard', () => {
   })
 
   test('an account with only a personal organization is recommended a team, and may keep its sessions personal', async () => {
-    const keep = 'Skip: keep sessions personal; share one by email with /delta-share'
+    const keep = 'Skip: keep sessions to myself'
     const options = (h: ReturnType<typeof harness>, index: number) => (h.asks[index]!.options as { options: string[] }).options
     // Without the CLI's flag, the personal organization is recognised by the name Delta gives it.
     const named = harness({ answers: [keep, 'Private sync'], login: 'ada',
@@ -161,7 +181,7 @@ describe('setup wizard', () => {
     // Nobody else is in a personal organization, so it offers no Team sharing.
     expect(options(named, 1).some((label) => label.startsWith('Team sharing'))).toBe(false)
     // The flag decides whatever the name, and a created team is offered every mode.
-    const flagged = harness({ answers: ['Acme', 'Not now', 'Team sharing'],
+    const flagged = harness({ answers: ['Acme', 'Invite later', 'Team sharing'],
       organizations: [{ id: 'org-p', name: 'Renamed', current: true, personal: true }] })
     expect((await runSetupWizard(flagged.env, flagged.interaction)).status).toBe('wrote')
     expect(JSON.parse(flagged.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
@@ -171,7 +191,7 @@ describe('setup wizard', () => {
 
   test('an account with several teams can still create a new one, or go back to the list', async () => {
     const teams = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Guild', current: false }]
-    const created = harness({ organizations: teams, answers: ['Create a new team', 'Acme', 'Not now', 'Team sharing', 'Not now'] })
+    const created = harness({ organizations: teams, answers: ['Create a new team', 'Acme', 'Invite later', 'Team sharing', 'Not now'] })
     expect((await runSetupWizard(created.env, created.interaction)).status).toBe('wrote')
     expect(created.creates).toEqual(['Acme'])
     expect(JSON.parse(created.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
@@ -190,9 +210,16 @@ describe('setup wizard', () => {
     expect((await runSetupWizard(invited.env, invited.interaction)).status).toBe('wrote')
     expect(invited.invites).toEqual([{ organization: 'org-Acme', emails: ['ada@example.com', 'bo@example.com'] }])
     expect(invited.logs.join('\n')).toContain("Couldn't invite bo@example.com (already a member)")
-    // Bulk invitations live on the dashboard's members page, linked from the question and the result.
-    expect(invited.asks.find((ask) => ask.question.startsWith('Invite teammates'))?.question).toContain('https://dashboard.zed.dev/org-Acme/members')
+    // Bulk invitations live on the dashboard's members page, which the result links.
     expect(invited.logs.join('\n')).toContain('Manage members: https://dashboard.zed.dev/org-Acme/members')
+    // Managing the team opens that page, or links it where no browser can be opened, and setup continues.
+    for (const canOpen of [true, false]) {
+      const managed = harness({ answers: ['Acme', 'Manage team in browser', 'Private sync'], organizations: [], canOpen })
+      expect((await runSetupWizard(managed.env, managed.interaction)).status).toBe('wrote')
+      expect(managed.opened).toEqual(['https://dashboard.zed.dev/org-Acme/members'])
+      expect(managed.logs.join('\n')).toContain('https://dashboard.zed.dev/org-Acme/members')
+      expect(managed.invites).toEqual([])
+    }
     // Text with no address invites nobody and says how to invite later.
     const none = harness({ answers: ['Acme', 'later please', 'Private sync'], organizations: [] })
     expect((await runSetupWizard(none.env, none.interaction)).status).toBe('wrote')
@@ -200,7 +227,7 @@ describe('setup wizard', () => {
     // An existing organization is never offered invitations.
     const existing = harness({ answers: ['Zed', 'Private sync'] })
     await runSetupWizard(existing.env, existing.interaction)
-    expect(existing.asks.some((ask) => ask.question.startsWith('Invite teammates'))).toBe(false)
+    expect(existing.asks.some((ask) => ask.question.startsWith('Who should join'))).toBe(false)
   })
 
   test('invitation results decode from the CLI wire format', () => {
@@ -219,6 +246,22 @@ describe('setup wizard', () => {
     expect(outcome).toMatchObject({ status: 'failed', text: expect.stringContaining('Update Delta') })
     expect(h.asks).toEqual([])
     expect(h.writes).toEqual([])
+    // A Delta too old to record against is not asked to sign in.
+    expect(h.signIns()).toBe(0)
+  })
+
+  test('a Delta that cannot be installed or signed in to stops setup before any question, saying why', async () => {
+    const cases = [
+      { failInstall: true, text: "/delta-setup couldn't start Delta: Error: Delta installation failed: no network" },
+      { failSignIn: new Error('Delta sign-in expired'), text: "/delta-setup couldn't sign in to Delta: Error: Delta sign-in expired" },
+      // Access Delta has not granted yet is explained as Delta words it, not as a failure.
+      { failSignIn: new AccessRequiredError('Delta needs you to accept its beta terms first.'), text: 'Delta needs you to accept its beta terms first.' },
+    ]
+    for (const { text, ...failure } of cases) {
+      const h = harness({ answers: ['Zed', 'Manual'], ...failure })
+      expect(await runSetupWizard(h.env, h.interaction)).toEqual({ status: 'failed', text })
+      expect(h.asks).toEqual([])
+    }
   })
 
   test('a policy naming an organization the account is not in is called out before the first question', async () => {
@@ -272,7 +315,7 @@ describe('onboarding', () => {
     const first = harness({ answers: ['Not now'], commonDir: '/repo/.git' })
     expect(await offerOnboarding(first.env, first.interaction, backend, newSession())).toBe('offered')
     // A second session in a linked worktree shares the common directory and is not offered again.
-    const second = harness({ answers: ['Set it up', 'Zed', 'Manual'], commonDir: '/repo/.git' })
+    const second = harness({ answers: ['Set up now', 'Zed', 'Manual'], commonDir: '/repo/.git' })
     expect(await offerOnboarding(second.env, second.interaction, backend, newSession())).toBe('skipped')
     expect(second.asks).toEqual([])
   })
@@ -280,7 +323,7 @@ describe('onboarding', () => {
   test('never offers in a configured, joined, joining, or resumed repository', async () => {
     const { backend } = memoryStore()
     for (const flags of [{ configured: true }, { newToPlugin: false }, { joined: true }, { joining: true }]) {
-      const h = harness({ answers: ['Set it up'] })
+      const h = harness({ answers: ['Set up now'] })
       expect(await offerOnboarding(h.env, h.interaction, backend, newSession(flags))).toBe('skipped')
       expect(h.asks).toEqual([])
     }
@@ -289,9 +332,9 @@ describe('onboarding', () => {
   test('only a decision consumes the offer; a setup left unfinished is offered again from the start', async () => {
     const unfinished: (string | undefined)[][] = [
       // A typed answer, like a command entered while the dialog was open, is not a decision.
-      ['__unavailable__'], [undefined], ['/delta-share'], ['Set it up', undefined],
+      ['__unavailable__'], [undefined], ['/delta-share'], ['Set up now', undefined],
       // A setup that fails partway: the policy write is refused.
-      ['Set it up', 'Zed', 'Manual', '__write_fails__'],
+      ['Set up now', 'Zed', 'Manual', '__write_fails__'],
     ]
     for (const answers of unfinished) {
       const { store, backend } = memoryStore()
@@ -302,7 +345,7 @@ describe('onboarding', () => {
       expect(await offerOnboarding(again.env, again.interaction, backend, newSession())).toBe('offered')
       expect(again.asks).toHaveLength(1)
     }
-    for (const answers of [['Not now'], ['Set it up', 'Zed', 'Manual']]) {
+    for (const answers of [['Not now'], ['Set up now', 'Zed', 'Manual']]) {
       const { store, backend } = memoryStore()
       const h = harness({ answers })
       await offerOnboarding(h.env, h.interaction, backend, newSession())
@@ -325,7 +368,7 @@ describe('onboarding', () => {
     }
     const offering = offerOnboarding(first.env, first.interaction, backend, newSession())
     await dialogOpen
-    const second = harness({ answers: ['Set it up'] })
+    const second = harness({ answers: ['Set up now'] })
     expect(await offerOnboarding(second.env, second.interaction, backend, newSession())).toBe('skipped')
     release()
     expect(await offering).toBe('offered')
@@ -333,7 +376,7 @@ describe('onboarding', () => {
 
   test('a setup started from the offer reports its outcome', async () => {
     const { backend } = memoryStore()
-    const h = harness({ answers: ['Set it up', 'Zed', 'Private sync'] })
+    const h = harness({ answers: ['Set up now', 'Zed', 'Private sync'] })
     await offerOnboarding(h.env, h.interaction, backend, newSession())
     expect(h.logs.at(-1)).toContain('Saved Private sync with Zed to .delta/settings.json')
   })
