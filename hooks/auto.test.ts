@@ -171,25 +171,31 @@ describe('automatic activation', () => {
   test("the plugin's own question draws a hint beside each option, and no other question changes", async ($, on) => {
     const fake = fakeThreads(on)
     let drawn: any
-    on('ui.render', { component: 'AskUserQuestion' }, ($, e) => { drawn = e.props; return { type: 'Text', props: {}, children: [] } })
+    // Stands in for Claude Code's dialog: records what it would draw, and answers with its own drawing.
+    on('ui.render', { component: 'AskUserQuestion' }, ($, e) => { drawn = e.props; return { type: 'engine', ref: 'dialog' } as never })
+    fake.organizations = [{ id: 'org-1', name: 'Guild', current: false }, { id: 'org-2', name: 'Zed', current: true }]
     let answer!: (value: unknown) => void
     fake.answerQuestion = () => new Promise((resolve) => { answer = resolve })
-    await startAuto($, fake)
+    // A resumed session, so the setup offer stays out of the way.
+    await startAuto($, fake, 'resume')
+    const setup = $.command.run({ ...typedDelta('setup') } as never)
+    await fake.clock.settle()
+    const team = fake.questions.find((question) => question.questions[0].header === 'Team')!
     const render = (questions: unknown[]) =>
       $.ui.render({ component: 'AskUserQuestion', requestId: 'call-1', surface: 'terminal', props: { tool: 'AskUserQuestion', questions } } as never)
-    await render(fake.questions[0].questions)
-    expect(drawn.questions[0].question).toBe(ONBOARDING_QUESTION)
-    expect(drawn.questions[0].options.map((option: any) => [option.label, option.description])).toEqual([
-      ['Set up now', 'Takes about a minute'], ['Not now', 'Run /delta-setup anytime'],
+    await render(team.questions)
+    // Only the selected team carries a hint; every other option is drawn as asked.
+    expect(drawn.questions[0].options.map((option: any) => [option.label, option.description || undefined])).toEqual([
+      ['Zed', 'Current team'], ['Guild', undefined], ['Cancel', undefined],
     ])
     // Claude's own question, with the same labels, is drawn as asked.
-    const theirs = [{ question: 'Which library?', header: 'Library', options: [{ label: 'Not now', description: '' }, { label: 'Later', description: '' }] }]
+    const theirs = [{ question: 'Which library?', header: 'Library', options: [{ label: 'Zed', description: '' }, { label: 'Guild', description: '' }] }]
     await render(theirs)
     expect(drawn.questions).toEqual(theirs)
     // Once answered, the plugin's question leaves no hints behind.
-    answer({ result: { answers: { [ONBOARDING_QUESTION]: 'Not now' } } })
-    await fake.clock.settle()
-    await render(fake.questions[0].questions)
+    answer({ result: { answers: { [team.questions[0].question]: 'Cancel' } } })
+    await setup
+    await render(team.questions)
     expect(drawn.questions[0].options.every((option: any) => !option.description)).toBe(true)
     fake.expectClean()
   })

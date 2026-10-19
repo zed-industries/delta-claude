@@ -337,13 +337,10 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     : [CREATE_ORGANIZATION, alternative]
   let chosen: Organization | SetupOutcome | 'declined' | undefined
   while (!chosen || chosen === 'declined') {
+    // Only what the labels can't say gets a hint: which team Delta has selected.
     const answer = await interaction.ask(question, {
       options, header: 'Team',
-      descriptions: {
-        [CREATE_ORGANIZATION]: 'Name it on the next step',
-        [KEEP_PERSONAL]: 'Sessions sync to your personal space, where only you see them',
-        Cancel: 'Leave setup without saving anything',
-      },
+      ...current?.current ? { descriptions: { [organizationLabel(current, organizations)]: 'Current team' } } : {},
     })
     if (answer === 'Cancel') return CANCELLED
     chosen = answer === KEEP_PERSONAL ? personalOrganization
@@ -408,10 +405,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
  * is undefined, and a failed creation is the setup's outcome.
  */
 async function offerNewOrganization(env: SetupEnv, interaction: Interaction, question: string, decline: string): Promise<Organization | SetupOutcome | 'declined' | undefined> {
-  const answer = await interaction.ask(question, {
-    options: [decline, 'Cancel'], header: HEADER,
-    descriptions: { [decline]: 'Choose an existing team instead', Cancel: 'Leave setup without saving anything' },
-  })
+  const answer = await interaction.ask(question, { options: [decline, 'Cancel'], header: HEADER })
   if (answer === decline) return 'declined'
   if (answer === 'Cancel') return CANCELLED
   return createTeam(env, interaction, answer)
@@ -461,7 +455,7 @@ async function offerInvites(env: SetupEnv, interaction: Interaction, organizatio
     answer = await interaction.ask(`Who should join ${organization.name}? Select ${TYPE_SOMETHING} and enter their email addresses, separated by commas.`,
       {
         options: [later, manage], header: HEADER,
-        descriptions: { [later]: 'Invite anytime with /delta-org invite', [manage]: "Opens your team's members page" },
+        descriptions: { [later]: 'Invite anytime with /delta-org invite' },
       })
   } catch (error) {
     if (error instanceof InteractionDismissed) return
@@ -563,10 +557,7 @@ const SET_UP_NOW = 'Set up now'
 async function askOnboarding(env: SetupEnv, interaction: Interaction): Promise<'settled' | 'unfinished' | 'unavailable'> {
   let answer: string | undefined
   try {
-    answer = await interaction.ask(ONBOARDING_QUESTION, {
-      options: [SET_UP_NOW, 'Not now'], header: HEADER,
-      descriptions: { [SET_UP_NOW]: 'Takes about a minute', 'Not now': 'Run /delta-setup anytime' },
-    })
+    answer = await interaction.ask(ONBOARDING_QUESTION, { options: [SET_UP_NOW, 'Not now'], header: HEADER })
   }
   catch (error) {
     return error instanceof InteractionUnavailable ? 'unavailable' : 'unfinished'
