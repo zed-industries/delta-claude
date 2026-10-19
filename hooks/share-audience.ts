@@ -47,7 +47,15 @@ export async function chooseShareAudience(interaction: Interaction, choices: Aud
     'Who should see this session? Delta syncs its conversation and a copy of this checkout\'s code, ' +
     `including uncommitted changes, to DeltaDB. To invite people by email instead, select ${TYPE_SOMETHING} ` +
     'and enter their addresses, separated by commas.',
-    { options: options.length < 2 ? [...options, CANCEL] : options, header: HEADER })
+    {
+      options: options.length < 2 ? [...options, CANCEL] : options, header: HEADER,
+      descriptions: {
+        ...team ? { [team]: `Everyone on ${choices.team} can open it` } : {},
+        [JUST_ME]: 'Only you can open it',
+        [KEEP]: "Reconnects without changing who can see it",
+        [CANCEL]: 'Share nothing',
+      },
+    })
   if (answer === CANCEL) return ''
   if (answer === team) return { kind: 'organization' }
   if (answer === JUST_ME) return { kind: 'private' }

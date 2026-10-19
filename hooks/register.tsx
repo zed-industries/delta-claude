@@ -4406,19 +4406,53 @@ function clearSetupProgress($: Runtime) {
  */
 let ownQuestions = 0
 
+/**
+ * The option hints of the plugin's own open questions, by question text. `$.ui.ask` takes labels
+ * only, so the `AskUserQuestion` render hook adds these as the options' descriptions.
+ */
+const questionHints = new Map<string, Readonly<Record<string, string>>>()
+
+/**
+ * Add the hints of the plugin's own open questions to the dialog's options, as their descriptions.
+ * Claude Code draws the original when a rewrite doesn't fit the question's schema, so anything
+ * unexpected is passed on unchanged; another plugin's or Claude's own question has no hints.
+ */
+function withQuestionHints(questions: unknown[]): unknown[] | undefined {
+  let changed = false
+  const hinted = questions.map((question) => {
+    const hints = questionHints.get((question as { question?: unknown })?.question as string)
+    const options = (question as { options?: unknown })?.options
+    if (!hints || !Array.isArray(options)) return question
+    changed = true
+    return {
+      ...question as object,
+      options: options.map((option) => {
+        const hint = hints[(option as { label?: string })?.label ?? '']
+        return hint ? { ...option, description: hint } : option
+      }),
+    }
+  })
+  return changed ? hinted : undefined
+}
+
 /** The interactive surface the wizard speaks through: `$.ui.ask`, when this Claude build has it. */
 function claudeInteraction($: Runtime): Interaction {
   return {
     async ask(question, options) {
       let answer: unknown
+      const { descriptions, ...asked } = Array.isArray(options) ? { options } as { options: readonly string[]; descriptions?: undefined } : options
       ownQuestions++
-      try { answer = await $.ui.ask(question, options as never) }
+      if (descriptions) questionHints.set(question, descriptions)
+      try { answer = await $.ui.ask(question, asked as never) }
       catch (error) {
         // A missing method is a build without the question API; a dismissed dialog rejects too.
         if (error instanceof TypeError) throw new InteractionUnavailable(String(error))
         throw new InteractionDismissed(String(error))
       }
-      finally { ownQuestions-- }
+      finally {
+        ownQuestions--
+        if (questionHints.get(question) === descriptions) questionHints.delete(question)
+      }
       if (answer === undefined || answer === null || answer === '') throw new InteractionDismissed('dismissed')
       if (typeof answer === 'string') return answer
       const wrapped = answer as { label?: string; value?: string }
@@ -5418,6 +5452,12 @@ export function register(on: On) {
 
   // The plugin's own command output row: a remote message, event, tool call or comment draws here, from this
   // plugin's own data rather than the row's stored text, which carries none of it.
+  // The plugin's own questions draw a hint beside each option, as the option's description.
+  on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {
+    const questions = withQuestionHints(e.props.questions)
+    return next(questions ? { ...e, props: { ...e.props, questions } } : e)
+  })
+
   on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
     const id = shownItemId(e.props.args)
     if (e.props.command !== 'delta' || id === undefined) return next(e)

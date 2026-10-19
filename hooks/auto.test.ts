@@ -168,6 +168,32 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
+  test("the plugin's own question draws a hint beside each option, and no other question changes", async ($, on) => {
+    const fake = fakeThreads(on)
+    let drawn: any
+    on('ui.render', { component: 'AskUserQuestion' }, ($, e) => { drawn = e.props; return { type: 'Text', props: {}, children: [] } })
+    let answer!: (value: unknown) => void
+    fake.answerQuestion = () => new Promise((resolve) => { answer = resolve })
+    await startAuto($, fake)
+    const render = (questions: unknown[]) =>
+      $.ui.render({ component: 'AskUserQuestion', requestId: 'call-1', surface: 'terminal', props: { tool: 'AskUserQuestion', questions } } as never)
+    await render(fake.questions[0].questions)
+    expect(drawn.questions[0].question).toBe(ONBOARDING_QUESTION)
+    expect(drawn.questions[0].options.map((option: any) => [option.label, option.description])).toEqual([
+      ['Set up now', 'Takes about a minute'], ['Not now', 'Run /delta-setup anytime'],
+    ])
+    // Claude's own question, with the same labels, is drawn as asked.
+    const theirs = [{ question: 'Which library?', header: 'Library', options: [{ label: 'Not now', description: '' }, { label: 'Later', description: '' }] }]
+    await render(theirs)
+    expect(drawn.questions).toEqual(theirs)
+    // Once answered, the plugin's question leaves no hints behind.
+    answer({ result: { answers: { [ONBOARDING_QUESTION]: 'Not now' } } })
+    await fake.clock.settle()
+    await render(fake.questions[0].questions)
+    expect(drawn.questions[0].options.every((option: any) => !option.description)).toBe(true)
+    fake.expectClean()
+  })
+
   test('a new session without a policy never holds a prompt behind the open setup offer', async ($, on) => {
     const fake = fakeThreads(on)
     let answer!: (value: unknown) => void
