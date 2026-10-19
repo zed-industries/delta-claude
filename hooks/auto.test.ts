@@ -387,6 +387,30 @@ describe('the band on an automatic session', () => {
     expect(fake.exports).toBe(0)
     fake.expectClean()
   })
+
+  test('the share control pressed during a turn shares once the turn ends', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('private', 'org-1'))
+    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }]
+    fake.server.registered = true
+    fake.server.confirmed = true
+    await startAuto($, fake)
+    await $.prompt.submit(prompt('working'))
+    await $.turn.start(turnStart('busy', 'working'))
+    await fake.clock.settle()
+    const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
+    await terminal.find({ type: 'Button', label: 'Share after this turn' })
+    await terminal.press({ key: 'share' })
+    await fake.clock.settle()
+    expect(fake.operations()).not.toContain('share')
+    await terminal.find({ type: 'Button', label: 'Sharing after this turn' })
+    await $.turn.complete(turnComplete('busy'))
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(fake.operations()).toContain('share')
+    fake.expectClean()
+  })
 })
 
 describe('offline recording', () => {

@@ -1111,7 +1111,7 @@ describe('thread commands', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 7, max: 8 }
+    fake.contractRange = { min: 8, max: 9 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -1209,7 +1209,7 @@ describe('thread commands', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 7, max: 8 }
+    fake.contractRange = { min: 8, max: 9 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
@@ -1231,7 +1231,7 @@ describe('thread commands', () => {
     const checksAtAppend: number[] = []
     fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
     // An incompatible CLI is refused before anything is appended.
-    fake.contractRange = { min: 7, max: 8 }
+    fake.contractRange = { min: 8, max: 9 }
     await $.session.start(sessionStart)
     await fake.clock.settle()
     expect(checksAtAppend).toEqual([])
@@ -2617,7 +2617,7 @@ describe('the status band', () => {
     fake.child({ thread_id: 'child-one', reference: 'thread#s=child-one', kind: 'subagent', name: 'Scout', status: 'running' })
     await fake.clock.settle()
     expect(await drawn($)).toContain('running')
-    expect(await drawn($)).toContain('1 inactive')
+    expect(await drawn($)).not.toContain('inactive')
     expect(await drawn($)).not.toContain('queued')
     fake.child({ thread_id: 'new-child', reference: 'thread#s=new-child', kind: 'future_kind', name: 'New', status: 'running' })
     await fake.clock.settle()
@@ -2626,7 +2626,6 @@ describe('the status band', () => {
     await fake.clock.settle()
     expect(await drawn($)).not.toContain('Scout')
     expect(await drawn($)).toContain('New')
-    expect(await drawn($)).toContain('1 inactive')
     fake.live()!.exit(1)
     await fake.clock.settle()
     expect(await drawn($)).toContain('unknown')
@@ -2636,7 +2635,6 @@ describe('the status band', () => {
     await fake.clock.advance(1000)
     // Readiness clears the previous connection's inventory even when discovery is delayed.
     expect(await drawn($)).not.toContain('New')
-    expect(await drawn($)).not.toContain('inactive')
     expect(await drawn($)).not.toContain('Review')
     releaseChildren()
     fake.holdChildren = undefined

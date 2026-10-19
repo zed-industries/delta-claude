@@ -49,7 +49,30 @@ export type AppendedRow = {
   content: readonly { type: string; text?: string }[]
 }
 
+/** A recorded subagent's child thread, as the fake CLI keeps it. */
+export type FakeChild = {
+  thread: string
+  reference: string
+  parent: string
+  name: string
+  /** The child's producer turn as Delta last reported it, once someone takes it over. */
+  turn?: { sequence: number; status: 'running' | 'finished' | 'superseded' }
+  /** Created with `--shared-worktrees`: the child uses its parent's worktrees. */
+  sharedWorktrees: boolean
+  /** Created with `--isolated-worktrees`: the child has forks of its parent's worktrees. */
+  isolatedWorktrees?: boolean
+  /** The owner whose mount of the child's forks is live, until it is released. */
+  mountedFor?: string
+  next: number
+  records: Map<number, Accepted>
+  /** The subagent's own checkout while attached, and the last one detached. */
+  checkout?: { directory: string; reference: string }
+  detached?: { directory: string; reference: string }
+}
+
 export const CHECKOUT = '/repo'
+/** The actor the fake Delta records a recorded subagent's output as. */
+export const childActor = (agentId: string) => `actor-${agentId}`
 export const CONFIG = '/sandbox/config'
 /** Where the fake host mounts a joiner's worktrees, and the thread folders that hold links to several. */
 export const MOUNTS = '/mounts'
@@ -276,7 +299,40 @@ export function fakeThreads(on: On, options: {
       /** The thread's delivered comments, which a snapshot sends after the items. */
       comments: new Map<string, WatchComment>(),
       children: [] as WatchChild[],
+      /** Each recorded subagent's child thread and the records its producer appended, by agent ID. */
+      subagents: new Map<string, FakeChild>(),
+      /**
+       * What a plain `thread watch` of a thread reads, by reference: a thread someone made in Delta,
+       * or a recorded subagent's, with its items as Delta keeps them and the worktrees it reports.
+       */
+      threads: new Map<string, {
+        thread: string; name: string; items: WatchItem[]; worktrees: { reference: string; name: string }[]
+        /** Who runs the thread's current turn, when someone does. */
+        runningBy?: string
+      }>(),
     },
+    /** The messages the host delivered for SendMessage, after the plugin's hooks. */
+    sends: [] as { to: string; text: string }[],
+    /** Every agent the host started or resumed, and what with. */
+    spawned: [] as { agentId: string; prompt: string; cwd?: string; resumed: boolean }[],
+    /** The agent ID the host gives the next spawn. */
+    spawns: 0,
+    /** The main conversation's rows with their tool uses, as `session.messages()` summarizes them. */
+    summaries: [] as { role: string; text: string; toolUses: { tool_use_id: string; tool: string; input: Record<string, unknown>; result?: unknown }[] }[],
+    /** Each subagent's transcript, which `session.messages({ agentId })` reads. */
+    agentMessages: new Map<string, ApiMessage[]>(),
+    /** Each agent's own transcript rows, holding the Agent calls it made. */
+    agentSummaries: new Map<string, { role: string; text: string; toolUses: { tool_use_id: string; tool: string; input: Record<string, unknown>; result?: unknown }[] }[]>(),
+    /** The background tasks the plugin stopped with TaskStop. */
+    taskStops: [] as string[],
+    /** Holds a spawn's answer, as Claude does while the agent's first hooks already run. */
+    holdSpawn: undefined as Promise<void> | undefined,
+    /** Every subagent append fails before accepting anything until cleared. */
+    childAppendOffline: false,
+    /** Turn sequences a subagent's thread fences, as if someone in Delta took the turn over. */
+    fenceChildTurns: new Set<number>(),
+    /** The open watch of each recorded subagent's thread, by agent ID. */
+    childWatches: new Map<string, Watch>(),
     threadId: options.thread ?? `thread-for-${session}`,
     shareId: `thread_cloud-${session}`,
     /** Holds every watch's `live` event, after its snapshot items, until it settles. */
@@ -400,6 +456,12 @@ export function fakeThreads(on: On, options: {
       }
     },
 
+    /** A recorded subagent's accepted envelopes, in sequence order. */
+    childRecords(agentId: string): Envelope[] {
+      const child = fake.server.subagents.get(agentId)
+      if (!child) return []
+      return [...child.records.keys()].sort((a, b) => a - b).map((sequence) => child.records.get(sequence)!.envelope)
+    },
     /** Accepted envelopes in sequence order. */
     records(): Envelope[] {
       return [...fake.server.records.keys()].sort((a, b) => a - b).map((sequence) => fake.server.records.get(sequence)!.envelope)
@@ -459,6 +521,21 @@ export function fakeThreads(on: On, options: {
     removeChild(thread_id: string) {
       fake.server.children = fake.server.children.filter((child) => child.thread_id !== thread_id)
       fake.live()?.frame({ type: 'child.remove', thread_id })
+    },
+    /**
+     * Someone takes a recorded subagent's running turn over in Delta: its watch reports the turn
+     * superseded, and the turn's later records are fenced.
+     */
+    supersedeChild(agentId: string): number {
+      const child = fake.server.subagents.get(agentId)
+      const sequence = [...child?.records.values() ?? []]
+        .filter((record) => record.envelope.update?.sessionUpdate === 'state_update' && record.envelope.update.state === 'running')
+        .at(-1)?.envelope.sequence
+      if (!child || sequence === undefined) throw new Error('Script a recorded child start before supersession')
+      child.turn = { sequence, status: 'superseded' }
+      fake.fenceChildTurns.add(sequence)
+      fake.childWatches.get(agentId)?.frame(cliFixture('producerTurn', { sequence, status: 'superseded' }))
+      return sequence
     },
     /** Another Delta client takes the turn away from the current owner. */
     supersede(): number {
@@ -551,6 +628,16 @@ export function fakeThreads(on: On, options: {
   on('session.root', () => ({ value: fake.root ?? fake.cwd }))
   on('session.surfaces', () => ({ value: fake.surfaces }))
   on('agent.list', () => ({ value: fake.agents }))
+  on('agent.spawn', async ($, e) => {
+    const agentId = e.resume?.agentId ?? `agent${++fake.spawns}`
+    if (fake.holdSpawn) await fake.holdSpawn
+    fake.spawned.push({ agentId, prompt: e.prompt, cwd: e.cwd, resumed: e.resume !== undefined })
+    return { model: 'test-model', agentId }
+  })
+  on('session.send', ($, e) => {
+    fake.sends.push({ to: e.to, text: e.text })
+    return { isDelivered: true }
+  })
   on('command.list', async () => {
     await fake.holdCommandListFor?.(fake.session)
     return { value: fake.builtins.map((name) => ({ name, description: name, source: 'builtin' as const })) }
@@ -578,7 +665,9 @@ export function fakeThreads(on: On, options: {
     return { value: [theme] }
   })
   on('session.messages', async ($, e) => {
-    if (e.as !== 'api') return { value: [] }
+    if (e.agentId !== undefined)
+      return { value: e.as === 'api' ? fake.agentMessages.get(e.agentId) ?? [] : fake.agentSummaries.get(e.agentId) ?? [] } as never
+    if (e.as !== 'api') return { value: fake.summaries } as never
     if (fake.holdExport) await fake.holdExport
     fake.exports++
     return { value: fake.messages }
@@ -625,6 +714,10 @@ export function fakeThreads(on: On, options: {
   })
   on('tool.call', async ($, e) => {
     // Joining asks nothing of its own; Claude's folder trust prompt is the only question.
+    if (e.tool === 'TaskStop') {
+      fake.taskStops.push(String((e as Record<string, unknown>).task_id))
+      return { result: { message: 'stopped' } } as any
+    }
     if (e.tool === 'AskUserQuestion') {
       fake.questions.push(e)
       // A test answers the dialog through `answerQuestion`; otherwise it is dismissed, as a person
@@ -667,6 +760,9 @@ export function fakeThreads(on: On, options: {
   })
   // Claude runs no settings hook beneath the plugin's: an empty Stop answer lets the turn end.
   on('classic.Stop', () => ({}))
+  // Unhooked, Claude makes and removes a subagent's isolated git worktree itself.
+  on('classic.WorktreeCreate', () => ({}))
+  on('classic.WorktreeRemove', () => ({}))
   on('process.run', async ($, e) => {
     const argv = [...e.argv]
     const output = (stdout: string, exitCode = 0, stderr = '') => {
@@ -729,6 +825,9 @@ export function fakeThreads(on: On, options: {
     if (argv[0] === 'git') {
       if (fake.failGit) return output('', 128, 'not a git repository')
       if (argv.includes('--git-common-dir')) return output(`${fake.gitCommonDir}\n`)
+      // A subagent's isolated worktree is a checkout of its own.
+      const cwd = String((e as any).init?.cwd ?? '')
+      if (cwd.includes('/.claude/worktrees/')) return output(`${cwd}\n`)
       return output(`${fake.checkoutRoot}\n`)
     }
     if (argv[0] === 'pwd') return output(`${(e as any).init?.cwd ?? CONFIG}\n`)
@@ -751,6 +850,8 @@ export function fakeThreads(on: On, options: {
     }
     const runHold = await fake.holdRun?.(operation)
     if (runHold) await runHold
+    const subagent = subagentCommand(parsed, argv, operation, (e as any).init?.stdin ?? '', output)
+    if (subagent) return subagent
     if (operation === 'unmount') {
       const owner = String(parsed?.options['--owner'])
       if (!matchesCommand(argv, ['thread', 'unmount', threadLocator(parsed!.positionals[2])], { '--owner': ownerOf(owner) }))
@@ -886,6 +987,21 @@ export function fakeThreads(on: On, options: {
     const operation = cliArguments(e.argv)?.positionals[1]
     if (operation) fake.cliIntegrations.push({ operation, integration: e.env?.DELTA_CLI_INTEGRATION,
       ...e.env?.DELTA_CLI_COMMAND_FORM ? { commandForm: e.env.DELTA_CLI_COMMAND_FORM } : {} })
+    const forked = operation === 'mount'
+      ? [...fake.server.subagents.values()].find((child) => child.reference === cliArguments(e.argv)?.positionals[2]) : undefined
+    if (forked) {
+      fake.commands.push([...e.argv])
+      const owner = String(cliArguments(e.argv)?.options['--owner'])
+      if (!forked.isolatedWorktrees || !matchesCommand(e.argv, ['thread', 'mount', forked.reference], { '--owner': owner }))
+        fake.violations.push(`unexpected child mount: ${e.argv.join(' ')}`)
+      forked.mountedFor = owner
+      const directory = `${MOUNTS}/${owner}`
+      yield { stream: 'stdout', text: JSON.stringify(cliFixture('mount', {
+        thread_id: forked.thread, owner, directory,
+        worktrees: [{ reference: `fork-of-${forked.thread}#t=1`, name: 'repo', directory, state: 'mounted' }],
+      })) }
+      return { value: { code: 0, signal: null } }
+    }
     if (operation === 'mount') {
       fake.commands.push([...e.argv])
       const parsed = cliArguments(e.argv)
@@ -915,6 +1031,20 @@ export function fakeThreads(on: On, options: {
         ])),
       })
       yield { stream: 'stdout', text: JSON.stringify({ ...mounted, ...fake.mountPatch }) }
+      return { value: { code: 0, signal: null } }
+    }
+    const statusChild = operation === 'status'
+      ? fake.server.subagents.get(String(cliArguments(e.argv)?.options['--external-id'])) : undefined
+    if (statusChild) {
+      fake.commands.push([...e.argv])
+      const agentId = String(cliArguments(e.argv)?.options['--external-id'])
+      if (!matchesCommand(e.argv, ['thread', 'status', statusChild.reference], { '--source': 'claude-code', '--external-id': agentId }))
+        fake.violations.push(`unexpected child status: ${e.argv.join(' ')}`)
+      yield { stream: 'stdout', text: JSON.stringify({
+        ...cliFixture('status'), thread_id: statusChild.thread, url: null,
+        producer: { source: 'claude-code', external_id: agentId, actor_id: childActor(agentId),
+          next_sequence: statusChild.next, turn: statusChild.turn ? { ...statusChild.turn } : null },
+      }) }
       return { value: { code: 0, signal: null } }
     }
     if (operation === 'status') {
@@ -949,6 +1079,34 @@ export function fakeThreads(on: On, options: {
         read.closed = true
       }
     }
+    const read = fake.server.threads.get(cliArguments(e.argv)?.positionals[2] ?? '')
+    if (operation === 'watch' && read && cliArguments(e.argv)?.options['--source'] === undefined) {
+      if (!matchesCommand(e.argv, ['thread', 'watch', cliArguments(e.argv)!.positionals[2]], {}))
+        fake.violations.push(`unexpected thread read: ${e.argv.join(' ')}`)
+      const watch = createWatch(e)
+      watch.frame(cliFixture('ready', { thread_id: read.thread, producer: null }))
+      for (const item of read.items) watch.frame(cliFixture('item', { item }))
+      watch.frame(cliFixture('live'))
+      watch.frame(read.runningBy === undefined ? cliFixture('turn', { state: 'idle', turn_id: null, user: null })
+        : cliFixture('turn', { state: 'running', turn_id: 'their-turn', user: { user_id: 'user-other', name: read.runningBy } }))
+      watch.frame(cliFixture('worktrees', { worktrees: read.worktrees }))
+      return yield* relayWatch(watch, next.signal)
+    }
+    if (operation === 'watch') adoptExisting(cliArguments(e.argv)?.positionals[2], cliArguments(e.argv)?.options['--external-id'])
+    const watched = [...fake.server.subagents.entries()]
+      .find(([, child]) => child.reference === cliArguments(e.argv)?.positionals[2])
+    if (operation === 'watch' && watched) {
+      const [agentId, child] = watched
+      if (!matchesCommand(e.argv, ['thread', 'watch', child.reference], { '--source': 'claude-code', '--external-id': agentId }))
+        fake.violations.push(`unexpected child watch: ${e.argv.join(' ')}`)
+      const watch = createWatch(e)
+      fake.childWatches.set(agentId, watch)
+      watch.frame(cliFixture('ready', { thread_id: child.thread, producer: {
+        source: 'claude-code', external_id: agentId, next_sequence: child.next, turn: child.turn ? { ...child.turn } : null,
+      } }))
+      watch.frame(cliFixture('live'))
+      return yield* relayWatch(watch, next.signal)
+    }
     const watch = createWatch(e)
     fake.watches.push(watch)
     if (!matchesCommand(e.argv, ['thread', 'watch', threadLocator(cliArguments(e.argv)?.positionals[2])], {
@@ -956,16 +1114,107 @@ export function fakeThreads(on: On, options: {
     })) fake.violations.push(`forbidden spawn: ${e.argv.join(' ')}`)
     if (fake.onWatch) fake.onWatch(watch, fake.watches.length - 1)
     else watch.observe()
-    try {
-      while (true) {
-        const item = await watch.take(next.signal)
-        if (item.kind === 'exit') return { value: item.result }
-        yield { stream: item.stream, text: item.text }
-      }
-    } finally {
-      watch.closed = true
-    }
+    return yield* relayWatch(watch, next.signal)
   })
+
+  /**
+   * A recorded subagent's commands: creating its child thread, appending to it, and attaching or
+   * detaching its own checkout. Anything else about a subagent is a violation.
+   */
+  function subagentCommand(
+    parsed: ReturnType<typeof cliArguments>, argv: string[], operation: string | undefined, stdin: string,
+    output: (stdout: string, exitCode?: number, stderr?: string) => { value: ProcessRunResult },
+  ) {
+    if (!parsed) return
+    const children = [...fake.server.subagents.values()]
+    const byReference = (reference: unknown) => children.find((child) => child.reference === reference)
+    if (operation === 'create' && parsed.options['--parent'] !== undefined) {
+      const agentId = String(parsed.options['--external-id'])
+      const parent = String(parsed.options['--parent'])
+      if (!matchesCommand(argv, ['thread', 'create'], {
+        '--source': 'claude-code', '--external-id': agentId, '--parent': parent, '--name': parsed.options['--name'],
+      }, ['--shared-worktrees', '--isolated-worktrees']) || typeof parsed.options['--name'] !== 'string') fake.violations.push(`unexpected child create: ${argv.join(' ')}`)
+      if (![fake.server.thread, fake.shareId, urlOf()].includes(parent) && !byReference(parent)) {
+        fake.violations.push(`a child created under an unknown parent: ${parent}`)
+        return output(JSON.stringify(cliFixture('error', faultEnvelope({ code: 'invalid_reference', message: 'unknown parent' }))), 2)
+      }
+      const existing = fake.server.subagents.get(agentId)
+      const child = existing ?? {
+        thread: `child-${agentId}`, reference: `${fake.server.thread}#s=${agentId}`, parent,
+        name: String(parsed.options['--name']), next: 1, records: new Map(),
+        sharedWorktrees: parsed.options['--shared-worktrees'] === true,
+        isolatedWorktrees: parsed.options['--isolated-worktrees'] === true,
+      }
+      fake.server.subagents.set(agentId, child)
+      return output(JSON.stringify(cliFixture('childCreate', { thread_id: child.thread, created: !existing, reference: child.reference })))
+    }
+    if (operation === 'append') {
+      const adopted = adoptExisting(parsed.positionals[2], parsed.options['--external-id'])
+      if (adopted) children.push(adopted)
+    }
+    if (operation === 'append' && byReference(parsed.positionals[2])) {
+      const child = byReference(parsed.positionals[2])!
+      const agentId = [...fake.server.subagents.entries()].find(([, entry]) => entry === child)![0]
+      if (parsed.options['--external-id'] !== agentId || parsed.options['--source'] !== 'claude-code')
+        fake.violations.push(`a child appended as another producer: ${argv.join(' ')}`)
+      if (fake.childAppendOffline) return output('', 1, 'offline')
+      const acks: string[] = []
+      for (const line of stdin.split('\n').filter((line) => line.length)) {
+        const envelope: Envelope = JSON.parse(line)
+        const existing = child.records.get(envelope.sequence)
+        if (!existing && envelope.sequence !== child.next) {
+          fake.violations.push(`child sequence gap: expected ${child.next}, got ${envelope.sequence}`)
+          return output(acks.join('\n'), 2, 'sequence gap')
+        }
+        const fenced = fake.fenceChildTurns.has(envelope.turnSequence ?? -1) && !existing
+        const accepted = existing ?? { line: canonical(envelope), envelope, disposition: fenced ? 'fenced' : 'recorded', version: `child-${++fake.server.version}` }
+        child.records.set(envelope.sequence, accepted)
+        child.next = Math.max(child.next, envelope.sequence + 1)
+        acks.push(JSON.stringify(cliFixture(existing ? 'duplicate' : accepted.disposition, {
+          thread_id: child.thread, sequence: envelope.sequence, next_sequence: child.next, duplicate: !!existing,
+          version: accepted.version, disposition: existing ? 'duplicate' : accepted.disposition,
+          turn_sequence: envelope.turnSequence ?? null,
+        })))
+      }
+      return output(acks.join('\n'))
+    }
+    if (operation === 'attach' && byReference(parsed.options['--thread'])) {
+      const child = byReference(parsed.options['--thread'])!
+      child.checkout = { directory: parsed.positionals[2]!, reference: `checkout-of-${child.thread}#t=0` }
+      return output(JSON.stringify(cliFixture('attach', { reference: child.checkout.reference, directory: child.checkout.directory })))
+    }
+    if (operation === 'unmount' && parsed.positionals[0] === 'thread' && byReference(parsed.positionals[2])?.mountedFor) {
+      const child = byReference(parsed.positionals[2])!
+      if (parsed.options['--owner'] !== child.mountedFor) fake.violations.push(`unexpected child unmount: ${argv.join(' ')}`)
+      child.mountedFor = undefined
+      return output(JSON.stringify(cliFixture('unmount', { thread_id: child.thread, owner: parsed.options['--owner'] })))
+    }
+    if (operation === 'unmount' && parsed.positionals[0] === 'worktree') {
+      // Detaching names the exact thread, as Delta's thread index keys it, not a reference.
+      const child = children.find((entry) => entry.thread === parsed.options['--thread'])
+      if (!child?.checkout || parsed.positionals[2] !== child.checkout.reference || parsed.positionals[3] !== child.checkout.directory)
+        fake.violations.push(`unexpected worktree unmount: ${argv.join(' ')}`)
+      if (child) child.detached = child.checkout
+      if (child) child.checkout = undefined
+      return output(JSON.stringify(cliFixture('detach', { detached_thread: child?.thread })))
+    }
+  }
+
+  /**
+   * A subagent Claude runs for a thread that already exists records on that thread as a producer of
+   * its own, from its first watch or append.
+   */
+  function adoptExisting(reference: string | undefined, agentId: unknown): FakeChild | undefined {
+    const existing = fake.server.threads.get(reference ?? '')
+    if (!existing || typeof agentId !== 'string' || fake.server.subagents.has(agentId)) return
+    if ([...fake.server.subagents.values()].some((child) => child.reference === reference)) return
+    const child: FakeChild = {
+      thread: existing.thread, reference: reference!, parent: 'existing', name: existing.name,
+      next: 1, records: new Map(), sharedWorktrees: false,
+    }
+    fake.server.subagents.set(agentId, child)
+    return child
+  }
 
   function worktreesFrame() {
     return cliFixture('worktrees', { worktrees: fake.server.worktrees!.map(({ reference, name }) => ({ reference, name })) })
@@ -1100,6 +1349,19 @@ export function fakeThreads(on: On, options: {
   return fake
 }
 
+/** Relay a watch's queued output until it exits, marking it closed however the stream ends. */
+async function* relayWatch(watch: Watch, signal: AbortSignal) {
+  try {
+    while (true) {
+      const item = await watch.take(signal)
+      if (item.kind === 'exit') return { value: item.result }
+      yield { stream: item.stream, text: item.text }
+    }
+  } finally {
+    watch.closed = true
+  }
+}
+
 /** Only the fixture's CLI vocabulary; option placement is not part of its contract. */
 function cliArguments(argv: readonly string[]) {
   if (argv[0] !== '/selected/delta') return undefined
@@ -1111,8 +1373,8 @@ function cliArguments(argv: readonly string[]) {
     if (argument === '--') { positionals.push(...argv.slice(index + 1)); break }
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
-    if (argument === '--json' || argument === '--folder' || argument === '--force' || argument === '--join') { options[argument] = true; continue }
-    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name'].includes(argument)) return undefined
+    if (argument === '--json' || argument === '--folder' || argument === '--force' || argument === '--join' || argument === '--shared-worktrees' || argument === '--isolated-worktrees') { options[argument] = true; continue }
+    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined
     options[argument] = value

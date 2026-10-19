@@ -1,19 +1,17 @@
 {"type":"ready","thread_id":"thread_example","producer":null}
-{"type":"ready","thread_id":"thread_example","producer":{"source":"claude-code","external_id":"session","next_sequence":2,"turn":{"sequence":1,"status":"running"}}}
-{"type":"item","item":{"id":"item_example","kind":"agent_message","after_id":null,"turn_id":"turn_example","author":null,"created_at":null,"open":true,"content":{"text":"Hello"}}}
+{"type":"ready","thread_id":"thread_example","producer":{"source":"claude-code","external_id":"session","actor_id":"actor_example","next_sequence":2,"turn":{"sequence":1,"status":"running"}}}
+{"type":"item","item":{"id":"item_example","kind":"agent_message","after_id":null,"turn_id":"turn_example","author":{"user_id":null,"name":"Claude Code","actor_id":"actor_example"},"created_at":null,"open":true,"content":{"text":"Hello"}}}
 {"type":"item.append","id":"item_example","text":" world"}
 {"type":"remove","id":"item_example"}
 {"type":"live"}
 {"type":"turn","state":"idle","turn_id":null,"user":null}
-{"type":"turn","state":"running","turn_id":"turn_example","user":{"user_id":"user_example","name":"Ada"}}
+{"type":"turn","state":"running","turn_id":"turn_example","user":{"user_id":"user_example","name":"Ada","actor_id":"person_actor_example"}}
 {"type":"turn","state":"running","turn_id":null,"user":null}
 {"type":"producer.turn","sequence":1,"status":"finished"}
 {"type":"presence","users":[]}
 {"type":"worktrees","worktrees":[{"reference":"history#t=timeline","name":"delta"}]}
 {"error":{"code":"watch_reset","reason":"watch_reset","message":"reconnect for a fresh snapshot","retryable":true}}
-{"type":"comment","comment":{"id":"comment_example","chain":"comment_example","after_id":null,"delivered_with":"item_example","routed_to":null,"author":{"user_id":"user_example","name":"Ada"},"co_authors":[],"agent":false,"created_at":1791460578377,"text":"Why this?","target":{"item_id":"item_example","kind":"transcript","quote":"Hello"}}}
-{"type":"comment","comment":{"id":"reply_example","chain":"comment_example","after_id":"comment_example","delivered_with":"item_example","routed_to":null,"author":{"user_id":"user_example","name":"Ada"},"co_authors":[{"user_id":"user_other","name":"Bob"}],"agent":false,"created_at":1791460578377,"text":"And rename it.","target":null}}
-{"type":"comment","comment":{"id":"file_comment_example","chain":"file_comment_example","after_id":null,"delivered_with":"item_example","routed_to":"thread_subthread","author":{"user_id":"user_example","name":"Ada"},"co_authors":[],"agent":false,"created_at":null,"text":"Rename these.","target":{"kind":"file","path":"src/main.rs","regions":[{"first_line":4,"last_line":5,"status":"added","text":"let one = 1;\nlet two = 2;"}],"selected":"one = 1;","view":"diff","worktree":"history#t=timeline"}}}
+{"type":"comment","comment":{"id":"comment_example","chain":"comment_example","after_id":null,"delivered_with":"item_example","routed_to":null,"author":{"user_id":"user_example","name":"Ada","actor_id":"person_actor_example"},"co_authors":[],"agent":false,"created_at":1791460578377,"text":"Why this?","target":{"item_id":"item_example","kind":"transcript","quote":"Hello"}}}
 {"type":"comment.remove","id":"comment_example"}
 {"type":"children","children":[{"thread_id":"child_example","reference":"thread_example#s=AbCdEf12/GhIjKl34","kind":"subagent","name":"Scout","status":"running"},{"thread_id":"other_child","reference":"thread_example#s=AbCdEf12","kind":"subthread","name":"Investigation","status":"unknown"}]}
 {"type":"child","child":{"thread_id":"child_example","reference":"thread_example#s=AbCdEf12/GhIjKl34","kind":"subagent","name":"Scout","status":"completed"}}

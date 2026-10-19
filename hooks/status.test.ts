@@ -186,7 +186,8 @@ test('a named running child does not hide siblings in the same state when other 
     { ...child, thread_id: 'second', name: 'Second' },
     { ...child, thread_id: 'idle', name: 'Idle', status: 'inactive' },
   ] }, WIDE)
-  expect(text(band.childActivity)).toBe('⠋ agent First running · +1 running · 1 inactive')
+  expect(text(band.childActivity)).toBe('⠋ agent First running · +1 running')
+  expect(renderBand({ ...live, children: [{ ...child, status: 'inactive' }] }, WIDE).childActivity).toBeUndefined()
 })
 
 test('mixed failed and running children retain both states in compact terminal and desktop bands', () => {

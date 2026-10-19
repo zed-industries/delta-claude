@@ -19,6 +19,8 @@ export type ThreadState = {
   } | { status: 'unavailable'; error: { code: string; reason?: string; message: string } }
   producer: {
     source: string; external_id: string; next_sequence: number; turn: ThreadTurn | null
+    /** The actor this device records the producer as, which its items' `author.actor_id` names. */
+    actor_id?: string | null
   } | null
 }
 
@@ -41,7 +43,11 @@ export type AppendReceipt = {
 }
 
 /** A person on a thread; `name` is null while Delta's actor-to-user lookup is pending or failed. */
-export type ThreadUser = { user_id: string | null; name: string | null }
+export type ThreadUser = {
+  user_id: string | null; name: string | null
+  /** The actor an item is attributed to, the same on every device; `name` is display only. */
+  actor_id?: string
+}
 /** Child kinds and statuses are open-ended so newer CLI values remain visible. */
 export type WatchChild = {
   thread_id: string
@@ -311,7 +317,8 @@ function validItem(item: any): item is WatchItem {
 }
 
 function validUser(user: any): user is ThreadUser {
-  return (user?.user_id === null || nonempty(user?.user_id)) && (user.name === null || typeof user.name === 'string')
+  return (user?.user_id === null || nonempty(user?.user_id)) && (user.name === null || typeof user.name === 'string') &&
+    (user.actor_id === undefined || nonempty(user.actor_id))
 }
 
 export function parseThreadStatus(line: string): ThreadStatus {
@@ -343,6 +350,7 @@ function validUpload(value: any): boolean {
 function validProducer(value: any): boolean {
   return value === null || (nonempty(value?.source) && nonempty(value.external_id) &&
     Number.isSafeInteger(value.next_sequence) && value.next_sequence >= 1 &&
+    (value.actor_id === undefined || value.actor_id === null || nonempty(value.actor_id)) &&
     (value.turn === null || validTurn(value.turn)))
 }
 
@@ -373,13 +381,18 @@ export const PLUGIN_CONTRACT_MIN = 6
  * version is gated on the session's negotiated version (`contractVersion`) until `PLUGIN_CONTRACT_MIN`
  * reaches it.
  */
-export const PLUGIN_CONTRACT_MAX = 6
+export const PLUGIN_CONTRACT_MAX = 7
 /**
  * The name Delta shows for this producer: the recording's attribution (`append --producer-name`)
  * and the harness beside a present person (`watch --participate`). Identity stays the source and
  * external id; this is only presentation.
  */
 export const PRODUCER_NAME = 'Claude Code'
+/**
+ * The first contract that records subagents: `thread create --parent` creates a subagent's own child
+ * thread, and a prompt names the conversation that sent it in `_meta.delta.sender`.
+ */
+export const CHILD_CONTRACT_VERSION = 7
 
 /** The range of recording-output contract versions a CLI build speaks. */
 export type ThreadContract = { operation: 'contract'; min: number; max: number }

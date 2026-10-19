@@ -8,7 +8,7 @@ only generated identities and absolute caller paths.
 | --- | --- |
 | `thread-status.{local_only,granted,worktrees_unavailable}.json` | Producer status, nullable current title, access and inventory availability, and last known audience (`visibility`) and upload progress (`upload`); `delta_ipc::cli_output::tests::recording_outputs_match_cli_fixtures`. |
 | `thread-append.{recorded,fenced,duplicate}.json`, `thread-append.batch.jsonl` | Append dispositions, nullable turn sequence and ordered receipts; the same builder test. |
-| `thread-create.json`, `thread-share.json`, `thread-invite.json` | Creation, sharing, and invitation receipts; the same builder test. |
+| `thread-create.json`, `thread-create.child.json`, `thread-share.json`, `thread-invite.json` | Creation, sharing, and invitation receipts; a created child also carries its `reference`; the same builder test. |
 | `thread-contract.json` | The recording-output contract versions this build speaks; the same builder test. |
 | `thread-watch.frames.jsonl` | Ready without/with producer, item, item.append, remove, live, idle turn, running turn, running turn without an ID, producer.turn, presence, worktrees, terminal error, comments, children, child, child.remove. The first 12 lines are checked by `delta_ipc::cli_output::tests::subscription_frames_match_cli_fixtures`; the terminal line by `delta`'s `every_error_envelope_says_whether_the_same_request_may_succeed_later`, through `report_failure`; comment and child examples by their builder tests. These are frame examples, not one causally valid session. |
 | `thread-{mount,unmount}.json` | External owner and mounted paths; `thread_mounts_name_their_owner_and_report_mounted_paths`. |
@@ -24,16 +24,6 @@ Children examples include opaque `reference` command targets alongside identity-
 `thread_id` values. The selector path example represents an attached agent beneath
 an independent descendant. Fixture IDs are illustrative; native host tests capture
 real watch references and reconnect with cache-empty clients.
-
-The mount fixture's top-level `directory` is the session's working directory.
-With `thread mount --folder`, it is a plain thread folder even for a single
-worktree; each worktree's `directory` still points to its checkout. The result
-shape is unchanged.
-
-Status objects always include `title`: the thread's current display name as a
-string, or `null` when unnamed. This is the loaded thread's name, not a cached
-catalog name. The local-only and granted fixtures show named threads; the
-unavailable-worktrees fixture shows an unnamed thread.
 
 From the repository root, regenerate in this order:
 

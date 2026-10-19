@@ -16,7 +16,7 @@ import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
   ContractRefusalError, JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
   validateJoinedMounts, parseThreadFork, validateThreadFrontier, validateThreadCheckout,
-  PRODUCER_NAME,
+  PRODUCER_NAME, CHILD_CONTRACT_VERSION,
   type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadStatus, type ThreadTurn, type ThreadUpload, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
 import {
@@ -33,13 +33,17 @@ import {
 } from './setup'
 import { DeltaCli } from './cli'
 import { chooseShareAudience, threadInvitationsFrom, type ShareAudience } from './share-audience'
+import { childKey, childName, childOutbox, recordsSubagent, sentBy, type ChildBinding, type Entry } from './children'
+import {
+  HISTORY_BUDGET, adoptionPrompt, deltaTurnReport, finishedReport, historyText, isOwnItem, itemsSince,
+  looksLikeThreadLink, namedThread, resumePrompt, threadsNote, type ThreadTarget,
+} from './delta-threads'
 import { AccessRequiredError, requireAuthentication, type AuthenticationHost } from './auth'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
 } from './handoff'
 
 type Runtime = EngineInterface
-type Entry = { sequence: number; files: string[]; digest: string }
 type RecordBody = { update: Update; turnSequence?: number }
 type Execution = { sequence: number; turnId?: string; lost?: true; endSequence?: number }
 type CleanupPlan = { session: string; root: string; next: number; pending: { sequence: number; files: string[] }[] }
@@ -101,6 +105,8 @@ type Binding = {
   lastTurnSequence?: number
   /** The last session title recorded for the thread, so each change is recorded once. */
   title?: string
+  /** The agent IDs of the subagents this session records, each with a binding of its own. */
+  children?: string[]
 }
 /**
  * Another participant's running turn, as the band reports it: `since` is when the watch first
@@ -168,6 +174,8 @@ let pluginData = ''
 let outbox = ''
 let joining: JoinRequest | undefined
 let sharing: ShareRequest | undefined
+/** The session whose share the band asked for while its turn ran; it starts when the turn ends. */
+let shareAfterTurn: string | undefined
 /** A Keep or Discard the band started, so its two controls cannot both run at once. */
 let resolving = false
 /**
@@ -297,6 +305,8 @@ const feed: {
   remoteTurn?: RemoteTurn
   /** Child inventory from the current snapshot and subsequent per-child updates. */
   children: WatchChild[]
+  /** The watched thread's worktree references, which a thread sharing them also reports. */
+  worktrees?: string[]
   /** When this session first saw each still-open remote item open, which times what the band shows it doing. */
   openSince: Map<string, number>
   /** The current turn, as the band reports it; recomputed whenever the watched turn changes. */
@@ -567,7 +577,10 @@ async function consumeConversation(
             feed.view?.endSnapshot()
             void settleRemote($, session)
             participate()
-          } else if (event.type === 'worktrees') refreshMounts($, session, event.worktrees)
+          } else if (event.type === 'worktrees') {
+            feed.worktrees = event.worktrees.map((tree) => tree.reference)
+            refreshMounts($, session, event.worktrees)
+          }
           else observeRemote($, session, event)
         }
       }
@@ -672,6 +685,7 @@ function observeRemote($: Runtime, session: string, event: WatchEvent) {
     } else {
       feed.children = feed.children.filter((child) => child.thread_id !== event.thread_id)
     }
+    if (recordsChildren(session)) observeThreads($, session)
     syncSpinner($)
     $.ui.invalidate('ui.render')
   }
@@ -901,7 +915,9 @@ async function statusView($: Runtime): Promise<StatusState> {
     // Sharing waits for Claude's turn to finish, so the control says so rather than ignoring a press.
     // A personal organization has nobody to share with, so its threads offer no share control.
     share: binding?.visibility === 'private' && !personalOrganizationIds.has(threadOrganization(binding) ?? currentOrganizationId ?? '') ? {
-      label: state?.currentTurnId ? 'Share after this turn' : `Share with ${organizationName(threadOrganization(binding)) ?? 'organization'}`,
+      label: shareAfterTurn === active && state?.currentTurnId ? 'Sharing after this turn'
+        : state?.currentTurnId ? 'Share after this turn'
+        : `Share with ${organizationName(threadOrganization(binding)) ?? 'organization'}`,
     } : undefined,
     people: presence.roster(),
     children: feed.children,
@@ -1348,12 +1364,12 @@ function pauseNotice(state: SessionState) {
     ?? `checkout sharing is paused; ${recoveryAdvice(state.binding)}`
 }
 
-function rememberToolResults(state: SessionState, message: ApiMessage) {
+function rememberToolResults(tools: ToolRecords, message: ApiMessage) {
   for (const block of message.content) {
     if (block.type === 'tool_result' && typeof block.tool_use_id === 'string')
-      state.tools.toolResults.set(block.tool_use_id, block)
+      tools.toolResults.set(block.tool_use_id, block)
     else if (block.type === 'tool_use' && typeof block.id === 'string' && isOmittedTool(block.name))
-      state.tools.omitted.add(block.id)
+      tools.omitted.add(block.id)
   }
 }
 
@@ -1471,11 +1487,18 @@ async function digest(input: string): Promise<string> {
 }
 
 async function stageRecord($: Runtime, binding: Binding, body: RecordBody): Promise<Binding> {
+  return stageOutboxRecord($, binding.session, binding, body)
+}
+
+/** Stage one record in the outbox folder `folder`, which holds one recorded conversation's records. */
+async function stageOutboxRecord<T extends { next: number; pending: Entry[] }>(
+  $: Runtime, folder: string, binding: T, body: RecordBody,
+): Promise<T> {
   const sequence = binding.next
   const line = JSON.stringify({ schemaVersion: 1, sequence, ...body }) + '\n'
   const files: string[] = []
   for (const chunk of outboxChunks(line, sequence)) {
-    const path = `${outbox}/${binding.session}/${sequence}-${files.length}.json`
+    const path = `${outbox}/${folder}/${sequence}-${files.length}.json`
     await $.fs.write(path, chunk)
     files.push(path)
   }
@@ -1671,35 +1694,10 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
         if (state && permanent) pauseCheckout(state, 'verification')
         if (permanent || !recordsOffline(session, binding)) throw error
       }
-      // Keep stdout well below process.run's 4 MiB capture limit.
-      const batch: Entry[] = []
-      const turnSequences: (number | undefined)[] = []
-      let collected = { input: '', bytes: 0, count: 0 }
-      for (const entry of binding.pending) {
-        const line = await readRecord($, entry)
-        const turnSequence = pendingRecordTurn(line, entry.sequence)
-        const next = appendBatch(collected, line)
-        if (!next) break
-        collected = next
-        batch.push(entry)
-        turnSequences.push(turnSequence)
-        if (collected.bytes >= 2_000_000) break
-      }
-      // Every append names the producer, retries included, so attribution never depends on a live watch.
-      const argv = [await resolveCli($), '--json', 'thread', 'append', binding.locator ?? binding.thread,
-        '--source', 'claude-code', '--external-id', session,
-        ...recordsOffline(session, binding) ? ['--acknowledge', 'local'] : [],
-        '--producer-name', PRODUCER_NAME]
-      let result: Awaited<ReturnType<Runtime['process']['run']>>
-      try {
-        result = await $.process.run(argv, {
-          stdin: collected.input, timeoutMs: 120_000, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
-        })
-      } catch (error) { throw new DeltaCommandError('process_failed', `append did not finish (${String(error)})`) }
-      if (result.isStdoutTruncated || result.isStderrTruncated)
-        throw new DeltaCommandError('command_failed', 'append output was truncated, so no acknowledgment is assumed')
-      const { count, fenced } = acknowledgedPrefix(result.stdout, binding.thread,
-        batch.map((entry, index) => ({ sequence: entry.sequence, turnSequence: turnSequences[index] })))
+      const { count, fenced, failure } = await appendPending($, {
+        reference: binding.locator ?? binding.thread, thread: binding.thread, externalId: session,
+        local: recordsOffline(session, binding),
+      }, binding.pending)
       if (count) {
         await serial(async () => {
           const current = await load($, session)
@@ -1715,28 +1713,85 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
       const running = binding.execution?.sequence
       if (running !== undefined && fenced.includes(running))
         void loseExecution($, session, running, 'Shared execution was superseded').catch((error) => report($, error))
-      if (result.exitCode !== 0 || count !== batch.length)
-        throw result.exitCode !== 0 ? appendFailure(result.stdout, result.stderr, result.exitCode)
-          : new DeltaCommandError('invalid_acknowledgment', 'the append acknowledgment did not match the records sent')
+      if (failure) throw failure
     }
     return false
 }
 
+/**
+ * Send the leading pending records to `target.reference` in one bounded append, as `externalId`.
+ *
+ * Returns how many leading records Delta acknowledged, the turns it fenced among them, and why the
+ * rest were not acknowledged. Throws only when the append's outcome is unknown, so nothing counts as
+ * acknowledged.
+ */
+async function appendPending(
+  $: Runtime,
+  target: { reference: string; thread: string; externalId: string; local: boolean },
+  pending: readonly Entry[],
+): Promise<{ count: number; fenced: number[]; failure?: DeltaCommandError }> {
+  // Keep stdout well below process.run's 4 MiB capture limit.
+  const batch: Entry[] = []
+  const turnSequences: (number | undefined)[] = []
+  let collected = { input: '', bytes: 0, count: 0 }
+  for (const entry of pending) {
+    const line = await readRecord($, entry)
+    const turnSequence = pendingRecordTurn(line, entry.sequence)
+    const next = appendBatch(collected, line)
+    if (!next) break
+    collected = next
+    batch.push(entry)
+    turnSequences.push(turnSequence)
+    if (collected.bytes >= 2_000_000) break
+  }
+  // Every append names the producer, retries included, so attribution never depends on a live watch.
+  const argv = [await resolveCli($), '--json', 'thread', 'append', target.reference,
+    '--source', 'claude-code', '--external-id', target.externalId,
+    ...target.local ? ['--acknowledge', 'local'] : [],
+    '--producer-name', PRODUCER_NAME]
+  let result: Awaited<ReturnType<Runtime['process']['run']>>
+  try {
+    result = await $.process.run(argv, {
+      stdin: collected.input, timeoutMs: 120_000, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+    })
+  } catch (error) { throw new DeltaCommandError('process_failed', `append did not finish (${String(error)})`) }
+  if (result.isStdoutTruncated || result.isStderrTruncated)
+    throw new DeltaCommandError('command_failed', 'append output was truncated, so no acknowledgment is assumed')
+  const { count, fenced } = acknowledgedPrefix(result.stdout, target.thread,
+    batch.map((entry, index) => ({ sequence: entry.sequence, turnSequence: turnSequences[index] })))
+  const failure = result.exitCode !== 0 ? appendFailure(result.stdout, result.stderr, result.exitCode)
+    : count !== batch.length ? new DeltaCommandError('invalid_acknowledgment', 'the append acknowledgment did not match the records sent')
+      : undefined
+  return { count, fenced, failure }
+}
+
+/** A turn's scoped running record, naming this plugin's version and where Claude runs when known. */
+async function runningUpdate($: Runtime): Promise<Update> {
+  let producerVersion: string | undefined
+  let executionLocation: 'local' | 'remote' | undefined
+  try {
+    const manifest = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
+    if (typeof manifest.version === 'string' && manifest.version.length <= 32 &&
+        /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(manifest.version))
+      producerVersion = manifest.version
+  } catch (error) { await report($, error) }
+  try {
+    const remote = await $.env.get('CLAUDE_CODE_REMOTE')
+    if (remote === 'true') executionLocation = 'remote'
+    else if (remote === 'false') executionLocation = 'local'
+  } catch (error) { await report($, error) }
+  return {
+    sessionUpdate: 'state_update', state: 'running',
+    ...producerVersion || executionLocation ? { _meta: { delta: {
+      ...producerVersion ? { producer_version: producerVersion } : {},
+      ...executionLocation ? { execution_location: executionLocation } : {},
+    } } } : {},
+  }
+}
+
 async function beginExecution($: Runtime, session: string, turnId: string) {
   await serial(async () => {
-    let producerVersion: string | undefined
-    let executionLocation: 'local' | 'remote' | undefined
-    try {
-      const manifest = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
-      if (typeof manifest.version === 'string' && manifest.version.length <= 32 &&
-          /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(manifest.version))
-        producerVersion = manifest.version
-    } catch (error) { await report($, error) }
-    try {
-      const remote = await $.env.get('CLAUDE_CODE_REMOTE')
-      if (remote === 'true') executionLocation = 'remote'
-      else if (remote === 'false') executionLocation = 'local'
-    } catch (error) { await report($, error) }
+    const running = await runningUpdate($)
     let binding = await load($, session)
     // A delayed completion must not close this new turn. Finish only the stored
     // predecessor, then persist the new start and local identity in one manifest.
@@ -1746,15 +1801,7 @@ async function beginExecution($: Runtime, session: string, turnId: string) {
       })
     }
     const sequence = binding.next
-    binding = await stageRecord($, binding, {
-      turnSequence: sequence, update: {
-        sessionUpdate: 'state_update', state: 'running',
-        ...producerVersion || executionLocation ? { _meta: { delta: {
-          ...producerVersion ? { producer_version: producerVersion } : {},
-          ...executionLocation ? { execution_location: executionLocation } : {},
-        } } } : {},
-      },
-    })
+    binding = await stageRecord($, binding, { turnSequence: sequence, update: running })
     binding.execution = { sequence, turnId }
     binding.lastTurnSequence = sequence
     // The composer prompt that started this turn, and any output that reached a hook before this
@@ -1897,6 +1944,10 @@ async function drain($: Runtime, session: string): Promise<void> {
     const state = sessions.get(session)
     if (!delivered || active !== session || !state) return
     endDeliveryFailures(state)
+    // The session's thread exists now, so children that waited for it can be created.
+    for (const child of children.values()) {
+      if (child.session === session && child.waitingForParent) void deliverChild($, child)
+    }
     if (!state.captureFailure && !isPaused(state)) $.ui.status(undefined)
     // A delivery that succeeds again clears any pinned failure notice.
     $.ui.invalidate('ui.render')
@@ -1959,6 +2010,1130 @@ function scheduleSendRetry($: Runtime, session: string, retryAfterMs?: number) {
   state.retryTimer = $.clock.after(delay, () => {
     state.retryTimer = undefined
     if (active === session) void drain($, session).catch((error) => report($, error))
+  })
+}
+
+/**
+ * A recorded subagent in this process. Claude stays its executor; Delta records it as an ordinary
+ * child thread under the thread of the loop that spawned it, through an outbox of its own.
+ */
+type ChildRuntime = {
+  session: string
+  agentId: string
+  /** The producer external ID of the loop whose agent sends this run's prompt. */
+  sender: string
+  /** A foreground child runs inside its parent's turn, so stopping it ends that turn. */
+  foreground: boolean
+  tools: ToolRecords
+  /** Rows waiting for the turn start that fixes the sequence they carry; see `heldRows`. */
+  heldRows: HeldRow[]
+  currentTurnId?: string
+  /** Orders this child's staging, so its sequences follow the order its hooks ran in. */
+  queue: Promise<unknown>
+  delivering?: Promise<void>
+  /** Another delivery was asked for while one ran, so the running one goes round again. */
+  redeliver?: boolean
+  retryAttempts: number
+  retryTimer?: Timer
+  /** Why Delta refused this child for good; its records stay queued and nothing retries. */
+  refused?: string
+  /** The turn Delta took over and Claude was asked to stop, so it is stopped once. */
+  stoppedTurn?: number
+  /** Watches the child's thread while a turn of it runs, so a takeover in Delta stops it at once. */
+  turnWatch?: { sequence: number; stop: () => void }
+  /** Its parent had no thread yet; the session's next successful delivery tries again. */
+  waitingForParent?: boolean
+  /** The detach of its own checkout in flight, which every caller shares. */
+  detaching?: Promise<void>
+  /**
+   * What the next prompt Claude runs it with is recorded as: the message that was sent, without the
+   * thread history Claude was handed with it.
+   */
+  promptText?: string
+}
+const children = new Map<string, ChildRuntime>()
+/** Agents never recorded here: other kinds of agent, and agents spawned by one that is not recorded. */
+const unrecordedAgents = new Set<string>()
+/** Spawns whose agent ID is not known yet. A child's first hooks can run before its spawn resolves. */
+let pendingSpawns = 0
+/** The recorded spawns in flight, by the loop that spawned them; their agent IDs are not known yet. */
+const spawning: { parent: string; name: string }[] = []
+/** What each not-yet-named agent's hooks recorded meanwhile, replayed once its spawn names it. */
+const earlyChildSteps = new Map<string, ((child: ChildRuntime) => Promise<void>)[]>()
+
+/** Whether an agent's hooks may concern a recorded child: one already recorded, or one a pending spawn may name. */
+function mayRecordChild(agentId: string): boolean {
+  return children.has(agentId) || (pendingSpawns > 0 && !unrecordedAgents.has(agentId))
+}
+
+function stopReasonOf(e: { isAborted?: boolean; reason?: string }): 'end_turn' | 'cancelled' | 'refusal' | 'error' | undefined {
+  return e.isAborted || e.reason === 'aborted' ? 'cancelled'
+    : e.reason === 'answer' ? 'end_turn'
+    : e.reason === 'refusal' ? 'refusal'
+    : e.reason === 'error' ? 'error' : undefined
+}
+
+/** Run `step` in order with the child's other steps; a failure is reported and never fails a hook. */
+function childStep($: Runtime, child: ChildRuntime, step: () => Promise<void>): Promise<void> {
+  const running = child.queue.then(step, step)
+  child.queue = running.catch(() => {})
+  return running.catch((error) => reportChild($, child, error))
+}
+
+/**
+ * Run `step` for the recorded child `agentId`, or hold it until a pending spawn names that agent.
+ * An agent nobody spawns while this session records is not recorded, so its steps are dropped.
+ */
+function onChild($: Runtime, agentId: string, step: (child: ChildRuntime) => Promise<void>): Promise<void> {
+  const child = children.get(agentId)
+  if (child) return childStep($, child, () => step(child))
+  if (!unrecordedAgents.has(agentId) && pendingSpawns)
+    earlyChildSteps.set(agentId, [...earlyChildSteps.get(agentId) ?? [], step])
+  return Promise.resolve()
+}
+
+async function loadChild($: Runtime, child: { session: string; agentId: string }): Promise<ChildBinding> {
+  const stored = await $.store.get(childKey(child.session, child.agentId)) as ChildBinding | undefined
+  if (!stored) throw new Error(`the recorded subagent ${child.agentId} lost its saved state`)
+  return restoreBinding(stored) as ChildBinding
+}
+
+async function saveChild($: Runtime, binding: ChildBinding) {
+  await $.store.set(childKey(binding.session, binding.agentId), binding)
+}
+
+function stageChildRecord($: Runtime, binding: ChildBinding, body: RecordBody): Promise<ChildBinding> {
+  return stageOutboxRecord($, childOutbox(binding.session, binding.agentId), binding, body)
+}
+
+/** Whether this session records the agents it spawns: it records, and its CLI speaks children. */
+function recordsChildren(session: string): boolean {
+  const binding = stateFor(session).binding
+  return !!binding?.snapshot && !binding.joinTransition &&
+    (contractVerified.get(session) ?? 0) >= CHILD_CONTRACT_VERSION
+}
+
+/**
+ * Start recording the agent a spawn named, or resume recording one this session already records.
+ * A new child's state is saved before any of its steps run, then the steps its hooks held run.
+ */
+async function adoptChild($: Runtime, session: string, agentId: string,
+    spawn: { parent: string; name: string; foreground: boolean; resumed: boolean }) {
+  let child = children.get(agentId)
+  if (child) {
+    child.sender = spawn.parent
+    child.foreground = spawn.foreground
+  } else {
+    const stored = await $.store.get(childKey(session, agentId)) as ChildBinding | undefined
+    // A resumed agent this session never recorded stays unrecorded: its history is not ours.
+    if (!stored && spawn.resumed) {
+      unrecordedAgents.add(agentId)
+      earlyChildSteps.delete(agentId)
+      return
+    }
+    const adopted = newChild(session, agentId, spawn.parent, spawn.foreground)
+    child = adopted
+    children.set(agentId, adopted)
+    // A thread created while its spawn was in flight, for its worktree, may carry another spawn's name.
+    if (stored && !spawn.resumed && stored.name !== spawn.name) await childStep($, adopted, async () => {
+      const current = await loadChild($, adopted)
+      await saveChild($, { ...await stageChildRecord($, current, {
+        update: { sessionUpdate: 'session_info_update', title: spawn.name },
+      }), name: spawn.name })
+    })
+    // Saving is the child's first step, so none of its steps can run before its state exists.
+    if (!stored) await childStep($, adopted, async () => {
+      await saveChild($, { session, agentId, parent: spawn.parent, name: spawn.name, next: 1, pending: [] })
+      await rememberChild($, session, agentId)
+    })
+  }
+  const held = earlyChildSteps.get(agentId) ?? []
+  earlyChildSteps.delete(agentId)
+  for (const step of held) void childStep($, child, () => step(child))
+  void deliverChild($, child)
+}
+
+/** Begin a child's turn: close any turn left open, stage its scoped start, and place its held rows. */
+async function beginChildTurn($: Runtime, child: ChildRuntime, turnId: string, cwd: string) {
+  child.currentTurnId = turnId
+  let binding = await loadChild($, child)
+  if (binding.awaitingSnapshot) return
+  const running = await runningUpdate($)
+  if (binding.execution)
+    binding = await stageChildRecord($, binding, {
+      turnSequence: binding.execution.sequence, update: { sessionUpdate: 'state_update', state: 'idle' },
+    })
+  const sequence = binding.next
+  binding = await stageChildRecord($, binding, { turnSequence: sequence, update: running })
+  binding.execution = { sequence, turnId }
+  binding.lastTurnSequence = sequence
+  const rows = child.heldRows
+  child.heldRows = []
+  for (const { update, toolId, turnId: owner } of rows) {
+    if (owner !== undefined && owner !== turnId) continue
+    if (toolId && !child.tools.toolTurns.has(toolId)) child.tools.toolTurns.set(toolId, sequence)
+    binding = await stageChildRecord($, binding, { update, turnSequence: sequence })
+  }
+  binding = await placeChild($, binding, cwd)
+  await saveChild($, binding)
+  void deliverChild($, child)
+}
+
+/**
+ * Decide, at a child's first turn, whether it works in its parent's checkout, whose worktrees its
+ * thread then shares, or apart from it. A run in a checkout of its own, such as an isolated worktree,
+ * attaches that checkout to the child's thread while it runs there.
+ */
+async function placeChild($: Runtime, binding: ChildBinding, cwd: string): Promise<ChildBinding> {
+  const root = await gitRoot($, cwd)
+  const directory = root ?? cwd
+  if (binding.sharesParentCheckout === undefined) {
+    const parent = await parentDirectories($, binding)
+    binding.sharesParentCheckout = parent.some((candidate) => samePath(candidate, directory))
+    binding.directories = binding.sharesParentCheckout ? parent : [directory]
+  }
+  // An adopted or forked thread runs where Delta already keeps its worktrees, so nothing is attached for it.
+  if (!binding.sharesParentCheckout && !binding.adopted && !binding.mountOwner && root && !binding.checkout) binding.checkout = root
+  return binding
+}
+
+/**
+ * The directories a child's parent works in: the session's checkout, or a joined session's directory
+ * and each worktree mounted for it; or the directories a recorded parent subagent works in.
+ */
+async function parentDirectories($: Runtime, binding: Pick<ChildBinding, 'session' | 'parent'>): Promise<string[]> {
+  if (binding.parent !== binding.session)
+    return (await loadChild($, { session: binding.session, agentId: binding.parent })).directories ?? []
+  const session = stateFor(binding.session).binding
+  const bound = boundDirectory(session)
+  if (!bound) return []
+  if (!session?.joined) return [bound]
+  // A joined thread with one worktree works in that worktree's own directory.
+  const mounted = (session.mounts ?? []).map((mount) => mount.directory)
+  return [bound, ...mounted.filter((directory) => !samePath(directory, bound))]
+}
+
+/** The directory a child's paths are recorded relative to. */
+function childRoot(binding: ChildBinding): string | undefined {
+  return binding.directories?.[0] ?? boundDirectory(stateFor(binding.session).binding)
+}
+
+/**
+ * End a child's turn, or record the whole run of a child found running when recording started. That
+ * run's transcript goes into the turn recorded for it then, and a checkout of its own, read from
+ * `cwd` in its hook, is attached so its files reach Delta before the run's detach.
+ */
+async function endChildTurn($: Runtime, child: ChildRuntime, turnId: string | undefined,
+    stopReason: 'end_turn' | 'cancelled' | 'refusal' | 'error' | undefined, cwd?: string) {
+  if (turnId !== undefined && child.currentTurnId === turnId) child.currentTurnId = undefined
+  let binding = await loadChild($, child)
+  const snapshot = !!binding.awaitingSnapshot
+  if (snapshot) {
+    binding = await snapshotChild($, child, binding)
+    if (cwd) binding = await placeChild($, binding, cwd)
+    await saveChild($, binding)
+  }
+  const execution = binding.execution
+  // A run found going when recording started has no Claude turn id; any end of it ends that turn.
+  if (!execution || (execution.turnId !== undefined && execution.turnId !== turnId)) {
+    if (snapshot) void deliverChild($, child)
+    return
+  }
+  binding = await stageChildRecord($, binding, {
+    turnSequence: execution.sequence, update: {
+      sessionUpdate: 'state_update', state: 'idle',
+      ...stopReason ? { stopReason } : {},
+      ...stopReason === 'error' ? { error: { code: -32603, message: 'External producer reported an error' } } : {},
+    },
+  })
+  delete binding.execution
+  await saveChild($, binding)
+  child.turnWatch?.stop()
+  child.tools.forgetUnpaired(execution.sequence)
+  void deliverChild($, child)
+}
+
+/**
+ * Stage the rows of one message a child's loop stored. A prompt is attributed to the agent that
+ * sent it. Like the session's own rows, a row waits for the turn start that fixes its sequence.
+ */
+async function recordChildMessage($: Runtime, child: ChildRuntime, message: ApiMessage, id: string) {
+  let binding = await loadChild($, child)
+  if (binding.awaitingSnapshot) return
+  rememberToolResults(child.tools, message)
+  const root = childRoot(binding)
+  const updates = messageUpdates(message, id, child.tools.structuredResults, { root, omitted: child.tools.omitted })
+    .map((update) => liveActivity(sentBy(update, child.sender)))
+  const prompt = message.role === 'user' && message.content.some((block) => block.type !== 'tool_result')
+  const turn = binding.execution?.sequence
+  if (turn === undefined && (prompt || child.currentTurnId !== undefined)) {
+    // A prompt waits for whichever turn starts next; output waits for the turn Claude runs.
+    child.heldRows.push(...updates.map((update) => ({
+      update, turnId: prompt ? undefined : child.currentTurnId,
+      toolId: update.sessionUpdate === 'tool_call_update' && typeof update.toolCallId === 'string'
+        ? update.toolCallId : undefined,
+    })))
+  } else {
+    for (const update of updates) {
+      const tool = update.sessionUpdate === 'tool_call_update' && typeof update.toolCallId === 'string'
+        ? update.toolCallId : undefined
+      if (tool && !child.tools.toolTurns.has(tool)) child.tools.toolTurns.set(tool, turn ?? binding.lastTurnSequence)
+      binding = await stageChildRecord($, binding, {
+        update, turnSequence: tool ? child.tools.toolTurns.get(tool) : turn ?? binding.lastTurnSequence,
+      })
+    }
+    await saveChild($, binding)
+  }
+  for (const block of message.content) {
+    if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') child.tools.settle(block.tool_use_id, 'row')
+  }
+  void deliverChild($, child)
+}
+
+/** Stage a child's tool result as its call hook saw it, with the structured output a row lacks. */
+async function recordChildToolResult($: Runtime, child: ChildRuntime,
+    call: { tool: string; tool_use_id: string; input: unknown }, result: unknown, isError: boolean) {
+  let binding = await loadChild($, child)
+  if (binding.awaitingSnapshot || child.tools.omitted.has(call.tool_use_id)) return
+  const root = childRoot(binding)
+  const update = resultUpdate(call.tool_use_id, call.tool, result, isError, root)
+  child.tools.structuredResults.set(call.tool_use_id, update)
+  const row = child.tools.toolResults.get(call.tool_use_id)
+  const updates = (row
+    ? messageUpdates({ role: 'user', content: [row] }, `tool-result:${call.tool_use_id}`, child.tools.structuredResults)
+    : [{ ...update, status: 'in_progress', name: call.tool, ...toolInfo(call.tool, call.input, root) }]).map(liveActivity)
+  const turn = child.tools.toolTurns.get(call.tool_use_id) ?? binding.execution?.sequence ?? binding.lastTurnSequence
+  for (const update of updates) binding = await stageChildRecord($, binding, { update, turnSequence: turn })
+  await saveChild($, binding)
+  child.tools.settle(call.tool_use_id, 'call')
+  void deliverChild($, child)
+}
+
+/**
+ * Record the whole transcript of a child that ran before this session recorded: within the turn
+ * recorded for a run still going then, else as history.
+ */
+async function snapshotChild($: Runtime, child: ChildRuntime, binding: ChildBinding): Promise<ChildBinding> {
+  const messages = await $.session.messages({ agentId: child.agentId, as: 'api' })
+  if (!Array.isArray(messages)) throw new Error(`the transcript of subagent ${child.agentId} is unavailable`)
+  const root = childRoot(binding)
+  const tools = new ToolRecords()
+  const turnSequence = binding.execution?.sequence
+  for (const [index, message] of snapshotMessages(messages).entries()) {
+    rememberToolResults(tools, message)
+    for (const update of messageUpdates(message, `snapshot:${index}`, undefined, { root, omitted: tools.omitted }))
+      binding = await stageChildRecord($, binding, { update: sentBy(update, child.sender), ...turnSequence ? { turnSequence } : {} })
+  }
+  delete binding.awaitingSnapshot
+  await saveChild($, binding)
+  return binding
+}
+
+async function gitRoot($: Runtime, cwd: string): Promise<string | undefined> {
+  try {
+    const result = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd })
+    return result.exitCode === 0 && !result.isStdoutTruncated ? result.stdout.trim() || undefined : undefined
+  } catch { return undefined }
+}
+
+/**
+ * Create the child's thread, attach a checkout of its own, and deliver its queued records. A child
+ * whose parent has no thread yet waits for the next delivery. One delivery runs at a time; asking
+ * again while one runs makes it go round once more.
+ */
+function deliverChild($: Runtime, child: ChildRuntime): Promise<void> {
+  if (child.delivering) {
+    child.redeliver = true
+    return child.delivering
+  }
+  const task = (async () => {
+    do {
+      child.redeliver = false
+      await deliverChildOnce($, child)
+    } while (child.redeliver)
+    child.retryAttempts = 0
+  })().catch((error) => failChildDelivery($, child, error))
+  child.delivering = task.finally(() => { child.delivering = undefined })
+  return child.delivering
+}
+
+async function deliverChildOnce($: Runtime, child: ChildRuntime) {
+  if (child.refused || !children.has(child.agentId)) return
+  const session = await serial(() => load($, child.session))
+  child.waitingForParent = !session.thread
+  if (!session.thread) return
+  let binding = await loadChild($, child)
+  if (!binding.thread) {
+    // Whether its thread shares its parent's worktrees is known once the child starts working.
+    if (binding.sharesParentCheckout === undefined) return
+    const parent = child.session === binding.parent ? session.locator ?? session.thread : await childReference($, child, binding.parent)
+    child.waitingForParent = !parent
+    if (!parent) return
+    const created = await createChildThread($, child.agentId, parent, binding.name,
+      binding.sharesParentCheckout ? 'shared' : undefined)
+    await childStep($, child, async () => {
+      await saveChild($, { ...await loadChild($, child), thread: created.thread_id, reference: created.reference })
+    })
+    binding = await loadChild($, child)
+  }
+  if (binding.checkout && !binding.checkoutReference) {
+    const attached = await command($, ['worktree', 'attach', binding.checkout, '--thread', binding.reference!], 'worktree attach')
+    validateAttachmentReceipt(attached, binding.checkout)
+    await childStep($, child, async () => {
+      await saveChild($, { ...await loadChild($, child), checkoutReference: attached.reference })
+    })
+    binding = await loadChild($, child)
+  }
+  watchChildTurn($, child, binding)
+  while (binding.pending.length) {
+    const { count, fenced, failure } = await appendPending($, {
+      reference: binding.reference!, thread: binding.thread!, externalId: child.agentId,
+      local: recordsOffline(child.session, session),
+    }, binding.pending)
+    if (count) {
+      let acknowledged!: ChildBinding
+      await childStep($, child, async () => {
+        const current = await loadChild($, child)
+        acknowledged = { ...current, pending: current.pending.slice(count) }
+        await saveChild($, acknowledged)
+      })
+      // Delivery runs one at a time per child, so its cleanup needs no queue of its own.
+      void collectAcknowledgedOutbox($, {
+        session: childOutbox(child.session, child.agentId), root: outbox, next: acknowledged.next,
+        pending: acknowledged.pending.map((entry) => ({ sequence: entry.sequence, files: [...entry.files] })),
+      }).catch((error) => reportChild($, child, error))
+    }
+    // Delta fenced the running turn: someone took the child over in Delta, so Claude stops it.
+    const running = binding.execution?.sequence
+    if (running !== undefined && fenced.includes(running)) takeOverChild($, child, running)
+    if (failure) throw failure
+    binding = await loadChild($, child)
+  }
+  // A checkout of its own is attached only while the child runs there; once nothing runs and what it
+  // recorded is delivered, the thread keeps Delta's copy and the checkout is Claude's again.
+  if (!binding.execution && binding.checkoutReference) await detachChildCheckout($, child)
+}
+
+/** Create or reuse the subagent `agentId`'s child thread under `parent`, with its parent's worktrees or forks of them. */
+async function createChildThread($: Runtime, agentId: string, parent: string, name: string,
+    worktrees: 'shared' | 'isolated' | undefined): Promise<{ thread_id: string; reference: string }> {
+  const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', agentId,
+    '--parent', parent, '--name', name, ...worktrees ? [`--${worktrees}-worktrees`] : []], 'thread create')
+  validateCreationReceipt(created)
+  if (typeof created.reference !== 'string' || !created.reference)
+    throw new Error('thread create: Delta returned no reference for the subagent\'s thread')
+  return { thread_id: created.thread_id, reference: created.reference }
+}
+
+function takeOverChild($: Runtime, child: ChildRuntime, sequence: number) {
+  if (child.stoppedTurn === sequence) return
+  child.stoppedTurn = sequence
+  void stopChild($, child)
+}
+
+/**
+ * While a child's turn runs, watch its thread so a stop or a message in Delta, which supersedes that
+ * turn, stops Claude within moments rather than at the child's next append, which a long tool call
+ * can hold back. A watch that fails is reported and not retried: the next append's fence still stops
+ * the turn.
+ */
+function watchChildTurn($: Runtime, child: ChildRuntime, binding: ChildBinding) {
+  const sequence = binding.execution?.sequence
+  const reference = binding.reference
+  if (sequence === undefined || !reference || child.turnWatch?.sequence === sequence) return
+  child.turnWatch?.stop()
+  let stopped = false
+  let stream: ReturnType<Runtime['process']['spawn']> | undefined
+  const watch = {
+    sequence,
+    stop: () => {
+      stopped = true
+      void stream?.return({ code: null, signal: 'SIGTERM' }).catch(() => {})
+    },
+  }
+  child.turnWatch = watch
+  void (async () => {
+    const argv = [await resolveCli($), '--json', 'thread', 'watch', reference,
+      '--source', 'claude-code', '--external-id', child.agentId]
+    // The turn may have ended while the delivery that asked for this watch ran.
+    if (stopped || (await loadChild($, child)).execution?.sequence !== sequence) return
+    stream = $.process.spawn({ argv, env: { DELTA_CLI_INTEGRATION: 'claude_code' } })
+    let pending = ''
+    while (!stopped) {
+      const piece = await stream.next()
+      if (piece.done || stopped) return
+      if (piece.value.stream !== 'stdout') continue
+      pending += piece.value.text
+      if (pending.length > MAX_LINE) throw new Error('Delta watch event exceeds the watcher limit')
+      let end: number
+      while ((end = pending.indexOf('\n')) >= 0) {
+        const event = parseWatchEvent(pending.slice(0, end))
+        pending = pending.slice(end + 1)
+        if (event?.type === 'error') throw event.error
+        const turn = event?.type === 'producer.turn' ? event : event?.type === 'ready' ? event.producer?.turn : undefined
+        if (turn?.sequence === sequence && turn.status === 'superseded') {
+          if ((await loadChild($, child)).execution?.sequence === sequence) takeOverChild($, child, sequence)
+          return
+        }
+      }
+    }
+  })().catch((error) => reportChild($, child, error)).finally(() => {
+    watch.stop()
+    if (child.turnWatch === watch) child.turnWatch = undefined
+  })
+}
+
+/** How long a child's `turn.complete` hook delivers before detaching; see `finishChildRun`. */
+const CHILD_FINISH_DELIVERY_BUDGET_MS = 3_000
+/** How long detaching a finished child's checkout may take within its hook's budget. */
+const CHILD_DETACH_TIMEOUT_MS = 4_000
+
+/**
+ * After a child's run ends, deliver what it recorded within a short budget, then stop sharing a
+ * checkout of its own. Claude may remove that worktree as soon as the run's completion hooks
+ * return, so the detach happens before this hook does; delivery that takes longer continues on its
+ * own.
+ */
+async function finishChildRun($: Runtime, child: ChildRuntime) {
+  const expiry = new AbortController()
+  await Promise.race([
+    deliverChild($, child),
+    $.clock.sleep(CHILD_FINISH_DELIVERY_BUDGET_MS, { signal: expiry.signal }).catch(() => undefined),
+  ])
+  expiry.abort()
+  await detachChildCheckout($, child)
+  await noteForkMerge($, child)
+}
+
+/** A word for a POSIX shell, quoted unless it is plainly safe as it is. */
+function shellQuote(word: string): string {
+  return /^[\w@%+=:,./#-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`
+}
+
+/**
+ * A subagent that worked in a Delta fork has no branch in this repository for Claude to merge, so
+ * its parent is told how to bring the fork's changes into its own checkout.
+ */
+async function noteForkMerge($: Runtime, child: ChildRuntime) {
+  try {
+    const binding = await loadChild($, child)
+    if (!binding.mountOwner || binding.adopted || !binding.reference) return
+    const parent = await parentReference($, child.session, binding.parent)
+    if (!parent) return
+    await deliverNote($, child.session, `[Delta] The subagent "${binding.name}" worked in its own copy of this checkout ` +
+      'in Delta, not in a git branch of this repository. To bring its changes into the checkout it was forked from, run: ' +
+      `${shellQuote(await resolveCli($))} thread merge ${shellQuote(binding.reference)} --into ${shellQuote(parent)}`)
+  } catch (error) { await reportChild($, child, error) }
+}
+
+/** The reference of the thread `parent`, the session or a recorded subagent, records into, once that thread exists. */
+async function parentReference($: Runtime, session: string, parent: string): Promise<string | undefined> {
+  if (parent !== session) return (await loadChild($, { session, agentId: parent }).catch(() => undefined))?.reference
+  const binding = await serial(() => load($, session))
+  return binding.locator ?? binding.thread
+}
+
+/** Detach a child's own checkout from its thread once no run of it is going on, once at a time. */
+function detachChildCheckout($: Runtime, child: ChildRuntime): Promise<void> {
+  child.detaching ??= detachChildCheckoutOnce($, child).finally(() => { child.detaching = undefined })
+  return child.detaching
+}
+
+async function detachChildCheckoutOnce($: Runtime, child: ChildRuntime) {
+  const binding = await loadChild($, child).catch(() => undefined)
+  if (!binding || binding.execution || !binding.thread || !binding.checkout || !binding.checkoutReference) return
+  try {
+    await command($, ['worktree', 'unmount', binding.checkoutReference, binding.checkout, '--thread', binding.thread],
+      'worktree unmount', undefined, CHILD_DETACH_TIMEOUT_MS)
+  } catch (error) {
+    await reportChild($, child, error)
+    return
+  }
+  await childStep($, child, async () => {
+    const current = await loadChild($, child)
+    if (current.execution) return
+    delete current.checkout
+    delete current.checkoutReference
+    await saveChild($, current)
+  })
+}
+
+/** The reference of a recorded parent subagent's thread, creating that thread first when needed. */
+async function childReference($: Runtime, child: ChildRuntime, parentAgentId: string): Promise<string | undefined> {
+  const parent = children.get(parentAgentId)
+  if (!parent) throw new Error(`the subagent ${child.agentId}'s parent ${parentAgentId} is not recorded`)
+  await deliverChild($, parent)
+  return (await loadChild($, parent)).reference
+}
+
+/**
+ * A refusal stops the child's delivery and is shown once; anything else retries with backoff. A
+ * child's failure never pauses the session or its other children.
+ */
+async function failChildDelivery($: Runtime, child: ChildRuntime, error: unknown) {
+  const binding = await loadChild($, child).catch(() => undefined)
+  const name = binding?.name ?? child.agentId
+  if (error instanceof DeltaCommandError && classifyCommandFailure(error) === 'permanent') {
+    child.refused = String(error)
+    await $.ui.log(`Delta stopped recording the subagent "${name}": ${String(error)}. Its records stay queued.`, { to: 'transcript' })
+    return
+  }
+  if (child.retryTimer) return
+  const retryAfterMs = error instanceof DeltaCommandError ? error.hints.retryAfterMs : undefined
+  child.retryTimer = $.clock.after(deliveryRetryDelay(child.retryAttempts++, retryAfterMs), () => {
+    child.retryTimer = undefined
+    void deliverChild($, child)
+  })
+}
+
+async function reportChild($: Runtime, child: ChildRuntime, error: unknown) {
+  try { await $.ui.log(`Delta could not record the subagent ${child.agentId}: ${String(error)}`, { to: 'debug' }) }
+  catch { /* reporting never fails a hook */ }
+}
+
+/**
+ * Stop a child Delta took over. A background child is stopped on its own; a foreground child runs
+ * inside its parent's turn, which stops with it.
+ */
+async function stopChild($: Runtime, child: ChildRuntime) {
+  try {
+    let name = ''
+    // The parent hears Delta's reply when Delta's turn ends, as it would have heard the subagent's.
+    await childStep($, child, async () => {
+      const binding = await loadChild($, child)
+      name = binding.name
+      await saveChild($, { ...binding, awaited: 'delta' })
+    })
+    if (child.foreground) {
+      const turnId = stateFor(child.session).currentTurnId
+      if (turnId) await $.turn.abort({ turnId })
+    } else await $.tool.call({ tool: 'TaskStop', task_id: child.agentId } as never)
+    await $.ui.log(`Someone took over the subagent "${name}" in Delta, so Claude stopped it. Tool effects it already made are not rolled back.`, { to: 'transcript' })
+    await deliverNote($, child.session, `[Delta] Someone took over the subagent "${name}" in Delta, so Claude stopped its run here. Delta's agent continues it in that thread; its reply is added here when Delta's turn ends. Send "${name}" a message with SendMessage to run it here again.`)
+  } catch (error) { await reportChild($, child, error) }
+}
+
+/*
+ * Delta threads as Claude's own subagents. A SendMessage that names a thread of this session's Delta
+ * conversation, or a Delta link, runs that thread here: a subagent already recorded for it resumes,
+ * told what happened in Delta since it last ran, and any other thread gets a subagent of its own that
+ * starts from the thread's history and works in the thread's worktrees. Its turns are recorded on that
+ * thread as any recorded subagent's are, and whoever sends a thread a message runs its turn.
+ */
+
+/** How long reading a thread's snapshot may take. */
+const THREAD_READ_TIMEOUT_MS = 15_000
+/** How long a read waits past going live for the worktrees, which a watch reports after its items. */
+const THREAD_WORKTREES_GRACE_MS = 3_000
+
+/**
+ * A thread's id, items, and worktrees as one watch's snapshot reports them, and who runs its turn
+ * when one is running.
+ */
+type ThreadRead = { thread_id: string; items: WatchItem[]; worktrees: string[]; running?: { name: string | null } }
+
+/**
+ * Read a thread's snapshot once: its items, which come before the watch goes live, and its
+ * worktrees, which come after; a CLI that reports no worktrees is waited on only briefly.
+ */
+async function readThread($: Runtime, reference: string): Promise<ThreadRead> {
+  const stream = $.process.spawn({
+    argv: [await resolveCli($), '--json', 'thread', 'watch', reference],
+    env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+  })
+  let expired = false
+  const timer = $.clock.after(THREAD_READ_TIMEOUT_MS, () => {
+    expired = true
+    void stream.return({ code: null, signal: 'SIGTERM' }).catch(() => {})
+  })
+  const items = new Map<string, WatchItem>()
+  let thread: string | undefined
+  let worktrees: string[] | undefined
+  let running: ThreadRead['running']
+  let live = false
+  let grace: Timer | undefined
+  let pending = ''
+  const result = (): ThreadRead => ({ thread_id: thread!, items: [...items.values()], worktrees: worktrees ?? [], running })
+  try {
+    for (;;) {
+      const piece = await stream.next()
+      if (piece.done) {
+        if (live && !expired) return result()
+        throw new Error(expired ? `reading the Delta thread ${reference} timed out` : `Delta could not read the thread ${reference}`)
+      }
+      if (piece.value.stream !== 'stdout') continue
+      pending += piece.value.text
+      if (pending.length > MAX_LINE) throw new Error('Delta watch event exceeds the watcher limit')
+      let end: number
+      while ((end = pending.indexOf('\n')) >= 0) {
+        const event = parseWatchEvent(pending.slice(0, end))
+        pending = pending.slice(end + 1)
+        if (event?.type === 'error') throw event.error
+        if (event?.type === 'ready') thread = event.thread_id
+        else if (event?.type === 'item') items.set(event.item.id, event.item)
+        else if (event?.type === 'item.append') {
+          const item = items.get(event.id)
+          if (item) items.set(event.id, { ...item, content: { ...item.content, text: `${item.content.text ?? ''}${event.text}` } })
+        } else if (event?.type === 'remove') items.delete(event.id)
+        else if (event?.type === 'worktrees') worktrees = event.worktrees.map((tree) => tree.reference)
+        else if (event?.type === 'turn') running = event.state === 'running' ? { name: event.user?.name ?? null } : undefined
+        else if (event?.type === 'live') {
+          if (!thread) throw new Error('Thread activity arrived before readiness')
+          live = true
+          grace = $.clock.after(THREAD_WORKTREES_GRACE_MS, () => {
+            void stream.return({ code: null, signal: 'SIGTERM' }).catch(() => {})
+          })
+        }
+        if (live && worktrees) return result()
+      }
+    }
+  } finally {
+    timer.cancel()
+    grace?.cancel()
+    void stream.return({ code: null, signal: 'SIGTERM' }).catch(() => {})
+  }
+}
+
+/**
+ * The actor Delta records a child's output as on this device, which tells its own items from
+ * everyone else's. Read once, after the child first recorded, and kept with its binding.
+ */
+async function childActor($: Runtime, child: ChildRuntime): Promise<string | undefined> {
+  const binding = await loadChild($, child)
+  if (binding.actorId || !binding.reference) return binding.actorId
+  const actorId = (await readThreadStatus($, binding.reference, child.agentId)).producer?.actor_id ?? undefined
+  if (actorId) await childStep($, child, async () => saveChild($, { ...await loadChild($, child), actorId }))
+  return actorId
+}
+
+/**
+ * Running a thread someone else is running takes it over, which only the person may decide: they are
+ * asked, and a session that cannot ask leaves the thread alone. Returns why the send is refused, or
+ * undefined to go ahead.
+ */
+async function takeoverRefusal($: Runtime, name: string, running: { name: string | null }): Promise<string | undefined> {
+  const who = conversationText(running.name ?? '').trim() || 'someone'
+  const refusal = `The Delta thread "${name}" is running in Delta (${who}), so Claude left it alone. ` +
+    'Try again once it is idle, or ask the person to let Claude take it over.'
+  if (!hasInteractiveSurface(await $.session.surfaces())) return refusal
+  try {
+    const answer = await claudeInteraction($).ask(
+      `Claude wants to take over "${name}", which ${who} is running in Delta. Take it over?`,
+      [TAKE_OVER, 'Leave it running'])
+    return answer === TAKE_OVER ? undefined : refusal
+  } catch {
+    return refusal
+  }
+}
+
+const TAKE_OVER = 'Take it over'
+
+async function childForThread($: Runtime, session: string, thread: string): Promise<ChildRuntime | undefined> {
+  for (const child of children.values()) {
+    if (child.session !== session) continue
+    const binding = await loadChild($, child).catch(() => undefined)
+    if (binding?.thread === thread) return child
+  }
+}
+
+/** The thread a running adoption spawns a subagent for, which that spawn's hook binds it to. */
+let adoption: { session: string; prompt: string; binding: Omit<ChildBinding, 'agentId'>; text: string } | undefined
+
+/**
+ * Run a thread `to` names with `text`, or leave the send to Claude: undefined when `to` names no
+ * thread. A subagent already recorded for the thread is resumed by Claude's own delivery, readdressed
+ * to it; any other thread gets a subagent here.
+ */
+async function sendToThread($: Runtime, session: string, sender: string, to: string, text: string,
+    next: (to: string, text: string) => Promise<{ isDelivered: true } | { isDelivered: false; reason: string }>) {
+  let child = children.get(to)
+  if (child && child.session !== session) child = undefined
+  let target: ThreadTarget | undefined
+  if (!child) {
+    const listed = feed.session === session ? namedThread(to, feed.children) : undefined
+    if (listed) {
+      child = await childForThread($, session, listed.thread_id)
+      if (!child && listed.reference) target = { reference: listed.reference, name: listed.name, thread_id: listed.thread_id }
+    } else if (looksLikeThreadLink(to)) target = { reference: to.trim(), name: to.trim() }
+    else {
+      const named = [...children.values()].filter((candidate) => candidate.session === session)
+      for (const candidate of named) {
+        const binding = await loadChild($, candidate).catch(() => undefined)
+        if (binding?.name.trim().toLowerCase() === to.trim().toLowerCase()) { child = candidate; break }
+      }
+    }
+  }
+  if (child) return resumeThread($, child, text, next)
+  if (target) return runThread($, session, sender, target, text)
+}
+
+/**
+ * Message a recorded subagent: one running now gets it in its turn, recorded there; a finished one
+ * resumes with it, after what happened in its thread in Delta since it last ran.
+ */
+async function resumeThread($: Runtime, child: ChildRuntime, text: string,
+    next: (to: string, text: string) => Promise<{ isDelivered: true } | { isDelivered: false; reason: string }>) {
+  const binding = await loadChild($, child)
+  if (binding.execution) {
+    const result = await next(child.agentId, text)
+    // Claude hands a running loop the message as a row this plugin does not record, so it is recorded here.
+    if (result.isDelivered)
+      await childStep($, child, () => recordChildMessage($, child, { role: 'user', content: [{ type: 'text', text }] }, `send:${crypto.randomUUID()}`))
+    return result
+  }
+  let prompt = text
+  if (binding.reference) {
+    try {
+      const read = await readThread($, binding.reference)
+      const refusal = read.running && await takeoverRefusal($, binding.name, read.running)
+      if (refusal) return { isDelivered: false as const, reason: refusal }
+      const since = itemsSince(read.items, await childActor($, child))
+      prompt = resumePrompt(binding.name, historyText(since, binding.reference, HISTORY_BUDGET), text)
+      const last = read.items.at(-1)
+      if (last) await childStep($, child, async () => saveChild($, { ...await loadChild($, child), reportedItem: last.id }))
+    } catch (error) { await reportChild($, child, error) }
+  }
+  child.promptText = text
+  const result = await next(child.agentId, prompt)
+  if (!result.isDelivered) child.promptText = undefined
+  return result
+}
+
+/**
+ * Start a subagent on a thread Claude never ran: it begins from the thread's history and works where
+ * the thread's worktrees are, in this session's checkout when it shares them, else in a mount of its
+ * own. Claude reports nothing of a subagent a plugin starts, so the parent is told its reply here.
+ */
+async function runThread($: Runtime, session: string, sender: string, target: ThreadTarget, text: string) {
+  const read = await readThread($, target.reference)
+  if (await childForThread($, session, read.thread_id))
+    return { isDelivered: false as const, reason: `Claude already runs the Delta thread "${target.name}"; message it by that name.` }
+  const refusal = read.running && await takeoverRefusal($, target.name, read.running)
+  if (refusal) return { isDelivered: false as const, reason: refusal }
+  if (!read.worktrees.length)
+    return { isDelivered: false as const, reason: `The Delta thread "${target.name}" has no worktree for Claude to work in.` }
+  const name = target.name === target.reference
+    ? (await readThreadStatus($, target.reference, session).catch(() => undefined))?.title?.trim() || 'Delta thread'
+    : target.name
+  const root = stateFor(session).binding
+  const rootWorktrees = feed.session === session ? feed.worktrees ?? [] : []
+  const shares = read.worktrees.every((tree) => rootWorktrees.includes(tree))
+  let cwd: string | undefined
+  let directories: string[]
+  let mountOwner: string | undefined
+  if (shares) {
+    cwd = boundDirectory(root)
+    directories = await parentDirectories($, { session, parent: session })
+  } else {
+    mountOwner = `${session}-${read.thread_id.slice(-12)}`
+    const mounted = await mountThread($, { session, thread: read.thread_id, locator: target.reference, owner: mountOwner },
+      { folder: read.worktrees.length > 1 })
+    requireMounted(mounted, read.thread_id)
+    cwd = mounted.directory
+    directories = [mounted.directory]
+  }
+  if (!cwd) return { isDelivered: false as const, reason: 'This session has no checkout for the thread to work in.' }
+  const prompt = adoptionPrompt(name, historyText(read.items.filter((item) => !item.open), target.reference, HISTORY_BUDGET), text)
+  const binding: Omit<ChildBinding, 'agentId'> = {
+    session, parent: sender, name, thread: read.thread_id, reference: target.reference, next: 1, pending: [],
+    sharesParentCheckout: shares, directories, adopted: true, awaited: 'claude',
+    ...mountOwner ? { mountOwner } : {}, ...read.items.length ? { reportedItem: read.items.at(-1)!.id } : {},
+  }
+  adoption = { session, prompt, binding, text }
+  pendingSpawns++
+  try {
+    const spawned = await $.agent.spawn({ prompt, description: name, subagentType: 'general-purpose', cwd })
+    if ('deny' in spawned) return { isDelivered: false as const, reason: String(spawned.deny) }
+    await adoptThread($, spawned.agentId)
+    return { isDelivered: true as const }
+  } finally {
+    adoption = undefined
+    pendingSpawns--
+    if (!pendingSpawns) earlyChildSteps.clear()
+  }
+}
+
+/** Record the subagent a thread's adoption spawned as that thread's, once. */
+async function adoptThread($: Runtime, agentId: string) {
+  const adopting = adoption
+  if (!adopting || children.has(agentId)) return
+  const child = newChild(adopting.session, agentId, adopting.binding.parent, false)
+  child.promptText = adopting.text
+  children.set(agentId, child)
+  // Taken now: the spawn may resolve, and the held steps be cleared, while the binding saves.
+  const held = earlyChildSteps.get(agentId) ?? []
+  earlyChildSteps.delete(agentId)
+  void childStep($, child, async () => {
+    await saveChild($, { ...adopting.binding, agentId })
+    await rememberChild($, adopting.session, agentId)
+  })
+  for (const step of held) void childStep($, child, () => step(child))
+  void deliverChild($, child)
+}
+
+/** Tell the parent the reply of a thread it is waiting on, as Claude tells it a subagent's. */
+async function reportReply($: Runtime, session: string, text: string) {
+  try { await $.prompt.submit({ text }) }
+  catch (error) {
+    // A host that takes no plugin prompt still gets the reply into Claude's context.
+    await $.ui.log(`Couldn't hand Claude a Delta thread's reply: ${String(error)}`, { to: 'debug' })
+    await deliverNote($, session, text)
+  }
+}
+
+/** A thread the plugin started Claude on finished its first run: Claude says nothing of it, so the parent is told. */
+async function reportClaudeRun($: Runtime, child: ChildRuntime) {
+  let awaited = false
+  let name = ''
+  await childStep($, child, async () => {
+    const binding = await loadChild($, child)
+    if (binding.awaited !== 'claude') return
+    awaited = true
+    name = binding.name
+    const { awaited: _, ...rest } = binding
+    await saveChild($, rest)
+  })
+  if (!awaited) return
+  const messages = await $.session.messages({ agentId: child.agentId })
+  const reply = Array.isArray(messages) ? messages.filter((message) => message.role === 'assistant' && message.text.trim()).at(-1)?.text : undefined
+  await reportReply($, child.session, finishedReport(name, reply?.trim()))
+}
+
+/** The last status each thread of the watched conversation reported, to see a turn of it end. */
+const threadStatuses = new Map<string, string>()
+/** The names of the threads the parent was last told it can message. */
+let notedThreads: string | undefined
+
+/**
+ * Follow the conversation's threads: tell the parent which it can message when that changes, and
+ * when a turn Delta's agent ran in a thread this session runs ends, what it said.
+ */
+function observeThreads($: Runtime, session: string) {
+  for (const thread of feed.children) {
+    const before = threadStatuses.get(thread.thread_id)
+    threadStatuses.set(thread.thread_id, thread.status)
+    if (before === 'running' && thread.status !== 'running' && thread.status !== 'queued' && thread.reference)
+      void reportDeltaTurn($, session, thread).catch((error) => report($, error))
+  }
+  const listed = feed.children.filter((thread) => thread.reference).map((thread) => ({ name: thread.name, status: thread.status }))
+  const names = JSON.stringify(listed.map((thread) => thread.name).sort())
+  if (names !== notedThreads && listed.length) {
+    notedThreads = names
+    const note = threadsNote(listed)
+    if (note) void deliverNote($, session, note).catch((error) => report($, error))
+  }
+}
+
+/**
+ * A thread this session runs finished a turn that was not Claude's: tell the parent what Delta said,
+ * starting a turn when it waits on that thread, else as context for its next one.
+ */
+async function reportDeltaTurn($: Runtime, session: string, thread: WatchChild) {
+  const child = await childForThread($, session, thread.thread_id)
+  if (!child) return
+  const binding = await loadChild($, child)
+  if (binding.execution || !binding.reference) return
+  const read = await readThread($, binding.reference)
+  const actor = await childActor($, child)
+  // A turn of Claude's own ending is no news to the parent.
+  const lastTurn = [...read.items].reverse().find((item) => item.turn_id !== null)
+  if (!lastTurn || isOwnItem(lastTurn, actor)) return
+  let since = itemsSince(read.items, actor)
+  const reported = since.findIndex((item) => item.id === binding.reportedItem)
+  if (reported >= 0) since = since.slice(reported + 1)
+  const text = deltaTurnReport(binding.name, since, binding.reference)
+  let awaited = false
+  await childStep($, child, async () => {
+    const current = await loadChild($, child)
+    awaited = current.awaited === 'delta'
+    const { awaited: _, ...rest } = current
+    await saveChild($, { ...rest, ...read.items.length ? { reportedItem: read.items.at(-1)!.id } : {} })
+  })
+  if (!text) return
+  if (awaited) await reportReply($, session, text)
+  else await deliverNote($, session, text)
+}
+
+/**
+ * Create an isolated subagent's thread with a fork of its parent's worktrees and mount it for the
+ * subagent to work in. Returns the checkout's directory, or undefined when the session does not
+ * record yet or the parent has no worktrees to fork, which leaves Claude to make a worktree of its own.
+ */
+async function forkChild($: Runtime, session: string, agentId: string, parent: string, name: string): Promise<string | undefined> {
+  const reference = await parentReference($, session, parent)
+  if (!reference) return
+  const created = await createChildThread($, agentId, reference, name, 'isolated')
+  const mountOwner = `${session}-${agentId.slice(-12)}`
+  const mounted = await mountThread($, { session, thread: created.thread_id, locator: created.reference, owner: mountOwner })
+  if (mounted.thread_id !== created.thread_id) throw new Error('Delta mounted a different thread for the subagent')
+  const binding: ChildBinding = {
+    session, agentId, parent, name, thread: created.thread_id, reference: created.reference, next: 1, pending: [],
+    sharesParentCheckout: false, directories: [mounted.directory], mountOwner,
+  }
+  if (!mounted.worktrees.length) {
+    // Nothing to fork: where it works is decided at its first turn, as for any other subagent.
+    await unmountThread($, created.reference, mountOwner)
+    delete binding.mountOwner
+    delete binding.directories
+    delete binding.sharesParentCheckout
+  }
+  const stored = await $.store.get(childKey(session, agentId)) as ChildBinding | undefined
+  await saveChild($, stored ? { ...stored, ...binding, next: stored.next, pending: stored.pending } : binding)
+  await rememberChild($, session, agentId)
+  return binding.mountOwner ? mounted.directory : undefined
+}
+
+/** How long an isolated subagent's worktree waits for its session's recording to finish starting. */
+const FORK_ACTIVATION_WAIT_MS = 20_000
+
+/** Release the mounts this session made for threads it ran, when it ends. */
+async function releaseThreadMounts($: Runtime, session: string, agentIds: readonly string[]) {
+  for (const agentId of agentIds) {
+    const binding = await loadChild($, { session, agentId }).catch(() => undefined)
+    if (binding?.mountOwner && binding.reference) await unmountThread($, binding.reference, binding.mountOwner)
+  }
+}
+
+/**
+ * Load a session's recorded children after a restart: close turns this process never saw run and
+ * deliver what they queued.
+ */
+async function restoreChildren($: Runtime, session: string, binding: Binding) {
+  for (const agentId of binding.children ?? []) {
+    if (children.has(agentId)) continue
+    let stored: ChildBinding
+    try { stored = await loadChild($, { session, agentId }) }
+    catch (error) { await report($, error); continue }
+    const child = newChild(session, agentId, stored.parent, false)
+    children.set(agentId, child)
+    const execution = stored.execution
+    if (execution) void childStep($, child, () => endChildTurn($, child, execution.turnId, 'cancelled'))
+    // Delivering also detaches a checkout a run that ended without its hook left attached.
+    void deliverChild($, child)
+  }
+}
+
+/**
+ * Record the agents that already ran when this session starts recording. A finished agent's
+ * transcript is recorded now; a running one's when its run ends. Teammates and forks stay unrecorded.
+ */
+async function adoptExistingChildren($: Runtime, session: string) {
+  const recorded = new Set<string>()
+  // Each agent is adopted after the agent that spawned it, whatever order the list has.
+  let waiting = (await existingAgents($)).filter((agent) => agent.teammateId === undefined && agent.type !== 'fork')
+  for (let progress = true; progress;) {
+    progress = false
+    const ready = waiting.filter((agent) => agent.parentId === undefined || recorded.has(agent.parentId))
+    waiting = waiting.filter((agent) => !ready.includes(agent))
+    for (const agent of ready) {
+      progress = true
+      await adoptExistingChild($, session, agent)
+      recorded.add(agent.id)
+    }
+  }
+  // A run that ended between the list and its adoption heard no `turn.complete` here, so its
+  // transcript is read now rather than at an end that already passed.
+  const running = new Set((await $.agent.list()).filter((agent) => agent.status === 'running').map((agent) => agent.id))
+  for (const agentId of recorded) {
+    const child = children.get(agentId)
+    if (!child || running.has(agentId)) continue
+    await childStep($, child, () => endChildTurn($, child, undefined, undefined))
+  }
+}
+
+type ExistingAgent = Awaited<ReturnType<Runtime['agent']['list']>>[number]
+
+/**
+ * The agents this session ran: those Claude lists, and those its main transcript's Agent calls name.
+ * A finished foreground agent is no longer listed, but its call's result still names it.
+ */
+async function existingAgents($: Runtime): Promise<ExistingAgent[]> {
+  const agents = new Map((await $.agent.list()).map((agent) => [agent.id, agent] as const))
+  for (const row of await $.session.messages()) {
+    for (const use of row.toolUses) {
+      if (use.tool !== 'Agent' && use.tool !== 'Task') continue
+      const result = use.result as Record<string, unknown> | undefined
+      const agentId = typeof result?.agentId === 'string' ? result.agentId : undefined
+      if (!agentId || agents.has(agentId) || result?.teammate_id !== undefined) continue
+      const input = use.input
+      agents.set(agentId, {
+        id: agentId, description: typeof input.description === 'string' ? input.description : '',
+        name: typeof input.name === 'string' ? input.name : undefined,
+        type: typeof input.subagent_type === 'string' ? input.subagent_type : 'general-purpose',
+        // An agent Claude no longer lists is no longer running.
+        status: 'completed',
+      } as ExistingAgent)
+    }
+  }
+  return [...agents.values()]
+}
+
+/**
+ * Record an agent that ran before this session recorded. One still running gets a running turn now,
+ * so Delta shows it working and a takeover there stops it; its transcript is recorded when the run
+ * ends. A finished one's transcript is recorded now, with the worktree Claude kept for it attached
+ * and detached again, so its files reach Delta and its thread can be continued there.
+ */
+async function adoptExistingChild($: Runtime, session: string, agent: ExistingAgent) {
+  const parent = agent.parentId ?? session
+  // The turns that would say where it works already started, so its spawn call tells instead.
+  const spawn = await spawnPlacement($, agent)
+  const shares = !spawn.apart
+  let binding: ChildBinding = {
+    session, agentId: agent.id, parent, name: childName({ name: agent.name, description: agent.description }),
+    next: 1, pending: [], sharesParentCheckout: shares,
+    directories: shares ? await parentDirectories($, { session, parent }) : [],
+    ...agent.status === 'running' ? { awaitingSnapshot: true as const } : {},
+    ...agent.status !== 'running' && spawn.worktree ? { checkout: spawn.worktree } : {},
+  }
+  if (binding.awaitingSnapshot) {
+    const sequence = binding.next
+    binding = await stageChildRecord($, binding, { turnSequence: sequence, update: await runningUpdate($) })
+    binding.execution = { sequence }
+    binding.lastTurnSequence = sequence
+  }
+  await saveChild($, binding)
+  await rememberChild($, session, agent.id)
+  const child = newChild(session, agent.id, parent, false)
+  children.set(agent.id, child)
+  if (binding.awaitingSnapshot) void deliverChild($, child)
+  else {
+    await childStep($, child, () => snapshotChild($, child, binding))
+    void deliverChild($, child)
+  }
+}
+
+/**
+ * Where the call that spawned an agent ran it: apart from its parent's checkout, in an isolated
+ * worktree or a directory of its own, and the worktree Claude kept for it once it finished. An agent
+ * whose call is not found shares its parent's.
+ */
+async function spawnPlacement($: Runtime, agent: ExistingAgent): Promise<{ apart: boolean; worktree?: string }> {
+  for (const row of await $.session.messages(agent.parentId ? { agentId: agent.parentId } : {})) {
+    for (const use of row.toolUses) {
+      const result = use.result as Record<string, unknown> | undefined
+      if ((use.tool === 'Agent' || use.tool === 'Task') && result?.agentId === agent.id) {
+        const worktree = typeof result.worktreePath === 'string' && result.worktreePath ? result.worktreePath : undefined
+        return { apart: use.input.isolation === 'worktree' || typeof use.input.cwd === 'string', ...worktree ? { worktree } : {} }
+      }
+    }
+  }
+  return { apart: false }
+}
+
+function newChild(session: string, agentId: string, sender: string, foreground: boolean): ChildRuntime {
+  return {
+    session, agentId, sender, foreground, tools: new ToolRecords(), heldRows: [], queue: Promise.resolve(),
+    retryAttempts: 0,
+  }
+}
+
+/** List a child on its session's binding, which is how a restarted process finds it again. */
+async function rememberChild($: Runtime, session: string, agentId: string) {
+  await serial(async () => {
+    const binding = await load($, session)
+    if (!binding.children?.includes(agentId))
+      await save($, { ...binding, children: [...binding.children ?? [], agentId] })
   })
 }
 
@@ -2214,7 +3389,7 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
         let state = await load($, session)
         await assertShareSession($, request)
         for (const [index, message] of snapshot.entries()) {
-          rememberToolResults(runtime, message)
+          rememberToolResults(runtime.tools, message)
           const updates = messageUpdates(message, `snapshot:${index}`, runtime.tools.structuredResults,
             { root, omitted: runtime.tools.omitted })
           for (const update of updates) state = await stageRecord($, state, { update })
@@ -2223,6 +3398,13 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
         // this succeeds, neither a retry nor a CLI invocation can see a partial import.
         await save($, { ...state, snapshot: true })
       })
+      runtime.binding = await serial(() => load($, session))
+      // The agents that already ran become child threads too. A failure leaves them unrecorded
+      // and never fails the share.
+      if (recordsChildren(session)) {
+        try { await adoptExistingChildren($, session) }
+        catch (error) { await $.ui.log(`Delta could not record this session's earlier subagents: ${String(error)}`, { to: 'transcript' }) }
+      }
     } finally {
       // Nothing is recorded before the snapshot, so these hold only its bulk results.
       runtime.tools.structuredResults.clear()
@@ -2315,6 +3497,7 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   await assertShareSession($, request)
   setProgress($, 'Syncing files…', 'active', [5, 5])
   await drain($, session)
+  for (const child of children.values()) if (child.session === session) void deliverChild($, child)
   if (isPaused(runtime))
     throw new Error('checkout sharing is paused; saved messages remain queued until reattachment succeeds')
   if (runtime.captureFailure || runtime.unsaved.length)
@@ -2986,6 +4169,8 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
     }
     if (ownsActivation() && !runtime.captureFailure && binding.thread && binding.pending.length)
       void drain($, session).catch((error) => report($, error))
+    if (ownsActivation() && binding.children?.length)
+      void restoreChildren($, session, binding).catch((error) => report($, error))
   } finally {
     if (epoch === sessionEpoch) activatingSession = ''
   }
@@ -3418,6 +4603,11 @@ async function pruneStore($: Runtime) {
     const binding = await $.store.get(key(id)) as Binding | undefined
     if (typeof binding?.endedAt !== 'number' || binding.endedAt > now - STORE_HORIZON_MS ||
         binding.pending?.length || binding.captureFailure || binding.joinTransition) continue
+    // A subagent's undelivered records keep its session, like the session's own.
+    const recorded = await Promise.all((binding.children ?? []).map((agentId) =>
+      $.store.get(childKey(id, agentId)) as Promise<ChildBinding | undefined>))
+    if (recorded.some((child) => child?.pending.length)) continue
+    for (const agentId of binding.children ?? []) await $.store.delete(childKey(id, agentId))
     await $.store.delete(key(id))
     await $.store.delete(ledgerKey(id))
   }
@@ -3425,7 +4615,12 @@ async function pruneStore($: Runtime) {
 
 /** Begin the same publication flow `/delta share` runs, for the band's share control. */
 function beginShare($: Runtime, session: string): boolean {
-  if (sharing || stateFor(session).currentTurnId) return false
+  if (sharing) return false
+  if (stateFor(session).currentTurnId) {
+    shareAfterTurn = session
+    $.ui.invalidate('ui.render')
+    return true
+  }
   const request: ShareRequest = { session, cwd: '' }
   sharing = request
   setProgress($, 'Preparing to share…', 'active', [1, 5])
@@ -3690,11 +4885,116 @@ export function register(on: On) {
     return result
   }).catch(() => ({ drop: 'Delta could not safely prepare this shared turn. Retry after the watcher is ready.' }))
 
+  // A spawn names its agent only once it resolves, and the agent's first hooks may run before that,
+  // so they are held until the spawn says whether the agent is recorded.
+  on('agent.spawn', async ($, e, next) => {
+    // The plugin's own spawn for a thread Claude runs: the subagent is that thread's, not a new one's.
+    if (adoption && e.resume === undefined && e.prompt === adoption.prompt) {
+      const result = await next(e)
+      if (!('deny' in result) && result.agentId) await adoptThread($, result.agentId)
+      return result
+    }
+    const session = await $.session.id()
+    const resumed = e.resume?.agentId
+    const records = (resumed !== undefined && children.has(resumed)) ||
+      (recordsChildren(session) && recordsSubagent(e) &&
+        (e.parentAgentId === undefined || children.has(e.parentAgentId)))
+    if (!records) {
+      const result = await next(e)
+      const agentId = 'deny' in result ? undefined : result.agentId ?? resumed
+      if (agentId && !children.has(agentId)) {
+        unrecordedAgents.add(agentId)
+        earlyChildSteps.delete(agentId)
+      }
+      return result
+    }
+    // The spawn stays pending until its child is registered: the agent's prompt can arrive between
+    // the spawn resolving and this hook getting to run again.
+    pendingSpawns++
+    const spawn = { parent: e.parentAgentId ?? session, name: childName(e) }
+    spawning.push(spawn)
+    let result: Awaited<ReturnType<typeof next>>
+    try {
+      result = await next(e)
+      const agentId = 'deny' in result ? undefined : result.agentId ?? resumed
+      if (agentId) {
+        try {
+          await adoptChild($, session, agentId, {
+            parent: e.parentAgentId ?? session, name: childName(e), foreground: !e.background,
+            resumed: resumed !== undefined,
+          })
+          // Claude hands a resumed run its message as a row this plugin does not record, so the
+          // message is recorded here, as it was sent rather than with the history it came with.
+          const child = children.get(agentId)
+          if (resumed !== undefined && child) {
+            const text = child.promptText ?? e.prompt
+            child.promptText = undefined
+            await onChild($, agentId, (child) =>
+              recordChildMessage($, child, { role: 'user', content: [{ type: 'text', text }] }, `resume:${crypto.randomUUID()}`))
+          }
+        } catch (error) { await $.ui.log(`Delta could not record the subagent ${agentId}: ${String(error)}`, { to: 'debug' }) }
+      }
+    } finally {
+      pendingSpawns--
+      spawning.splice(spawning.indexOf(spawn), 1)
+      // What an agent no spawn named did is not recorded.
+      if (!pendingSpawns) earlyChildSteps.clear()
+    }
+    return result
+  })
+
+  on('classic.WorktreeCreate', async ($, e, next) => {
+    // Claude names a subagent's isolated worktree after the agent. A recorded subagent works in a
+    // fork of its parent's worktrees in Delta instead, so its work merges back there.
+    const agentId = /^agent-(.+)$/.exec(e.name)?.[1]
+    const session = await $.session.id()
+    // The hook runs in the spawning loop: a subagent's names it, the main loop's names none.
+    const parent = (e as { agent_id?: string }).agent_id ?? session
+    const spawn = spawning.find((entry) => entry.parent === parent)
+    if (agentId && spawn && recordsChildren(session)) {
+      try {
+        // A session whose recording is starting forks once its thread exists, if that is soon.
+        const activating = autoActivating.get(session)
+        if (activating) {
+          const expiry = new AbortController()
+          await Promise.race([activating.catch(() => undefined),
+            $.clock.sleep(FORK_ACTIVATION_WAIT_MS, { signal: expiry.signal }).catch(() => undefined)])
+          expiry.abort()
+        }
+        const directory = await forkChild($, session, agentId, parent, spawn.name)
+        if (directory) return { worktreePath: directory }
+      } catch (error) {
+        await $.ui.log(`Delta could not fork the worktrees of the subagent ${agentId}; Claude makes its own: ${String(error)}`, { to: 'debug' })
+      }
+    }
+    return next(e)
+  })
+
+  on('classic.WorktreeRemove', async ($, e, next) => {
+    const session = await $.session.id()
+    for (const child of children.values()) {
+      if (child.session !== session) continue
+      const binding = await loadChild($, child).catch(() => undefined)
+      if (!binding?.mountOwner || !binding.reference || !binding.directories?.some((directory) => samePath(directory, e.worktree_path))) continue
+      // Delta deletes its checkout once its changes are uploaded; the fork stays in the thread.
+      await unmountThread($, binding.reference, binding.mountOwner)
+      return {}
+    }
+    return next(e)
+  })
+
   on('turn.start', async ($, e, next) => {
     // Claude 2.1.299+ raises turn.start inside a child agent's or teammate's own loop, with
     // `agentId` set. That loop is not the shared conversation: only the main loop's turns may
-    // bind `currentTurnId` or open an execution.
-    if (e.agentId !== undefined) return next(e)
+    // bind `currentTurnId` or open an execution. A recorded subagent's turn is its own thread's.
+    if (e.agentId !== undefined) {
+      if (mayRecordChild(e.agentId)) {
+        // The child's own hook is the only place its working directory can be read.
+        const cwd = await $.session.cwd()
+        await onChild($, e.agentId, (child) => beginChildTurn($, child, e.turnId, cwd))
+      }
+      return next(e)
+    }
     const session = await $.session.id()
     await captureDecided(session)
     const runtime = stateFor(session)
@@ -3723,7 +5023,20 @@ export function register(on: On) {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
+    if (e.agentId !== undefined) {
+      const result = await next(e)
+      if (mayRecordChild(e.agentId)) {
+        // A run found going when recording started attaches its own checkout now, read from its hook.
+        const cwd = await $.session.cwd()
+        await onChild($, e.agentId, (child) => endChildTurn($, child, e.turnId, stopReasonOf(e), cwd))
+        const child = children.get(e.agentId)
+        if (child) {
+          await finishChildRun($, child)
+          await reportClaudeRun($, child)
+        }
+      }
+      return result
+    }
     const session = await $.session.id()
     const runtime = stateFor(session)
     const sequence = runtime.nativeTurns.get(e.turnId) ??
@@ -3735,11 +5048,7 @@ export function register(on: On) {
     const result = await next(e)
     if (sequence !== undefined) runtime.tools.forgetUnpaired(sequence)
     if (sequence !== undefined) {
-      const stopReason = e.isAborted || e.reason === 'aborted' ? 'cancelled'
-        : e.reason === 'answer' ? 'end_turn'
-        : e.reason === 'refusal' ? 'refusal'
-        : e.reason === 'error' ? 'error' : undefined
-      try { await endExecution($, session, sequence, () => true, 'bounded', stopReason) }
+      try { await endExecution($, session, sequence, () => true, 'bounded', stopReasonOf(e)) }
       catch (error) { await report($, error) }
     }
     // Release the remote rows held back while this turn ran now that its finish is staged: delivered
@@ -3750,6 +5059,10 @@ export function register(on: On) {
     if (runtime.currentTurnId === undefined) {
       void settleRemote($, session)?.catch((error) => report($, error))
       scheduleMove($, session)
+      if (shareAfterTurn === session) {
+        shareAfterTurn = undefined
+        beginShare($, session)
+      }
     }
     return result
   })
@@ -3909,6 +5222,14 @@ export function register(on: On) {
       sharing.cancelled = true
       sharing = undefined
     }
+    if (shareAfterTurn === e.sessionId) shareAfterTurn = undefined
+    // The session's subagents end with it. Their saved state stays, so the next activation closes
+    // a turn left open and delivers what they queued.
+    for (const [agentId, child] of children) {
+      if (child.session !== e.sessionId) continue
+      child.retryTimer?.cancel()
+      children.delete(agentId)
+    }
     if (joining && e.sessionId === (joining.fresh ?? joining.session) &&
         !(joining.clearing && e.reason === 'clear' && e.sessionId === joining.session)) {
       joining.cancelled = true
@@ -3954,7 +5275,11 @@ export function register(on: On) {
     } catch { /* a session that cannot record its end is simply never pruned */ }
     // Exiting ends the session's use of its checkouts. A clear is the join's own transition and a
     // resume only switches sessions, so neither releases them.
-    if (releasesMounts(e.reason)) await releaseMounts($, e.sessionId)
+    if (releasesMounts(e.reason)) {
+      await releaseMounts($, e.sessionId)
+      const ended = await $.store.get(key(e.sessionId)).catch(() => undefined) as Binding | undefined
+      await releaseThreadMounts($, e.sessionId, ended?.children ?? [])
+    }
     // An offered hand-off nobody opened goes with the tab that offered it.
     const offered = runtime.offered
     runtime.offered = undefined
@@ -4042,7 +5367,23 @@ export function register(on: On) {
     : { text: 'Usage: /delta-org list (your organizations), /delta-org current (the selected one), /delta-org switch <ID>, or /delta-org invite <email>… (invite people to the selected one).' })
 
   on('session.append', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
+    if (e.agentId !== undefined) {
+      const agentId = e.agentId
+      const stored = await next(e)
+      if ('deny' in stored || !mayRecordChild(agentId)) return stored
+      const message = capturedMessage(stored.message, e.door)
+      if (message) await onChild($, agentId, (child) => {
+        // A run the plugin started on a thread is recorded as prompted with the message alone, not
+        // the thread history it was handed with it. The prompt may arrive before the run is bound.
+        if (child.promptText !== undefined && e.door === 'prompt' && message.content.some((block) => block.type === 'text')) {
+          const text = child.promptText
+          child.promptText = undefined
+          return recordChildMessage($, child, { role: 'user', content: [{ type: 'text', text }] }, stored.uuid)
+        }
+        return recordChildMessage($, child, message, stored.uuid)
+      })
+      return stored
+    }
     // The plugin's own `show` run is stored rewritten, so neither the model nor a resumed session's
     // copy of these rows names the internal command or its item id.
     const shown = shownCommandRewrite($.plugin.name, e)
@@ -4067,7 +5408,7 @@ export function register(on: On) {
       if (!('deny' in stored) && runtime.binding?.snapshot) {
         const message = capturedMessage(stored.message, e.door)
         if (message) {
-          rememberToolResults(runtime, message)
+          rememberToolResults(runtime.tools, message)
           const updates = messageUpdates(message, stored.uuid, runtime.tools.structuredResults,
             { root: boundDirectory(runtime.binding), omitted: runtime.tools.omitted }).map(liveActivity)
           // Output from the turn Claude is running waits for that turn's scoped start record, so
@@ -4104,8 +5445,29 @@ export function register(on: On) {
     }
   })
 
+  on('session.send', async ($, e, next) => {
+    const session = await $.session.id()
+    if (typeof e.to !== 'string' || !recordsChildren(session)) return next(e)
+    const sender = e.agentId !== undefined && children.has(e.agentId) ? e.agentId : session
+    try {
+      const sent = await sendToThread($, session, sender, e.to, e.text, (to, text) => next({ ...e, to, text }))
+      return sent ?? await next(e)
+    } catch (error) {
+      return { isDelivered: false, reason: `Delta could not run that thread here: ${String(error)}` }
+    }
+  })
+
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined || (ownQuestions && e.tool === 'AskUserQuestion')) return next(e)
+    if (e.agentId !== undefined) {
+      const agentId = e.agentId
+      const result = await next(e)
+      const id = e.tool_use_id
+      if (id && mayRecordChild(agentId) && 'result' in result && result.result !== undefined)
+        await onChild($, agentId, (child) =>
+          recordChildToolResult($, child, { tool: e.tool, tool_use_id: id, input: e }, result.result, !!result.isError))
+      return result
+    }
+    if (ownQuestions && e.tool === 'AskUserQuestion') return next(e)
     const session = await $.session.id()
     const runtime = stateFor(session)
     if (runtime.localTurn) return next(e)

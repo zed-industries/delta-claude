@@ -91,6 +91,9 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
     project = root / "old-project"
     project.mkdir()
+    # A configured policy keeps the onboarding question from taking the join's keystrokes.
+    (project / ".delta").mkdir()
+    (project / ".delta/settings.json").write_text('{"threads":{"mode":"manual"}}\n')
     (project / "precious.txt").write_text("old checkout stays intact\n")
     subprocess.run(["git", "init", str(project)], check=True, capture_output=True)
     config = root / "config"
@@ -109,13 +112,15 @@ def main():
     # No model calls are needed; an inherited key prompts for approval in a
     # fresh config and would consume the keystrokes intended for /delta join.
     env.pop("ANTHROPIC_API_KEY", None)
+    # Run from inside Claude Code, the probe would inherit the marker that turns transcript saving off.
+    env.pop("CLAUDE_CODE_CHILD_SESSION", None)
     print(f"Join evidence: {root}", flush=True)
     transition.interactive([
         "claude", "--plugin-dir", str(plugin), "--plugin-dir", str(bootstrap),
         "--tools", "AskUserQuestion", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
         "--setting-sources", "", "--debug-file", str(root / "debug.log"),
     ], project, env, "/delta join " + args.thread, root / "result.json",
-        timeout=45, confirmation=root / "confirmation.json", ready=root / "before.json")
+        timeout=90, confirmation=root / "confirmation.json", ready=root / "before.json")
     before = json.loads((root / "before.json").read_text())
     result = json.loads((root / "result.json").read_text())
     print(json.dumps(result, indent=2))
@@ -129,7 +134,8 @@ def main():
     assert not (root / "unexpected-turn.json").exists(), "Joining started a turn"
     assert not (root / "unexpected-export.json").exists(), "Joining exported conversation history"
     commands = [json.loads(path.read_text()) for path in (root / "commands").glob("*.json")]
-    delta = [argv for argv in commands if argv[0] == "delta"]
+    # The plugin runs the CLI by the path it resolved.
+    delta = [argv for argv in commands if Path(argv[0]).name == "delta"]
     assert not any(argv[3] in {"attach", "create", "share", "append"} for argv in delta), delta
     assert sum(argv[3] == "mount" for argv in delta) == 1, delta
     assert any(argv[3] == "watch" and argv[4] == args.thread for argv in delta), delta

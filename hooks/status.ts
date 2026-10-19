@@ -128,7 +128,7 @@ export function statusSpinnerRunning(state: Pick<StatusState, 'progress' | 'conn
 
 const CHILD_PRIORITY: Record<string, number> = {
   failed: 0, running: 1, waiting_for_synchronization: 2, queued: 3, preparing: 4,
-  unknown: 5, completed: 6, stopped: 7, inactive: 8,
+  unknown: 5, completed: 6, stopped: 7,
 }
 
 function childState(status: string, stale: boolean): string {
@@ -297,8 +297,10 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
   // A working agent takes a line of its own when the rows hold it after a failure's reason;
   // otherwise it takes its owner's place on the band's row.
   const activityLine = !!owner && (layout.rows ?? Infinity) >= 2 + (detail ? 1 : 0)
-  const childLine = !!state.children?.some((child) =>
-    state.childrenStale || !['completed', 'stopped', 'inactive'].includes(child.status)) &&
+  // An inactive child is not activity, so the band leaves it out entirely.
+  const children = (state.children ?? []).filter((child) => child.status !== 'inactive')
+  const childLine = children.some((child) =>
+    state.childrenStale || !['completed', 'stopped'].includes(child.status)) &&
     (layout.rows ?? Infinity) >= 2 + (detail ? 1 : 0) + (activityLine ? 1 : 0)
   // The URL's own row, wrapped as the terminal wraps it, fits only within the rows the others leave.
   const linkRows = linkText ? Math.ceil((2 + textWidth(linkText)) / Math.max(1, layout.columns - BAR_PADDING)) : 0
@@ -344,10 +346,10 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     const working = activityLine ? [] : agent(!!give.initials)
     const people = give.alone ? [] : roster(!!give.initials)
     const below = give.linkBelow && roomBelow
-    const inlineLink = give.noLink && !below && (layout.terminal || !!state.children?.length) ? undefined : linkText
+    const inlineLink = give.noLink && !below && (layout.terminal || !!children.length) ? undefined : linkText
     const linkRoom = inlineLink && !below ? 2 + textWidth(inlineLink) : 0
     const copyRoom = href ? 2 + textWidth(give.shortCopy ? 'copy' : 'copy link') : 0
-    const child = childLine ? [] : childStatus(state.children ?? [], !!state.childrenStale, frame,
+    const child = childLine ? [] : childStatus(children, !!state.childrenStale, frame,
       Math.max(0, layout.columns - (layout.terminal ? BAR_PADDING : 0) - 7 - linkRoom - copyRoom -
         MIN_GAP - width(working) - (working.length ? 3 : 0)))
     const parts = [working, child, people].filter((part) => part.length)
@@ -355,7 +357,7 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
   }
   const view = (give: GiveWay): BandView => {
     const below = give.linkBelow && roomBelow
-    const text = give.noLink && !below && (layout.terminal || !!state.children?.length) ? undefined : linkText
+    const text = give.noLink && !below && (layout.terminal || !!children.length) ? undefined : linkText
     const copy = href ? { copy: { label: give.shortCopy ? 'copy' : 'copy link', ...state.copied ? { copied: true as const } : {} } } : {}
     return {
       tone, mark, label, right: right(give),
@@ -364,7 +366,7 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
       ...state.conflict ? { conflict: state.conflict } : {},
       ...state.share && !give.noShare ? { share: state.share } : {},
       ...activityLine ? { activity: agent(false, true) } : {},
-      ...childLine ? { childActivity: childStatus(state.children ?? [], !!state.childrenStale, frame,
+      ...childLine ? { childActivity: childStatus(children, !!state.childrenStale, frame,
         Math.max(10, layout.columns - (layout.terminal ? BAR_PADDING : 0))) } : {},
       ...linkText ? { link: { ...text ? { text } : {}, ...href ? { href } : {}, ...below ? { ownRow: true as const } : {}, ...copy } } : {},
     }

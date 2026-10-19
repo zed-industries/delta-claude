@@ -38,76 +38,110 @@ export function register(on) {
 """
 
 
-def interactive(arguments, cwd, env, command, done, timeout=45, confirmation=None, ready=None):
+def plain(screen):
+    """The screen's text without terminal escapes or whitespace, for matching prompts."""
+    text = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", screen)
+    return re.sub(rb"\s+", b"", text).decode(errors="replace")
+
+
+def interactive(arguments, cwd, env, command, done, timeout=45, confirmation=None, ready=None, stall=20):
+    """Run `command` in interactive Claude until `done` exists, answering its prompts as they appear.
+
+    Each prompt is answered when it shows, in whatever order: the first folder trust prompt, the
+    optional `confirmation` (a file the probe writes when a question is asked), and /cd's "move here".
+    The run fails fast, with the screen, when output stops changing for `stall` seconds or a prompt
+    nothing answers appears, rather than waiting out `timeout`.
+    """
     pid, terminal = pty.fork()
     if pid == 0:
         os.chdir(cwd)
         os.execvpe(arguments[0], arguments, env)
     os.set_blocking(terminal, False)
     screen = b""
+    started = time.monotonic()
+    changed = started
+
+    def log(text):
+        print(f"[{time.monotonic() - started:5.1f}s] {text}", flush=True)
+
+    def fail(reason):
+        tail = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", screen.decode(errors="replace"))[-3000:]
+        raise AssertionError(f"{reason}\n--- screen ---\n{tail}")
 
     def read(seconds, until=lambda: False):
-        nonlocal screen
+        nonlocal screen, changed
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline and not until():
             if select.select([terminal], [], [], 0.1)[0]:
                 try:
-                    screen += os.read(terminal, 65536)
+                    chunk = os.read(terminal, 65536)
                 except BlockingIOError:
                     continue
                 except OSError:
-                    return
+                    fail("Claude exited")
+                if chunk:
+                    screen += chunk
+                    changed = time.monotonic()
+
+    def press(keys, why):
+        log(why)
+        for key in keys:
+            os.write(terminal, key)
+            read(0.5)
 
     try:
-        trust = lambda: b"trust" in screen and b"folder" in screen
-        read(6, trust)
-        if trust():
-            read(2)
-            os.write(terminal, b"\x1b[B")
+        read(6, lambda: "trust" in plain(screen) and "folder" in plain(screen))
+        if "trust" in plain(screen) and "folder" in plain(screen):
             read(1)
-            os.write(terminal, b"\r")
-        read(6)
+            press([b"\x1b[B", b"\r"], "trusting the starting folder")
         if ready is not None:
             read(20, ready.exists)
-            read(3)
+            if not ready.exists():
+                fail(f"{ready.name} never appeared: the probe plugin's session.start did not run")
+        read(2)
+        log(f"sending {command!r}")
         os.write(terminal, command.encode())
         read(1)
         os.write(terminal, b"\r")
-        if confirmation is not None:
-            read(15, lambda: confirmation.exists() or done.exists())
-            if confirmation.exists():
-                read(2)
-                os.write(terminal, b"\r")
-                # /cd asks separately before trusting the freshly mounted folder.
-                # A blind second Enter chooses "No, stay put".
-                def move_prompt():
-                    plain = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", screen)
-                    return b"Yes,movehere" in re.sub(rb"\s+", b"", plain)
-
-                read(timeout, lambda: move_prompt() or done.exists())
-                if move_prompt() and not done.exists():
-                    os.write(terminal, b"\x1b[B")
-                    read(1)
-                    os.write(terminal, b"\r")
-        read(timeout, done.exists)
-        if not done.exists():
-            raise AssertionError("Transition did not finish:\n" + screen.decode(errors="replace")[-4000:])
+        answered_confirmation = False
+        # Each /cd asks again, so a "move here" prompt counts only in output after the last answer.
+        moved_at = len(screen)
+        deadline = started + timeout
+        while not done.exists():
+            read(0.5, done.exists)
+            now = time.monotonic()
+            recent = plain(screen[moved_at:])
+            if confirmation is not None and not answered_confirmation and confirmation.exists():
+                answered_confirmation = True
+                read(1)
+                press([b"\r"], f"answering the question in {confirmation.name}")
+            elif "Yes,movehere" in recent:
+                moved_at = len(screen)
+                press([b"\x1b[B", b"\r"], 'choosing "Yes, move here"')
+            elif "recordingsettoManual?" in recent:
+                fail("The plugin asked to configure recording; the probe project needs a .delta/settings.json")
+            elif now - changed > stall:
+                fail(f"No progress for {stall}s and {done.name} was not written")
+            elif now > deadline:
+                fail(f"{done.name} was not written within {timeout}s")
+        log(f"{done.name} written")
         read(1)
         os.write(terminal, b"/exit\r")
         read(5)
     finally:
         Path(done).with_suffix(".screen.txt").write_bytes(screen)
-        try:
-            os.kill(pid, signal.SIGTERM)
+        # Claude's own children, such as Delta watchers, share its process group.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                break
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline and os.waitpid(pid, os.WNOHANG) == (0, 0):
                 time.sleep(0.05)
-            try:
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-            except (ProcessLookupError, ChildProcessError):
-                pass
-        except (ProcessLookupError, ChildProcessError):
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
             pass
         os.close(terminal)
     return screen
