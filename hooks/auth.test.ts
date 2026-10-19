@@ -1,9 +1,152 @@
 import { expect, test as kitTest, tier } from 'claude-code/testing'
-import { fakeThreads, sessionStart, sessionEnd, shareCommand, testsWithHeldClockWait } from './fake-thread-commands'
+import type { Engine } from 'claude-code'
+import {
+  CHECKOUT, abovePrompt, fakeThreads, prompt, sessionStart, sessionEnd, shareCommand, testsWithHeldClockWait, turnComplete, turnStart,
+} from './fake-thread-commands'
 import { authLoginCommand } from './auth'
 
 tier('user')
 const test = testsWithHeldClockWait(kitTest)
+
+/** Start a fresh session under a repository's automatic private-sync policy. */
+async function startAutomatic($: Engine, fake: ReturnType<typeof fakeThreads>) {
+  fake.files.set(`${CHECKOUT}/.delta/settings.json`, JSON.stringify({ threads: { mode: 'private', organization: 'org-1' } }))
+  await $.session.start(sessionStart)
+  await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: CHECKOUT, transcript_path: '' } as never)
+  await fake.clock.settle()
+  await fake.clock.advance(0)
+  await fake.clock.settle()
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`automatic sync in ${surface} signs in without blocking work, then uploads the same session`, async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.surfaces = [surface]
+    fake.failOrgList = true
+    fake.authReplies = loginReplies()
+    let finish!: () => void
+    fake.holdAuth = new Promise<void>((resolve) => { finish = resolve })
+    await startAutomatic($, fake)
+    expect(fake.authCalls.map((argv) => argv.slice(2))).toEqual([
+      ['auth', 'status'], ['auth', 'login', '--no-wait'], ['auth', 'wait', 'attempt'],
+    ])
+    expect(fake.authCalls.every((argv) => argv[0] === '/selected/delta')).toBe(true)
+    expect(fake.logs.join('\n')).toContain('https://example.com/login')
+    expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain('Waiting for Delta sign-in')
+    expect(fake.server.thread).toBeUndefined()
+
+    // Neither the prompt nor its live rows wait on the browser, and no command uploads them yet.
+    expect((await $.prompt.submit(prompt('while signing in'))).drop).toBeUndefined()
+    await $.session.append({
+      door: 'prompt', origin: { kind: 'composer' }, uuid: 'during-login',
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'while signing in' }] },
+    } as never)
+    await $.turn.start(turnStart('native-login', 'while signing in'))
+    await $.turn.complete(turnComplete('native-login'))
+    await fake.clock.settle()
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({
+      snapshot: true, autoUpload: { mode: 'private', organization: 'org-1' }, pending: expect.anything(),
+    })
+    expect(fake.records()).toEqual([])
+    // Prompts during login do not start extra login attempts.
+    expect(fake.authCalls).toHaveLength(3)
+
+    fake.failOrgList = false
+    finish()
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(fake.server.thread).toBe(fake.threadId)
+    expect(fake.server.upload).toEqual({ organization: 'org-1', visibility: 'private' })
+    expect(fake.updates().some((record) => JSON.stringify(record.update).includes('while signing in'))).toBe(true)
+    expect(fake.finishes()).toEqual(fake.starts())
+    expect(fake.exports).toBe(0)
+    expect(fake.operations()).not.toContain('share')
+    fake.expectClean()
+  })
+}
+
+test('headless automatic sync stays noninteractive when signed out', async ($, on) => {
+  const fake = fakeThreads(on)
+  fake.surfaces = []
+  fake.failOrgList = true
+  await startAutomatic($, fake)
+  expect(fake.authCalls).toEqual([])
+  expect(fake.server.thread).toBeUndefined()
+  expect(fake.store.get(`session:${fake.session}`)).toBeUndefined()
+  expect(fake.logs.join('\n')).toContain('delta auth login')
+  fake.expectClean()
+})
+
+test('automatic sync rechecks organization membership after browser sign-in', async ($, on) => {
+  const fake = fakeThreads(on)
+  fake.failOrgList = true
+  fake.authReplies = loginReplies()
+  let finish!: () => void
+  fake.holdAuth = new Promise<void>((resolve) => { finish = resolve })
+  await startAutomatic($, fake)
+  fake.failOrgList = false
+  fake.organizations = [{ id: 'another-org', name: 'Another team', current: true }]
+  finish()
+  await fake.clock.settle()
+  expect(fake.server.thread).toBeUndefined()
+  expect(fake.store.get(`session:${fake.session}`)).toBeUndefined()
+  expect(fake.logs.join('\n')).toContain("isn't a member of")
+  fake.expectClean()
+})
+
+for (const status of ['cancelled', 'expired', 'access_denied'] as const) {
+  test(`automatic sign-in ending with ${status} stops recording and does not reopen the browser on prompts`, async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.failOrgList = true
+    fake.authReplies = [...loginReplies().slice(0, 2), { status }]
+    let finish!: () => void
+    fake.holdAuth = new Promise<void>((resolve) => { finish = resolve })
+    await startAutomatic($, fake)
+    await $.session.append({
+      door: 'prompt', origin: { kind: 'composer' }, uuid: 'before-login-failed',
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'before login failed' }] },
+    } as never)
+    await $.turn.start(turnStart('native-login-failed', 'before login failed'))
+    await $.turn.complete(turnComplete('native-login-failed'))
+    await fake.clock.settle()
+    expect([...fake.files.keys()].some((path) => path.includes('/outbox/'))).toBe(true)
+    finish()
+    await fake.clock.settle()
+    expect(fake.server.thread).toBeUndefined()
+    expect(fake.store.get(`session:${fake.session}`)).toBeUndefined()
+    expect([...fake.files.keys()].some((path) => path.includes('/outbox/'))).toBe(false)
+    expect(fake.logs.join('\n')).toContain("This session isn't syncing. Run /delta-share to retry.")
+    const calls = fake.authCalls.length
+    expect((await $.prompt.submit(prompt('after sign-in stopped'))).drop).toBeUndefined()
+    await fake.clock.settle()
+    expect(fake.authCalls).toHaveLength(calls)
+    expect(fake.authCalls.some((argv) => ['cancel', 'logout'].includes(argv[3]!))).toBe(false)
+
+    // Explicit recovery still exports the conversation from Claude, not the removed automatic outbox.
+    fake.failOrgList = false
+    fake.authReplies = loginReplies()
+    const recovered = await fake.share($)
+    expect(recovered).toContain(`https://delta.dev/join/${fake.shareId}`)
+    expect(fake.exports).toBe(1)
+    expect(fake.server.thread).toBe(fake.threadId)
+    fake.expectClean()
+  })
+}
+
+test('ending an automatically syncing session closes its login waiter without cancelling the shared attempt', async ($, on) => {
+  const fake = fakeThreads(on)
+  fake.failOrgList = true
+  fake.authReplies = loginReplies()
+  fake.holdAuth = new Promise(() => {})
+  await startAutomatic($, fake)
+  expect(fake.authCalls.at(-1)?.[3]).toBe('wait')
+  await $.session.end(sessionEnd(fake.session))
+  await fake.clock.advance(250)
+  expect(fake.authWaitClosed).toBe(true)
+  expect(fake.server.thread).toBeUndefined()
+  expect(fake.authCalls.map((argv) => argv[3])).toEqual(['status', 'login', 'wait'])
+})
 
 test('share signs in an existing installation before exporting, then continues on the selected CLI', async ($, on) => {
   const fake = fakeThreads(on, { messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] })

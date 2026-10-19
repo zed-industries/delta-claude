@@ -32,6 +32,10 @@ Run `/delta-setup` in a repository to choose its team and which sessions sync:
 Setup can create a team and invite teammates by email. It saves your choice to
 `.delta/settings.json` and keeps that file out of Git, since the choice is yours.
 
+If automatic sync needs you to sign in, an interactive session opens your browser.
+You can keep working while you finish sign-in; that same session then syncs,
+including messages recorded while it waited. Headless sessions never open a browser.
+
 ### Sharing
 
 `/delta-share` asks who should see the session: your team, just you, or people

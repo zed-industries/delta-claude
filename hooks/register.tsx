@@ -4447,7 +4447,9 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
       if (!ownsActivation()) return
       const refusal = await misconfiguration
       if (!ownsActivation()) return
-      if (refusal) {
+      const interactive = hasInteractiveSurface(await $.session.surfaces())
+      if (!ownsActivation()) return
+      if (refusal && !(refusal === SIGNED_OUT_REFUSAL && interactive)) {
         await stopAutomaticRecording($, session, root, refusal)
         return
       }
@@ -4463,6 +4465,38 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
       if (!ownsActivation()) return
       // The snapshot exists now, so new-session activity may pass; the network steps stay asynchronous.
       decideCapture(session)
+      if (interactive) {
+        // Authentication may wait on the browser for minutes. Capture locally first, so the person
+        // can keep working and this same session uploads everything once sign-in finishes.
+        const check = async () => {
+          if (!ownsActivation()) throw new Error('Delta automatic sign-in stopped')
+        }
+        try {
+          await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
+            await check()
+            setProgress($, 'Waiting for Delta sign-in…', 'active')
+            await $.ui.log(text, { to: 'transcript' })
+          })
+        } catch (error) {
+          if (!ownsActivation()) return
+          // A cancelled or failed login needs an explicit retry, never another browser on each prompt.
+          await stopAutomaticRecording($, session, root, {
+            band: 'Not syncing: Delta sign-in incomplete · /delta-share',
+            transcript: `${error instanceof Error ? error.message : String(error)}\nThis session isn't syncing. Run /delta-share to retry.`,
+          })
+          return
+        }
+        if (!ownsActivation()) return
+        if (refusal === SIGNED_OUT_REFUSAL) {
+          // Only the signed-in account can answer which organizations it belongs to.
+          const afterSignIn = await policyMisconfiguration($, upload.organization)
+          if (!ownsActivation()) return
+          if (afterSignIn) {
+            await stopAutomaticRecording($, session, root, afterSignIn)
+            return
+          }
+        }
+      }
       setProgress($, 'Connecting this session to Delta…', 'active')
       const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session,
         '--organization', upload.organization, '--visibility', upload.mode], 'thread create')
