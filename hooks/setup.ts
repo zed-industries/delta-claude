@@ -112,6 +112,16 @@ export function inviteResultsFrom(result: any): InviteResult[] {
     : { email: entry.email, invited: false, message: String(entry.message ?? entry.reason ?? 'failed') })
 }
 
+/** Say which addresses were invited to `target` and which were not, and why. */
+export function invitationSummary(results: readonly InviteResult[], target: string): string {
+  const invited = results.filter((result) => result.invited).map((result) => result.email)
+  const failed = results.flatMap((result) => result.invited ? [] : [`${result.email} (${result.message})`])
+  return [
+    invited.length ? `Invited ${invited.join(', ')} to ${target}.` : '',
+    failed.length ? `Couldn't invite ${failed.join(', ')}.` : '',
+  ].filter(Boolean).join(' ')
+}
+
 /** Delta's web dashboard, where an organization's members are managed in bulk. */
 export const DASHBOARD_URL = 'https://dashboard.zed.dev'
 
@@ -386,13 +396,7 @@ async function offerInvites(env: SetupEnv, interaction: Interaction, organizatio
     await interaction.log(`Couldn't send the invitations: ${String(error)}. Use /delta-org invite <email> to try again.`, 'transcript')
     return
   }
-  const invited = results.filter((result) => result.invited).map((result) => result.email)
-  const failed = results.flatMap((result) => result.invited ? [] : [`${result.email} (${result.message})`])
-  await interaction.log([
-    invited.length ? `Invited ${invited.join(', ')} to ${organization.name}.` : '',
-    failed.length ? `Couldn't invite ${failed.join(', ')}.` : '',
-    `Manage members: ${membersUrl(organization.id)}`,
-  ].filter(Boolean).join(' '), 'transcript')
+  await interaction.log(`${invitationSummary(results, organization.name)} Manage members: ${membersUrl(organization.id)}`, 'transcript')
 }
 
 /** How an onboarding attempt ended, mostly for tests and the debug log. */

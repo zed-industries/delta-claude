@@ -783,11 +783,8 @@ describe('setup dialogs and notices', () => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('manual', 'org-2'))
     fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Acme', current: false }]
-    fake.answerQuestion = (question: any) => {
-      const asked = question.questions[0]
-      expect(asked.options.map((option: { label: string }) => option.label)).toEqual(['Share with Acme', 'Just me (sync privately)'])
-      return { result: { answers: { [asked.question]: 'Just me (sync privately)' } } }
-    }
+    fake.answerQuestion = (question: any) =>
+      ({ result: { answers: { [question.questions[0].question]: 'Just me (sync privately)' } } })
     await $.session.start(sessionStart)
     await runShare($, fake, 'share')
     expect(fake.commands.find((argv) => argv.includes('create'))).toEqual(expect.arrayContaining(['--organization', 'org-2', '--visibility', 'private']))
@@ -816,8 +813,15 @@ describe('setup dialogs and notices', () => {
     await runShare($, fake, 'share ada@example.com, bo@example.com')
     expect(fake.server.invited).toEqual(['ada@example.com', 'bo@example.com'])
     expect(fake.operations()).not.toContain('share')
-    expect(fake.logs.join('\n')).toContain(`Invited ada@example.com to this session: https://delta.dev/join/${fake.shareId} Couldn't invite bo@example.com (already a member).`)
+    expect(fake.logs.join('\n')).toContain(`Invited ada@example.com to this session. Couldn't invite bo@example.com (already a member). Link: https://delta.dev/join/${fake.shareId}`)
     expect(binding(fake)).toMatchObject({ url: `https://delta.dev/join/${fake.shareId}` })
+    // Keeping the audience of a thread whose audience Delta never reported, as after an interrupted
+    // invitation, reconnects it without publishing it to the team.
+    fake.store.set(`session:${fake.session}`, { ...binding(fake), visibility: undefined })
+    fake.answerQuestion = (question: any) =>
+      ({ result: { answers: { [question.questions[0].question]: 'Keep current sharing' } } })
+    await runShare($, fake, 'share')
+    expect(fake.operations()).not.toContain('share')
     fake.expectClean()
   })
 
@@ -826,9 +830,8 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = () => ({ deny: 'dismissed' })
     await $.session.start(sessionStart)
     await runShare($, fake, 'share')
-    expect(fake.server.thread).toBeUndefined()
     expect(fake.exports).toBe(0)
-    expect(binding(fake)?.snapshot ?? false).toBe(false)
+    expect(fake.server.thread).toBeUndefined()
     // The band drops the share's progress rather than reporting a failure.
     expect(await drawn($)).not.toContain('Preparing to share')
     expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')

@@ -62,23 +62,13 @@ export async function chooseShareAudience(interaction: Interaction, choices: Aud
     : 'Nothing was shared. Run /delta-share again to choose.'
 }
 
-/** The invitations a `thread invite` sent, and the thread's link. */
-export type ThreadInvitations = { url: string; results: InviteResult[] }
-
-/** Validate the parsed body of `delta --json thread invite`, keeping the CLI's typed error envelope. */
-export function threadInvitationsFrom(result: any, thread: string): ThreadInvitations {
+/**
+ * Validate the parsed body of `delta --json thread invite`, keeping the CLI's typed error envelope:
+ * each address's outcome, and the thread's link.
+ */
+export function threadInvitationsFrom(result: any, thread: string): { url: string; results: InviteResult[] } {
   const results = inviteResultsFrom(result)
   if (result.thread_id !== thread || typeof result.url !== 'string' || !conversationWebLink(result.url))
     throw new Error('Unexpected invitation result; use matching CLI and plugin builds')
   return { url: result.url, results }
-}
-
-/** Say which addresses were invited and which were not, and why. */
-export function invitationSummary(invitations: ThreadInvitations): string {
-  const invited = invitations.results.filter((result) => result.invited).map((result) => result.email)
-  const failed = invitations.results.flatMap((result) => result.invited ? [] : [`${result.email} (${result.message})`])
-  return [
-    invited.length ? `Invited ${invited.join(', ')} to this session: ${invitations.url}` : '',
-    failed.length ? `Couldn't invite ${failed.join(', ')}.` : '',
-  ].filter(Boolean).join(' ')
 }
