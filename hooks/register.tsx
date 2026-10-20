@@ -141,12 +141,8 @@ type JoinPlan = { session: string; cwd: string; locator: string; thread: string;
 type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean; contractVersion?: number; form?: CommandForm }
 /**
  * A share to run. With `choose`, the share decides who sees the session once the CLI is checked: the
- * addresses typed after `/delta share`, or else the person's answer. Without it, it shares with the
- * organization, as the band's control and setup's offer ask.
- */
-/**
- * A share to run. `choose` asks who should see the session; otherwise `audience` decides, and with
- * neither it is shared with the organization.
+ * addresses typed after `/delta share`, or else the person's answer. Without it, `audience` decides, as
+ * setup asks, or else it shares with the organization, as the band's control asks.
  */
 type ShareRequest = {
   session: string; cwd: string; cancelled?: boolean; form?: CommandForm; choose?: { emails: string[] }; audience?: ShareAudience
@@ -5587,14 +5583,13 @@ export function register(on: On) {
     </Box>
   })
 
-  // The plugin's own command output row: a remote message, event, tool call or comment draws here, from this
-  // plugin's own data rather than the row's stored text, which carries none of it.
-  // The plugin's own questions draw a hint beside each option, as the option's description.
   on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {
     const questions = withQuestionHints(e.props.questions)
     return next(questions ? { ...e, props: { ...e.props, questions } } : e)
   })
 
+  // The plugin's own command output row: a remote message, event, tool call or comment draws here, from this
+  // plugin's own data rather than the row's stored text, which carries none of it.
   on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
     const id = shownItemId(e.props.args)
     if (e.props.command !== 'delta' || id === undefined) return next(e)

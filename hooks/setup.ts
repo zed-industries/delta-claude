@@ -186,9 +186,8 @@ export type SetupOutcome = {
 
 const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Private sync', organization: 'Team sharing' }
 /**
- * Each mode's answer in the setup question, recommended one first. `$.ui.ask` shows no per-option
- * description, so the label carries its own short explanation. A personal organization has nobody
- * to share with, so it is offered no Organization sharing.
+ * Each mode's answer in the setup question, recommended one first, each label with its own short
+ * explanation. A personal organization has nobody to share with, so it is offered no Team sharing.
  */
 function modeLabels(organization: Organization | undefined, personal: boolean): [ThreadMode, string][] {
   return [
@@ -227,8 +226,8 @@ async function excludeFromGit(env: SetupEnv, entry: string): Promise<boolean> {
   } catch { return false }
 }
 /**
- * `$.ui.ask` takes at most four options, and one is always "Create a new organization"; the rest of an
- * organization list is reached by typing.
+ * `$.ui.ask` takes at most four options, and the team question's last one is always skip or cancel;
+ * the rest of an organization list is reached by typing.
  */
 const MAX_ORGANIZATION_OPTIONS = 3
 const CANCELLED: SetupOutcome = { status: 'cancelled', text: 'Left the existing Delta settings untouched.' }
@@ -349,7 +348,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     })
     if (answer === 'Cancel') return CANCELLED
     chosen = answer === KEEP_PERSONAL ? personalOrganization
-      : answer === CREATE_ORGANIZATION ? await offerNewOrganization(env, interaction, TEAM_NAME_QUESTION, 'Back to the list')
+      : answer === CREATE_ORGANIZATION ? await offerNewOrganization(env, interaction)
       // With no team to choose, a typed answer is the new team's name.
       : !teams.length ? await createTeam(env, interaction, answer)
       : matchOrganization(answer, organizations) ?? await confirmNewTeam(env, interaction, answer, organizations)
@@ -369,7 +368,6 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   if (!mode) return CANCELLED
 
   // Every mode saves the team: the automatic ones sync to it, and Manual shares to it.
-  const organizationName = team.name
   const text = serializeProjectPolicy(file.document, mode, team.id)
   // Choosing a mode is the decision; saving it needs no second confirmation, and the answer says what was saved.
   try { await env.writeFile(path, text) }
@@ -378,8 +376,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   // files out. A file that is already committed keeps being tracked; excluding it changes nothing.
   if (!await excludeFromGit(env, EXCLUDE_ENTRY))
     await interaction.log(`Delta couldn't keep ${SETTINGS_FILE} out of Git; add it to .gitignore if you don't want to commit it.`, 'transcript')
-  const summary = `${MODE_NAMES[mode]} with ${organizationName}`
-  const saved = `Saved ${summary} to ${SETTINGS_FILE}. New sessions follow it from now on; run /delta-setup to change it.`
+  const saved = `Saved ${MODE_NAMES[mode]} with ${team.name} to ${SETTINGS_FILE}. New sessions follow it from now on; run /delta-setup to change it.`
   // The setting never applies to the session that saved it, so an automatic mode offers to sync this
   // one the way it chose, privately or with the team, unless it already syncs that way. Manual syncs
   // sessions by hand, so it only says how.
@@ -391,7 +388,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   try {
     share = await interaction.ask(mode === 'private'
       ? 'Your new setting starts with your next session. Sync this session privately too?'
-      : `Your new setting starts with your next session. Sync this session to ${organizationName} too?`,
+      : `Your new setting starts with your next session. Sync this session to ${team.name} too?`,
     { options: ['Sync it', 'Not now'], header: HEADER })
   }
   catch (error) { if (!(error instanceof InteractionDismissed || error instanceof InteractionUnavailable)) throw error }
@@ -405,15 +402,21 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
 }
 
 /**
- * Ask for a new team's typed name, then create it and offer invitations. The question's options are
- * `decline`, answered as `declined`, and Cancel, which ends setup; anything typed that is not a name
- * is undefined, and a failed creation is the setup's outcome.
+ * Ask for a new team's typed name, then create it and offer invitations: `declined` to go back to the
+ * team question, undefined for an answer that is not a name, or setup's outcome when it ends here.
  */
-async function offerNewOrganization(env: SetupEnv, interaction: Interaction, question: string, decline: string): Promise<Organization | SetupOutcome | 'declined' | undefined> {
-  const answer = await interaction.ask(question, { options: [decline, 'Cancel'], header: HEADER })
-  if (answer === decline) return 'declined'
+async function offerNewOrganization(env: SetupEnv, interaction: Interaction): Promise<Organization | SetupOutcome | 'declined' | undefined> {
+  const back = 'Back to the list'
+  const answer = await interaction.ask(TEAM_NAME_QUESTION, { options: [back, 'Cancel'], header: HEADER })
+  if (answer === back) return 'declined'
   if (answer === 'Cancel') return CANCELLED
   return createTeam(env, interaction, answer)
+}
+
+/** A typed answer as a team's name; a slash command entered while the dialog was open is not one. */
+function teamName(answer: string): string | undefined {
+  const name = answer.trim()
+  return name && !name.startsWith('/') ? name : undefined
 }
 
 /**
@@ -422,8 +425,8 @@ async function offerNewOrganization(env: SetupEnv, interaction: Interaction, que
  * or an answer that is not a name, so the team question asks again.
  */
 async function confirmNewTeam(env: SetupEnv, interaction: Interaction, answer: string, organizations: readonly Organization[]): Promise<Organization | SetupOutcome | 'declined' | undefined> {
-  const name = answer.trim()
-  if (!name || name.startsWith('/') || organizations.some((org) => org.name.toLowerCase() === name.toLowerCase())) return undefined
+  const name = teamName(answer)
+  if (!name || organizations.some((org) => org.name.toLowerCase() === name.toLowerCase())) return undefined
   const create = 'Create it'
   if (await interaction.ask(`Create a new team called “${name}”?`, { options: [create, 'Back to the list'], header: HEADER }) !== create)
     return 'declined'
@@ -435,9 +438,8 @@ async function confirmNewTeam(env: SetupEnv, interaction: Interaction, answer: s
  * a failed creation is the setup's outcome.
  */
 async function createTeam(env: SetupEnv, interaction: Interaction, answer: string): Promise<Organization | SetupOutcome | undefined> {
-  const name = answer.trim()
-  // A typed slash command, entered while the dialog was open, is not a name.
-  if (!name || name.startsWith('/')) return undefined
+  const name = teamName(answer)
+  if (!name) return undefined
   let created: Organization
   try { created = await env.createOrganization(name) }
   catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the team "${name}": ${String(error)}. Check /delta-org list before trying again; it may have been created.` } }
@@ -545,7 +547,6 @@ export async function releaseOnboarding(store: OnboardingStore, key: string): Pr
   await store.set(key, false)
 }
 
-/** The onboarding question, which also names the command that reopens setup later. */
 export const ONBOARDING_QUESTION =
   'The Delta plugin is installed, but nothing in this repository syncs until you set it up. ' +
   'You\'ll configure your team and which sessions to sync. Set it up now?'

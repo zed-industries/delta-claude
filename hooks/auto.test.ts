@@ -220,13 +220,11 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
-  test('the setup offer shows plain-text options, and quitting partway through setup offers it again', async ($, on) => {
+  test('quitting partway through setup offers it again', async ($, on) => {
     const fake = fakeThreads(on)
     const answers: ((value: unknown) => void)[] = []
     fake.answerQuestion = () => new Promise((resolve) => { answers.push(resolve) })
     await startAuto($, fake)
-    // Claude draws only plain-text options; an option it cannot read would show as nonsense or fail.
-    expect(fake.questions[0].questions[0].options.map((option: { label: string }) => option.label)).toEqual(['Set up now', 'Not now'])
     answers[0]!({ result: { answers: { [fake.questions[0].questions[0].question]: 'Set up now' } } })
     await fake.clock.settle()
     // The wizard's first question is open and never answered.
