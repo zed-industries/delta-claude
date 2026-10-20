@@ -1801,7 +1801,7 @@ describe('remote activity', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     await $.turn.start(turnStart('previous-host-turn'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const sequence = fake.starts()[0]!
     await $.session.end(sessionEnd(fake.session))
     // Restore an abandoned execution to exercise observer-only resume recovery.
@@ -1870,7 +1870,7 @@ describe('native turns', () => {
       await fake.share($)
       await $.prompt.submit(prompt('run a command'))
       await $.turn.start(turnStart('native-tool', 'run a command'))
-      await fake.clock.settle()
+      await fake.settleUntil(() => fake.starts().length > 0)
       const sequence = fake.starts()[0]!
       const view = new RemoteView(fake.threadId, { thread: fake.threadId, items: {} })
       view.endSnapshot()
@@ -1948,7 +1948,7 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('first'))
     await $.turn.start(turnStart('native-first'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const first = fake.starts()[0]!
     let release!: () => void
     fake.holdAppend = new Promise<void>((resolve) => { release = resolve })
@@ -1961,7 +1961,7 @@ describe('native turns', () => {
     fake.holdAppend = undefined
     release()
     await completion
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 1)
     const second = fake.starts()[1]!
     expect(fake.finishes()).toEqual([first])
     const idle = fake.records().find((record) => record.update?.state === 'idle')!
@@ -2033,7 +2033,7 @@ describe('native turns', () => {
     await $.prompt.submit(prompt('first'))
     await $.turn.start(turnStart('native-a', 'first'))
     await $.tool.call(bash('tool-a', 'echo a'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const first = fake.starts()[0]!
     // Hold the append as an upload that outlasts the hook's budget, which is what Claude kills a
     // completion hook on.
@@ -2077,7 +2077,7 @@ describe('native turns', () => {
     await $.prompt.submit(prompt('first'))
     await $.turn.start(turnStart('native-a', 'first'))
     await $.turn.complete(turnComplete('native-a'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const first = fake.starts()[0]!
     expect((await $.prompt.submit(prompt('second'))).drop).toBeUndefined()
     // `turn.start` fixes this turn's local identity before its scoped start record is durable.
@@ -2098,7 +2098,7 @@ describe('native turns', () => {
     releaseStore()
     await starting
     await tool
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 1)
     const second = fake.starts()[1]!
     const tapped = fake.updates().find((record) => JSON.stringify(record).includes('tool-b'))!
     expect(tapped.turnSequence).toBe(second)
@@ -2115,10 +2115,10 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('first'))
     await $.turn.start(turnStart('native-old'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length === 1)
     const first = fake.starts()[0]!
     await $.turn.start(turnStart('native-new'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length === 2)
     const second = fake.starts()[1]!
     // Claude 2.1.299+ raises turn.start for a child agent's own loop, carrying `agentId` on it and
     // on its turn.complete. Neither may bind this session's turn, so the main turn keeps running.
@@ -2421,7 +2421,7 @@ describe('native turns', () => {
     await $.prompt.submit(prompt('long task'))
     await $.turn.start(turnStart('native-lost', 'long task'))
     await $.tool.call(bash('before-loss', 'echo before loss'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const sequence = fake.starts()[0]!
     // A stale event for another turn is not this turn's loss.
     fake.live()!.frame({ type: 'producer.turn', sequence: sequence + 100, status: 'superseded' })
@@ -2446,7 +2446,7 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('contested'))
     await $.turn.start(turnStart('native-fenced', 'contested'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const sequence = fake.starts()[0]!
     // Delta already superseded this turn, so the next record we send comes back fenced.
     fake.appendFaults.push({ disposition: 'fenced' })
@@ -2469,7 +2469,7 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('first'))
     await $.turn.start(turnStart('native-earlier', 'first'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const first = fake.starts()[0]!
     let releaseTool!: () => void
     fake.holdTool = new Promise<void>((resolve) => { releaseTool = resolve })
@@ -2484,7 +2484,7 @@ describe('native turns', () => {
 
     expect((await $.prompt.submit(prompt('second'))).drop).toBeUndefined()
     await $.turn.start(turnStart('native-later', 'second'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 1)
     const second = fake.starts()[1]!
     // The late output keeps the earlier turn's sequence, so its fence must not touch the running one.
     fake.appendFaults.push({ disposition: 'fenced' })
@@ -2507,7 +2507,7 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('contested'))
     await $.turn.start(turnStart('native-contested', 'contested'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const sequence = fake.starts()[0]!
     // Both signals name the same turn: the watcher's supersession and the outbox's fence.
     fake.appendFaults.push({ disposition: 'fenced' })
@@ -2565,7 +2565,7 @@ describe('native turns', () => {
     await $.prompt.submit(prompt('first'))
     await $.turn.start(turnStart('native-done', 'first'))
     await $.tool.call(bash('settled-tool', 'echo settled'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const sequence = fake.starts()[0]!
     let releaseTool!: () => void
     fake.holdTool = new Promise<void>((resolve) => { releaseTool = resolve })
@@ -2595,7 +2595,7 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('first'))
     await $.turn.start(turnStart('native-a', 'first'))
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 0)
     const first = fake.starts()[0]!
     let releaseTool!: () => void
     fake.holdTool = new Promise<void>((resolve) => { releaseTool = resolve })
@@ -2612,7 +2612,7 @@ describe('native turns', () => {
     await $.turn.start(turnStart('native-b', 'second'))
     releaseTool()
     await tool
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.starts().length > 1)
     const second = fake.starts()[1]!
     const late = fake.updates().filter((record) => JSON.stringify(record).includes('slow-tool'))
     expect(late).toHaveLength(1)
