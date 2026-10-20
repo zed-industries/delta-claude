@@ -165,6 +165,14 @@ export function membersUrl(organization: string): string {
   return `${DASHBOARD_URL}/${organization}/members`
 }
 
+/** Open an organization's members page in the browser, and say so; where it can't, give the link. */
+export async function openMembersPage(env: Pick<SetupEnv, 'openLink'>, organization: Organization): Promise<string> {
+  const members = membersUrl(organization.id)
+  return await env.openLink(members)
+    ? `Opened ${organization.name}'s members page in your browser: ${members}`
+    : `Manage ${organization.name}'s members here: ${members}`
+}
+
 /** The email addresses in a typed answer: words separated by commas or spaces that contain an `@`. */
 export function emailsIn(text: string): string[] {
   return [...new Set(text.split(/[\s,;]+/).filter((word) => /^[^@\s]+@[^@\s]+$/.test(word)))]
@@ -446,7 +454,6 @@ async function createTeam(env: SetupEnv, interaction: Interaction, answer: strin
 async function offerInvites(env: SetupEnv, interaction: Interaction, organization: Organization) {
   const later = 'Invite later'
   const manage = 'Manage team in browser'
-  const members = membersUrl(organization.id)
   let answer: string
   try {
     answer = await interaction.ask(`Who should join ${organization.name}? Select ${TYPE_SOMETHING} and enter their email addresses, separated by commas.`,
@@ -463,9 +470,7 @@ async function offerInvites(env: SetupEnv, interaction: Interaction, organizatio
     return
   }
   if (answer === manage) {
-    await interaction.log(await env.openLink(members)
-      ? `Opened ${organization.name}'s members page in your browser: ${members}`
-      : `Manage ${organization.name}'s members here: ${members}`, 'transcript')
+    await interaction.log(await openMembersPage(env, organization), 'transcript')
     return
   }
   const emails = emailsIn(answer)

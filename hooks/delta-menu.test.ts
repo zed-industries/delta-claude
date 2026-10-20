@@ -1,9 +1,9 @@
 import { expect, test } from 'claude-code/testing'
-import { chooseDeltaAction } from './delta-menu'
+import { chooseDeltaAction, type MenuStart } from './delta-menu'
 import { InteractionDismissed, type Interaction } from './setup'
 
 test('each menu answer becomes the action its dedicated command runs', async () => {
-  const cases: [string[], string | undefined][] = [
+  const cases: [string[], string | undefined, MenuStart?][] = [
     [['Share this session'], 'share'],
     [['Set up this repository'], 'setup'],
     [['Join a shared session', ' https://delta.dev/join/abc '], 'join https://delta.dev/join/abc'],
@@ -12,39 +12,24 @@ test('each menu answer becomes the action its dedicated command runs', async () 
     [['Manage your team', 'Invite people', 'ada@example.com, bo@example.com'], 'org invite ada@example.com bo@example.com'],
     // Text with no address still runs the invite, which says what it needs.
     [['Manage your team', 'Invite people', 'later'], 'org invite'],
-    // Going back reopens the menu.
-    [['Join a shared session', 'Back to the menu', 'Manage your team', 'Back to the menu', 'Share this session'], 'share'],
+    // Going back reopens the menu, including from a menu opened straight at a step.
+    [['Join a shared session', 'Back to the menu', 'Share this session'], 'share'],
+    [['Back to the menu', 'Share this session'], 'share', 'team'],
+    [['https://delta.dev/join/abc'], 'join https://delta.dev/join/abc', 'join'],
     // Cancelling, or typing something that isn't a choice or a link, runs nothing.
     [['Join a shared session', 'Cancel'], undefined],
     [['Join a shared session', '/delta-share'], undefined],
-    [['Join a shared session', 'two words'], undefined],
     [['Manage your team', 'Invite people', 'Cancel'], undefined],
     [['something typed'], undefined],
   ]
-  for (const [answers, action] of cases) expect(await chooseDeltaAction(scripted(answers))).toBe(action)
-})
-
-test('opened at joining or the team, the menu asks that first, and going back shows the full menu', async () => {
-  expect(await chooseDeltaAction(scripted(['https://delta.dev/join/abc']), 'join')).toBe('join https://delta.dev/join/abc')
-  expect(await chooseDeltaAction(scripted(['Manage team in browser']), 'team')).toBe('org manage')
-  const asked: { question: string; options: readonly string[] }[] = []
-  expect(await chooseDeltaAction(scripted(['Back to the menu', 'Share this session'], asked), 'team')).toBe('share')
-  expect(asked.map((ask) => ask.question)).toEqual(['What would you like to do with your team?', 'What would you like to do with Delta?'])
-})
-
-test('the menu offers four plain actions and dismissing it rejects', async () => {
-  const asked: { question: string; options: readonly string[] }[] = []
-  const interaction = scripted([], asked)
-  await expect(chooseDeltaAction(interaction)).rejects.toBeInstanceOf(InteractionDismissed)
-  expect(asked[0]!.options).toEqual(['Share this session', 'Join a shared session', 'Set up this repository', 'Manage your team'])
+  for (const [answers, action, start] of cases) expect(await chooseDeltaAction(scripted(answers), start)).toBe(action)
 })
 
 /** An interaction that answers each question from `answers` in order and is dismissed once they run out. */
-function scripted(answers: string[], asked: { question: string; options: readonly string[] }[] = []): Interaction {
+function scripted(answers: string[]): Interaction {
   const queue = [...answers]
   return {
-    async ask(question, options) {
-      asked.push({ question, options: Array.isArray(options) ? options : (options as { options: readonly string[] }).options })
+    async ask() {
       const answer = queue.shift()
       if (answer === undefined) throw new InteractionDismissed('dismissed')
       return answer

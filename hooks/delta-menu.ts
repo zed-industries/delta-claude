@@ -27,20 +27,20 @@ export type MenuStart = 'menu' | 'join' | 'team'
  * nothing. Rejects with the interaction's `InteractionDismissed` or `InteractionUnavailable`.
  */
 export async function chooseDeltaAction(interaction: Interaction, start: MenuStart = 'menu'): Promise<string | undefined> {
-  if (start !== 'menu') {
-    const chosen = start === 'join' ? await chooseThread(interaction) : await chooseTeamAction(interaction)
-    if (chosen !== BACK) return chosen
-  }
-  for (;;) {
-    const answer = await interaction.ask('What would you like to do with Delta?', {
-      options: [SHARE, JOIN, SETUP, TEAM], header: HEADER,
-      descriptions: { [JOIN]: 'Needs the link someone shared with you' },
-    })
-    if (answer === SHARE) return 'share'
-    if (answer === SETUP) return 'setup'
-    // Anything typed in place of a choice decides nothing.
-    if (answer !== JOIN && answer !== TEAM) return undefined
-    const chosen = answer === JOIN ? await chooseThread(interaction) : await chooseTeamAction(interaction)
+  for (let step = start; ; step = 'menu') {
+    if (step === 'menu') {
+      const answer = await interaction.ask('What would you like to do with Delta?', {
+        options: [SHARE, JOIN, SETUP, TEAM], header: HEADER,
+        descriptions: { [JOIN]: 'Needs the link someone shared with you' },
+      })
+      if (answer === SHARE) return 'share'
+      if (answer === SETUP) return 'setup'
+      if (answer === JOIN) step = 'join'
+      else if (answer === TEAM) step = 'team'
+      // Anything typed in place of a choice decides nothing.
+      else return undefined
+    }
+    const chosen = step === 'join' ? await chooseThread(interaction) : await chooseTeamAction(interaction)
     if (chosen !== BACK) return chosen
   }
 }

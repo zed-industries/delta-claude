@@ -27,7 +27,7 @@ import {
 import { TitleScanner, transcriptRead } from './title'
 import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
 import {
-  DASHBOARD_URL, HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, emailsIn, invitationSummary, inviteResultsFrom, isPersonalOrganization, membersUrl, offerOnboarding,
+  DASHBOARD_URL, HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, emailsIn, invitationSummary, inviteResultsFrom, isPersonalOrganization, membersUrl, offerOnboarding, openMembersPage,
   organizationsFrom, releaseOnboarding, remoteRefusal, runSetupWizard,
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
@@ -5125,22 +5125,16 @@ async function deltaMenu($: Runtime, start: MenuStart, usage: string, form: Comm
   return action ? runDeltaCommand($, action, form) : {}
 }
 
-/**
- * Open the selected organization's members page on Delta's dashboard, where members are managed. A
- * surface that can't open a browser, or an organization that can't be read, gets the link instead.
- */
+/** Open the selected organization's members page on the dashboard; a headless session gets the link. */
 async function manageOrganization($: Runtime): Promise<string> {
   let organization: Organization | undefined
   try { organization = (await listOrganizations($)).find((known) => known.current) }
   catch (error) { return `Delta couldn't read your current team (${error instanceof Error ? error.message : String(error)}). Manage your teams here: ${DASHBOARD_URL}` }
   if (!organization) return `Delta has no team selected. Manage your teams here: ${DASHBOARD_URL}`
-  const members = membersUrl(organization.id)
-  if (hasInteractiveSurface(await $.session.surfaces()) && await setupEnv($).openLink(members))
-    return `Opened ${organization.name}'s members page in your browser: ${members}`
-  return `Manage ${organization.name}'s members here: ${members}`
+  const interactive = hasInteractiveSurface(await $.session.surfaces())
+  return openMembersPage({ openLink: async (url) => interactive && setupEnv($).openLink(url) }, organization)
 }
 
-/** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
 function installUpdateHost($: Runtime): UpdateHost {
   return {
     run: (argv, init) => $.process.run(argv, init),
@@ -5151,8 +5145,10 @@ function installUpdateHost($: Runtime): UpdateHost {
   }
 }
 
+/** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
 async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
   if (action === 'update') return { text: await installationUpdates.update(installUpdateHost($), form) }
+  if (action === 'org manage') return { text: await manageOrganization($) }
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
   if (/^(?:setup|share|join)\b/.test(action) && await offerToStopWaiting($)) return {}
   // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
@@ -5164,7 +5160,6 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
   const shareArguments = /^share(?:\s+(.*))?$/.exec(action)?.[1] ?? ''
   const shareEmails = emailsIn(shareArguments)
   const shareAction = /^share\b/.test(action) && (!shareArguments.trim() || shareEmails.length > 0)
-  if (action === 'org manage') return { text: await manageOrganization($) }
   if (!shareAction && !locator && !organization && invite === undefined)
     return { text: DELTA_USAGE }
   if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }

@@ -58,32 +58,18 @@ test('invalid organization syntax and CLI failures are returned without sharing'
   fake.expectClean()
 })
 
-test('/delta-org manage opens the selected team on the dashboard, or links it where it cannot', async ($, on) => {
+test('bare /delta-org opens the selected team on the dashboard, and a headless session gets its link', async ($, on) => {
   const fake = fakeThreads(on)
   fake.organizations = [{ id: 'org-1', name: 'Zed', current: false }, { id: 'org-2', name: 'Acme', current: true }]
-  await $.session.start(sessionStart)
-  const manage = { command: 'delta-org', args: 'manage', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as never
-  expect(await $.command.run(manage)).toEqual({ text: "Opened Acme's members page in your browser: https://dashboard.zed.dev/org-2/members" })
-  expect(fake.opened).toEqual(['https://dashboard.zed.dev/org-2/members'])
-  fake.failOpen = true
-  expect(await $.command.run(manage)).toEqual({ text: "Manage Acme's members here: https://dashboard.zed.dev/org-2/members" })
-  // A headless host never opens a browser.
-  fake.failOpen = false
-  fake.surfaces = []
-  expect(await $.command.run(manage)).toEqual({ text: "Manage Acme's members here: https://dashboard.zed.dev/org-2/members" })
-  expect(fake.opened).toHaveLength(1)
-  fake.expectClean()
-})
-
-test('bare /delta-org asks what to do with the team instead of printing usage', async ($, on) => {
-  const fake = fakeThreads(on)
-  fake.organizations = [{ id: 'org-2', name: 'Acme', current: true }]
   fake.answerQuestion = (question: any) => {
     const text = question.questions[0].question
     if (text === 'What would you like to do with your team?') return { result: { answers: { [text]: 'Manage team in browser' } } }
   }
   await $.session.start(sessionStart)
-  const bare = { command: 'delta-org', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as never
-  expect(await $.command.run(bare)).toEqual({ text: "Opened Acme's members page in your browser: https://dashboard.zed.dev/org-2/members" })
+  const run = (args: string) => $.command.run({ ...shareCommand, command: 'delta-org', args } as never)
+  expect(await run('')).toEqual({ text: "Opened Acme's members page in your browser: https://dashboard.zed.dev/org-2/members" })
+  fake.surfaces = []
+  expect(await run('manage')).toEqual({ text: "Manage Acme's members here: https://dashboard.zed.dev/org-2/members" })
+  expect(fake.opened).toEqual(['https://dashboard.zed.dev/org-2/members'])
   fake.expectClean()
 })

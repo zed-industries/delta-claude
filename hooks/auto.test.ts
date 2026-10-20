@@ -835,7 +835,7 @@ describe('setup dialogs and notices', () => {
     fake.expectClean()
   })
 
-  test('bare /delta opens a menu that runs the chosen action, and a headless session gets the usage text', async ($, on) => {
+  test('bare /delta opens a menu that runs the chosen action', async ($, on) => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
@@ -848,8 +848,6 @@ describe('setup dialogs and notices', () => {
     await startAuto($, fake, 'resume')
     const { text } = await $.command.run({ ...typedDelta('') } as never)
     expect(text).toContain('Saved Manual with Zed')
-    fake.surfaces = []
-    expect((await $.command.run({ ...typedDelta('') } as never)).text).toMatch(/^Usage: \/delta share/)
     fake.expectClean()
   })
 

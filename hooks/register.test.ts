@@ -61,7 +61,7 @@ describe('thread commands', () => {
     fake.claudeVersion = '2.1.287'
     await $.session.start(sessionStart)
     expect(fake.logs).toContain(claudeVersionWarning('2.1.287'))
-    expect((await $.command.run(typedDelta(''))).text).toContain('Usage: /delta')
+    expect((await $.command.run(typedDelta('help'))).text).toContain('Usage: /delta')
     await $.session.end(sessionEnd(fake.session))
   })
 
