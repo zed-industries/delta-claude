@@ -161,8 +161,8 @@ describe('joining', () => {
     expect(fake.watches.map((watch) => watch.argv.includes('--participate'))).toEqual([true])
     expect((await $.prompt.submit(prompt('recorded'))).drop).toBeUndefined()
     await $.tool.call(bash('recorded', 'echo recorded'))
-    await fake.clock.advance(0)
-    expect(fake.updates().map((record) => record.update?.toolCallId)).toContain('recorded')
+    // Recording is a chain of host calls, which a loaded machine can leave unfinished after one step.
+    await fake.settleUntil(() => fake.updates().some((record) => record.update?.toolCallId === 'recorded'))
     expect(fake.producerNames().length).toBeGreaterThan(0)
     expect([...new Set(fake.producerNames())]).toEqual(['Claude Code'])
     fake.expectClean()
