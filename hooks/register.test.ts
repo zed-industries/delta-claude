@@ -2,6 +2,7 @@ import { describe, expect, test as kitTest, tier, type Engine } from 'claude-cod
 import type { UiCopyResult } from 'claude-code'
 import { addRows, itemFingerprint, RemoteView, type PendingRow } from './conversation'
 import { cliFixture } from './cli-fixtures'
+import { claudeVersionWarning } from './compatibility'
 import { personColor, personKey } from './status'
 import {
   ADA, CHECKOUT, CONFIG, LIVE, PENDING, abovePrompt, bash, commandOutput, commandRunRows, fakeThreads,
@@ -55,6 +56,15 @@ function expectStagedRecords(fake: ReturnType<typeof fakeThreads>, sequences: nu
 }
 
 describe('thread commands', () => {
+  test('an unsupported host warns in the transcript without preventing startup or commands', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.claudeVersion = '2.1.287'
+    await $.session.start(sessionStart)
+    expect(fake.logs).toContain(claudeVersionWarning('2.1.287'))
+    expect((await $.command.run(typedDelta(''))).text).toContain('Usage: /delta')
+    await $.session.end(sessionEnd(fake.session))
+  })
+
   test('resume with a missing CLI preserves the binding and asks for explicit setup', async ($, on) => {
     const fake = fakeThreads(on)
     fake.cliMissing = true

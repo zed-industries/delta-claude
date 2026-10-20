@@ -3,6 +3,7 @@ import { expect, mock, type MockClock, type Plugin, type TestRest } from 'claude
 import type { ApiMessage, ConfigRow, On, ProcessRunResult } from 'claude-code'
 import type { ThreadState, ThreadUser, WatchChild, WatchComment, WatchItem } from './thread-commands'
 import { cliErrorCodes, cliFixture } from './cli-fixtures'
+import { MINIMUM_CLAUDE_VERSION } from './compatibility'
 
 export type Envelope = {
   schemaVersion: 1
@@ -258,6 +259,7 @@ export function fakeThreads(on: On, options: {
     mountRequests: [] as { owner: string; folder: boolean; join: boolean }[],
     holdCommandListFor: undefined as ((session: string) => Promise<void> | undefined) | undefined,
     root: undefined as string | undefined,
+    claudeVersion: MINIMUM_CLAUDE_VERSION,
     agents: [] as { id: string; description: string; type: string; status: string }[],
     endSession: undefined as ((session: string) => Promise<unknown>) | undefined,
     clock: mock.clock(on) as MockClock,
@@ -640,6 +642,7 @@ export function fakeThreads(on: On, options: {
   on('session.cwd', () => ({ value: fake.cwd }))
   on('session.root', () => ({ value: fake.root ?? fake.cwd }))
   on('session.surfaces', () => ({ value: fake.surfaces }))
+  on('session.version', () => ({ value: { version: fake.claudeVersion } }))
   on('agent.list', () => ({ value: fake.agents }))
   on('agent.spawn', async ($, e) => {
     const agentId = e.resume?.agentId ?? `agent${++fake.spawns}`

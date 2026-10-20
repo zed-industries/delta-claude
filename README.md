@@ -7,7 +7,8 @@ own Claude Code session, from [delta.dev](https://delta.dev), or from the Delta 
 
 ## Installation
 
-You need Claude Code **2.1.287 or newer**. Inside Claude Code, run:
+You need Claude Code **2.1.300 or newer**. Older versions show a warning but are
+not blocked. Inside Claude Code, run:
 
 ```text
 /plugin marketplace add zed-industries/delta-claude

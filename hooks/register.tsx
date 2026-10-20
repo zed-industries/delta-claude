@@ -40,6 +40,7 @@ import {
   looksLikeThreadLink, namedThread, resumePrompt, threadsNote, type ThreadTarget,
 } from './delta-threads'
 import { AccessRequiredError, requireAuthentication, type AuthenticationHost, type BrowserWait } from './auth'
+import { claudeVersionWarning } from './compatibility'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
 } from './handoff'
@@ -3679,7 +3680,7 @@ async function runShare($: Runtime, request: ShareRequest) {
 }
 
 /** A timer leaves the active command before invoking commands that wait for idle. */
-async function join($: Runtime, request: JoinRequest) {
+async function joinSession($: Runtime, request: JoinRequest) {
   let plan: JoinPlan | undefined
   let fresh: string | undefined
   try {
@@ -5154,7 +5155,7 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
       const request = { session, cwd: await $.session.cwd(), locator, form }
       joining = request
       setProgress($, 'Checking access to the shared thread…', 'active')
-      $.clock.after(0, () => join($, request))
+      $.clock.after(0, () => joinSession($, request))
       // Progress belongs to the band; a command with no text adds no transcript row.
       return {}
     }
@@ -5712,6 +5713,9 @@ export function register(on: On) {
   })
 
   on('session.start', async ($, e, next) => {
+    const version = await $.session.version().catch(() => undefined)
+    const warning = claudeVersionWarning(version?.base ?? version?.version)
+    if (warning) await $.ui.log(warning, { to: 'transcript' })
     await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, choose a team, or update Delta', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | update | org list | org current | org switch <ID>' })
     // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
     // appears in the slash-command menu.
