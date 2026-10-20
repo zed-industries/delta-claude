@@ -3,6 +3,7 @@ import { expect, mock, type MockClock, type Plugin, type TestRest } from 'claude
 import type { ApiMessage, ConfigRow, On, ProcessRunResult } from 'claude-code'
 import type { ThreadState, ThreadUser, WatchChild, WatchComment, WatchItem } from './thread-commands'
 import { cliErrorCodes, cliFixture } from './cli-fixtures'
+import { MINIMUM_CLAUDE_VERSION } from './compatibility'
 
 export type Envelope = {
   schemaVersion: 1
@@ -258,6 +259,7 @@ export function fakeThreads(on: On, options: {
     mountRequests: [] as { owner: string; folder: boolean; join: boolean }[],
     holdCommandListFor: undefined as ((session: string) => Promise<void> | undefined) | undefined,
     root: undefined as string | undefined,
+    claudeVersion: MINIMUM_CLAUDE_VERSION,
     agents: [] as { id: string; description: string; type: string; status: string }[],
     endSession: undefined as ((session: string) => Promise<unknown>) | undefined,
     clock: mock.clock(on) as MockClock,
@@ -380,6 +382,14 @@ export function fakeThreads(on: On, options: {
     organizationResult: { stdout: '', stderr: '', exitCode: 0, isStdoutTruncated: false, isStderrTruncated: false },
     cliMissing: false,
     cliSetups: [] as string[],
+    updateDiscoveries: 0,
+    updateDebug: [] as string[],
+    installUpdates: [] as { argv: string[]; timeoutMs?: number; env?: Record<string, string> }[],
+    updateStatus: 'up_to_date' as 'up_to_date' | 'update_available' | 'unsupported',
+    updateCanInstall: true,
+    updateMessage: 'Update test',
+    updateFailure: undefined as undefined | 'old-cli' | 'network' | 'app-running' | 'malformed',
+    holdUpdate: undefined as Promise<void> | undefined,
     holdCliSetup: undefined as ((install: boolean) => Promise<void> | undefined) | undefined,
     holdCliResolution: undefined as (() => Promise<void> | undefined) | undefined,
     /** Reading a transcript from an offset cannot start, as without `tail` or a usable PowerShell. */
@@ -632,6 +642,7 @@ export function fakeThreads(on: On, options: {
   on('session.cwd', () => ({ value: fake.cwd }))
   on('session.root', () => ({ value: fake.root ?? fake.cwd }))
   on('session.surfaces', () => ({ value: fake.surfaces }))
+  on('session.version', () => ({ value: { version: fake.claudeVersion } }))
   on('agent.list', () => ({ value: fake.agents }))
   on('agent.spawn', async ($, e) => {
     const agentId = e.resume?.agentId ?? `agent${++fake.spawns}`
@@ -690,6 +701,7 @@ export function fakeThreads(on: On, options: {
     if (e.to !== undefined && e.to !== 'transcript' && e.to !== 'debug')
       fake.violations.push(`ui.log with an invalid destination ${JSON.stringify(e.to)}: ${e.text}`)
     const row = /^Adding a row to Claude's context: (.*)$/s.exec(e.text)
+    if (e.to === 'debug' && e.text.startsWith('Delta update check:')) fake.updateDebug.push(e.text)
     if (e.to !== 'debug') fake.logs.push(e.text)
     else if (row) fake.rows.push(row[1]!)
     const shared = e.to === 'debug' ? /^Delta share link: (.*)$/.exec(e.text) : null
@@ -749,7 +761,7 @@ export function fakeThreads(on: On, options: {
   })
   on('fs.read', ($, e) => {
     const value = fake.files.get(e.path) ??
-      (e.path.endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ version: fake.pluginVersion }) : undefined)
+      (e.path.replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ version: fake.pluginVersion }) : undefined)
     if (value === undefined) throw new Error(`Missing fixture file: ${e.path}`)
     return { value }
   })
@@ -781,13 +793,32 @@ export function fakeThreads(on: On, options: {
     }
     if (argv[0] === 'sh') {
       const discovery = !argv[2]?.includes('--non-interactive')
-      fake.cliSetups.push(discovery ? 'discover' : 'install')
+      if (discovery && e.init?.timeoutMs === 5_000) fake.updateDiscoveries++
+      else fake.cliSetups.push(discovery ? 'discover' : 'install')
       await fake.holdCliSetup?.(!discovery)
       if (discovery) return fake.cliMissing ? output('', 3) : output('/selected/delta\n')
       fake.cliMissing = false
       return output('/selected/delta\n')
     }
     const parsed = cliArguments(argv)
+    if (argv[0] === '/selected/delta' && argv[1] === 'update' &&
+        (argv.slice(2).join(' ') === '--check --json' || argv.slice(2).join(' ') === '--json')) {
+      fake.installUpdates.push({ argv, timeoutMs: e.init?.timeoutMs, env: e.init?.env })
+      await fake.holdUpdate
+      if (fake.updateFailure === 'old-cli') return output('', 2, "error: unrecognized subcommand 'update'")
+      if (fake.updateFailure === 'network' || fake.updateFailure === 'app-running')
+        return output(JSON.stringify({ error: {
+          code: fake.updateFailure === 'network' ? 'network_error' : 'app_running',
+          message: fake.updateFailure === 'network' ? 'Check network access.' : 'Quit Delta and retry.',
+          retryable: true,
+        } }), 1)
+      if (fake.updateFailure === 'malformed') return output('{}')
+      return output(JSON.stringify({
+        schema_version: 1, status: argv.includes('--check') || !fake.updateCanInstall ? fake.updateStatus : 'updated',
+        current_version: '1.0.0', latest_version: '1.1.0', channel: 'stable',
+        can_install: fake.updateCanInstall, message: fake.updateMessage,
+      }))
+    }
     const operation = parsed?.positionals[1]
     if (operation) fake.cliIntegrations.push({ operation, integration: e.init?.env?.DELTA_CLI_INTEGRATION,
       ...e.init?.env?.DELTA_CLI_COMMAND_FORM ? { commandForm: e.init.env.DELTA_CLI_COMMAND_FORM } : {} })

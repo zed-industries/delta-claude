@@ -32,6 +32,7 @@ import {
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
+import { InstallationUpdates, type UpdateHost } from './install-update'
 import { chooseShareAudience, threadInvitationsFrom, type ShareAudience } from './share-audience'
 import { chooseDeltaAction, type MenuStart } from './delta-menu'
 import { childKey, childName, childOutbox, recordsSubagent, sentBy, type ChildBinding, type Entry } from './children'
@@ -40,6 +41,7 @@ import {
   looksLikeThreadLink, namedThread, resumePrompt, threadsNote, type ThreadTarget,
 } from './delta-threads'
 import { AccessRequiredError, requireAuthentication, type AuthenticationHost, type BrowserWait } from './auth'
+import { claudeVersionWarning } from './compatibility'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
 } from './handoff'
@@ -3679,7 +3681,7 @@ async function runShare($: Runtime, request: ShareRequest) {
 }
 
 /** A timer leaves the active command before invoking commands that wait for idle. */
-async function join($: Runtime, request: JoinRequest) {
+async function joinSession($: Runtime, request: JoinRequest) {
   let plan: JoinPlan | undefined
   let fresh: string | undefined
   try {
@@ -5104,7 +5106,7 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
 }
 
 /** Every `/delta` action, for a surface that can't show the menu and for an action it doesn't know. */
-const DELTA_USAGE = 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage'
+const DELTA_USAGE = 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta update | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage'
 
 /**
  * Answer a command typed without what it needs, such as bare `/delta`, with a menu of its actions,
@@ -5139,7 +5141,18 @@ async function manageOrganization($: Runtime): Promise<string> {
 }
 
 /** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
+function installUpdateHost($: Runtime): UpdateHost {
+  return {
+    run: (argv, init) => $.process.run(argv, init),
+    windows: async () => await $.env.get('OS') === 'Windows_NT',
+    exists: (path) => $.fs.exists(path),
+    after: (milliseconds, callback) => $.clock.after(milliseconds, callback),
+    log: async (text, to) => { await $.ui.log(text, { to }) },
+  }
+}
+
 async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
+  if (action === 'update') return { text: await installationUpdates.update(installUpdateHost($), form) }
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
   if (/^(?:setup|share|join)\b/.test(action) && await offerToStopWaiting($)) return {}
   // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
@@ -5179,7 +5192,7 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
       const request = { session, cwd: await $.session.cwd(), locator, form }
       joining = request
       setProgress($, 'Checking access to the shared thread…', 'active')
-      $.clock.after(0, () => join($, request))
+      $.clock.after(0, () => joinSession($, request))
       // Progress belongs to the band; a command with no text adds no transcript row.
       return {}
     }
@@ -5199,6 +5212,8 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
     return { text }
   }
 }
+
+const installationUpdates = new InstallationUpdates()
 
 export function register(on: On) {
   on('prompt.submit', async ($, e, next) => {
@@ -5735,15 +5750,20 @@ export function register(on: On) {
   })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, or choose a team', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | org list | org current | org switch <ID> | org manage' })
+    const version = await $.session.version().catch(() => undefined)
+    const warning = claudeVersionWarning(version?.base ?? version?.version)
+    if (warning) await $.ui.log(warning, { to: 'transcript' })
+    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, choose a team, or update Delta', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | update | org list | org current | org switch <ID> | org manage' })
     // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
     // appears in the slash-command menu.
     await $.command.register({ name: 'delta-share', description: 'Delta: sync this session and its code to DeltaDB, and choose who sees it', argumentHint: '[<email>…]' })
     // Claude's menu shows a command's description but not its argument hint, so the description carries the format.
     await $.command.register({ name: 'delta-join', description: 'Delta: join a shared conversation. Needs its link: /delta-join <link>', argumentHint: '<shared-link-or-thread>' })
     await $.command.register({ name: 'delta-setup', description: 'Delta: choose which sessions in this repository sync to DeltaDB' })
+    await $.command.register({ name: 'delta-update', description: 'Delta: update the installed Delta app and CLI' })
     await $.command.register({ name: 'delta-org', description: 'Delta: manage your team. /delta-org list, current, switch <ID>, invite <email>, or manage', argumentHint: 'list | current | switch <ID> | invite <email>… | manage' })
     const result = await next(e)
+    $.clock.after(0, () => { void installationUpdates.check(installUpdateHost($)) })
     const session = await $.session.id()
     try { await activate($, session) }
     catch (error) { await report($, error) }
@@ -5815,6 +5835,7 @@ export function register(on: On) {
     ? runDeltaCommand($, `join ${e.args.trim()}`, 'dedicated_command')
     : deltaMenu($, 'join', 'Usage: /delta-join <link>. Paste the Delta link someone shared with you, such as /delta-join https://delta.dev/join/…, or a thread ID.', 'dedicated_command'))
   on('command.run', { command: 'delta-setup' }, async ($, e) => runDeltaCommand($, `setup ${e.args.trim()}`.trim(), 'dedicated_command'))
+  on('command.run', { command: 'delta-update' }, async ($, e) => runDeltaCommand($, `update ${e.args.trim()}`.trim(), 'dedicated_command'))
   on('command.run', { command: 'delta-org' }, async ($, e) => e.args.trim()
     ? runDeltaCommand($, `org ${e.args.trim()}`, 'dedicated_command')
     : deltaMenu($, 'team', 'Usage: /delta-org list (your teams), /delta-org current (the selected one), /delta-org switch <ID>, /delta-org invite <email>… (invite people to the selected one), or /delta-org manage (open the selected one on the dashboard).', 'dedicated_command'))

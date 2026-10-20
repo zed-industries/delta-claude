@@ -14,9 +14,13 @@ concurrency:
 
 jobs:
   test:
-    name: Validate and test
+    name: Validate and test (Claude Code ${{ matrix.claude-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        claude-version: ["2.1.300", "latest"]
     env:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
@@ -30,7 +34,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Claude Code
-        run: npm install --global @anthropic-ai/claude-code@2.1.301
+        run: |
+          npm install --global @anthropic-ai/claude-code@${{ matrix.claude-version }}
+          claude --version
       - name: Validate plugin
         run: |
           claude plugin validate .
