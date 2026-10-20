@@ -33,7 +33,7 @@ import {
 } from './setup'
 import { DeltaCli } from './cli'
 import { chooseShareAudience, threadInvitationsFrom, type ShareAudience } from './share-audience'
-import { chooseDeltaAction } from './delta-menu'
+import { chooseDeltaAction, type MenuStart } from './delta-menu'
 import { childKey, childName, childOutbox, recordsSubagent, sentBy, type ChildBinding, type Entry } from './children'
 import {
   HISTORY_BUDGET, adoptionPrompt, deltaTurnReport, finishedReport, historyText, isOwnItem, itemsSince,
@@ -5103,20 +5103,24 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
   }
 }
 
+/** Every `/delta` action, for a surface that can't show the menu and for an action it doesn't know. */
+const DELTA_USAGE = 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage'
+
 /**
- * Answer bare `/delta` with a menu of its actions and run the chosen one. A surface that can't ask
- * gets the usage text instead, and choosing nothing adds nothing to the transcript.
+ * Answer a command typed without what it needs, such as bare `/delta`, with a menu of its actions,
+ * and run the chosen one. A surface that can't ask gets `usage` instead, and choosing nothing adds
+ * nothing to the transcript.
  */
-async function deltaMenu($: Runtime): Promise<{ text?: string }> {
-  if (!hasInteractiveSurface(await $.session.surfaces())) return runDeltaCommand($, '', 'delta_subcommand')
+async function deltaMenu($: Runtime, start: MenuStart, usage: string, form: CommandForm): Promise<{ text?: string }> {
+  if (!hasInteractiveSurface(await $.session.surfaces())) return { text: usage }
   let action: string | undefined
-  try { action = await chooseDeltaAction(claudeInteraction($)) }
+  try { action = await chooseDeltaAction(claudeInteraction($), start) }
   catch (error) {
     if (error instanceof InteractionDismissed) return {}
-    if (error instanceof InteractionUnavailable) return runDeltaCommand($, '', 'delta_subcommand')
+    if (error instanceof InteractionUnavailable) return { text: usage }
     throw error
   }
-  return action ? runDeltaCommand($, action, 'delta_subcommand') : {}
+  return action ? runDeltaCommand($, action, form) : {}
 }
 
 /**
@@ -5149,7 +5153,7 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
   const shareAction = /^share\b/.test(action) && (!shareArguments.trim() || shareEmails.length > 0)
   if (action === 'org manage') return { text: await manageOrganization($) }
   if (!shareAction && !locator && !organization && invite === undefined)
-    return { text: 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage' }
+    return { text: DELTA_USAGE }
   if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
   if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
   if (organization)
@@ -5802,17 +5806,18 @@ export function register(on: On) {
     // person or another plugin, and gets the usage text below.
     if (internal !== undefined && e.origin?.kind === 'plugin' && e.origin.name === $.plugin.name)
       return { text: SHOW_ANSWER }
-    if (!action) return deltaMenu($)
+    if (!action) return deltaMenu($, 'menu', DELTA_USAGE, 'delta_subcommand')
     return runDeltaCommand($, action, 'delta_subcommand')
   })
   on('command.run', { command: 'delta-share' }, async ($, e) => runDeltaCommand($, `share ${e.args.trim()}`.trim(), 'dedicated_command'))
+  // Typed without its argument, a command asks for it instead of failing.
   on('command.run', { command: 'delta-join' }, async ($, e) => e.args.trim()
     ? runDeltaCommand($, `join ${e.args.trim()}`, 'dedicated_command')
-    : { text: 'Usage: /delta-join <link>. Paste the Delta link someone shared with you, such as /delta-join https://delta.dev/join/…, or a thread ID.' })
+    : deltaMenu($, 'join', 'Usage: /delta-join <link>. Paste the Delta link someone shared with you, such as /delta-join https://delta.dev/join/…, or a thread ID.', 'dedicated_command'))
   on('command.run', { command: 'delta-setup' }, async ($, e) => runDeltaCommand($, `setup ${e.args.trim()}`.trim(), 'dedicated_command'))
   on('command.run', { command: 'delta-org' }, async ($, e) => e.args.trim()
     ? runDeltaCommand($, `org ${e.args.trim()}`, 'dedicated_command')
-    : { text: 'Usage: /delta-org list (your teams), /delta-org current (the selected one), /delta-org switch <ID>, /delta-org invite <email>… (invite people to the selected one), or /delta-org manage (open the selected one on the dashboard).' })
+    : deltaMenu($, 'team', 'Usage: /delta-org list (your teams), /delta-org current (the selected one), /delta-org switch <ID>, /delta-org invite <email>… (invite people to the selected one), or /delta-org manage (open the selected one on the dashboard).', 'dedicated_command'))
 
   on('session.append', async ($, e, next) => {
     if (e.agentId !== undefined) {

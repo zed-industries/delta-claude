@@ -18,12 +18,19 @@ const MANAGE = 'Manage team in browser'
 const BACK = 'Back to the menu'
 const CANCEL = 'Cancel'
 
+/** Where the menu opens: its first question, or straight at joining or the team, as bare `/delta-join` and `/delta-org` do. */
+export type MenuStart = 'menu' | 'join' | 'team'
+
 /**
  * Ask which Delta action to run and answer it as a `/delta` action, such as `share` or `join <link>`.
- * Undefined when the person chose nothing. Rejects with the interaction's `InteractionDismissed` or
- * `InteractionUnavailable`.
+ * Opened at `join` or `team`, going back leads to the full menu. Undefined when the person chose
+ * nothing. Rejects with the interaction's `InteractionDismissed` or `InteractionUnavailable`.
  */
-export async function chooseDeltaAction(interaction: Interaction): Promise<string | undefined> {
+export async function chooseDeltaAction(interaction: Interaction, start: MenuStart = 'menu'): Promise<string | undefined> {
+  if (start !== 'menu') {
+    const chosen = start === 'join' ? await chooseThread(interaction) : await chooseTeamAction(interaction)
+    if (chosen !== BACK) return chosen
+  }
   for (;;) {
     const answer = await interaction.ask('What would you like to do with Delta?', {
       options: [SHARE, JOIN, SETUP, TEAM], header: HEADER,

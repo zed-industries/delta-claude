@@ -24,6 +24,14 @@ test('each menu answer becomes the action its dedicated command runs', async () 
   for (const [answers, action] of cases) expect(await chooseDeltaAction(scripted(answers))).toBe(action)
 })
 
+test('opened at joining or the team, the menu asks that first, and going back shows the full menu', async () => {
+  expect(await chooseDeltaAction(scripted(['https://delta.dev/join/abc']), 'join')).toBe('join https://delta.dev/join/abc')
+  expect(await chooseDeltaAction(scripted(['Manage team in browser']), 'team')).toBe('org manage')
+  const asked: { question: string; options: readonly string[] }[] = []
+  expect(await chooseDeltaAction(scripted(['Back to the menu', 'Share this session'], asked), 'team')).toBe('share')
+  expect(asked.map((ask) => ask.question)).toEqual(['What would you like to do with your team?', 'What would you like to do with Delta?'])
+})
+
 test('the menu offers four plain actions and dismissing it rejects', async () => {
   const asked: { question: string; options: readonly string[] }[] = []
   const interaction = scripted([], asked)
