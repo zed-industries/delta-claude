@@ -19,6 +19,19 @@ plugin installs it the first time you set up syncing, share, or join, and Delta
 offers to open your browser to sign in. You don't need to open the Delta app first.
 On Windows, install Delta from [delta.dev](https://delta.dev) first.
 
+At startup the plugin checks an existing Delta installation for updates in the
+background, with a ten-second budget. It notifies you when an update is available;
+it never installs updates or opens a browser as part of this check. A failed check
+does not stop syncing or sharing.
+
+Run `/delta-update` (or `/delta update`) to update the installed Delta app and CLI,
+then restart Claude Code. This does not update the Claude plugin itself.
+The startup notice offers this command only when the CLI can install the update.
+Otherwise, follow the CLI's platform-specific instructions: for example, run the
+Windows installer, or update a package-managed installation through its package
+manager. Older CLIs that lack the update command point to [delta.dev](https://delta.dev).
+If Delta reports that the app is running, quit the Delta app before retrying.
+
 ## Usage
 
 ### Setup
@@ -56,6 +69,7 @@ Each command also works as `/delta <command>`, such as `/delta share`.
 | `/delta-share [<email>…]` | Sync the current session and its checkout, and choose who sees it |
 | `/delta-join <link>` | Join a shared thread in a fresh session, in the thread's checkout |
 | `/delta-setup` | Choose this repository's team and which sessions sync |
+| `/delta-update` | Update the installed Delta app and CLI |
 | `/delta-org list` | List your Delta teams |
 | `/delta-org current` | Show the selected team |
 | `/delta-org switch <ID>` | Select a different team |

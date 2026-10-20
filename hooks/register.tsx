@@ -32,6 +32,7 @@ import {
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
+import { InstallationUpdates, type UpdateHost } from './install-update'
 import { chooseShareAudience, threadInvitationsFrom, type ShareAudience } from './share-audience'
 import { childKey, childName, childOutbox, recordsSubagent, sentBy, type ChildBinding, type Entry } from './children'
 import {
@@ -5103,7 +5104,18 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
 }
 
 /** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
+function installUpdateHost($: Runtime): UpdateHost {
+  return {
+    run: (argv, init) => $.process.run(argv, init),
+    windows: async () => await $.env.get('OS') === 'Windows_NT',
+    exists: (path) => $.fs.exists(path),
+    after: (milliseconds, callback) => $.clock.after(milliseconds, callback),
+    log: async (text, to) => { await $.ui.log(text, { to }) },
+  }
+}
+
 async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
+  if (action === 'update') return { text: await installationUpdates.update(installUpdateHost($), form) }
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
   if (/^(?:setup|share|join)\b/.test(action) && await offerToStopWaiting($)) return {}
   // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
@@ -5116,7 +5128,7 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
   const shareEmails = emailsIn(shareArguments)
   const shareAction = /^share\b/.test(action) && (!shareArguments.trim() || shareEmails.length > 0)
   if (!shareAction && !locator && !organization && invite === undefined)
-    return { text: 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>…' }
+    return { text: 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta update | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>…' }
   if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
   if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
   if (organization)
@@ -5162,6 +5174,8 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
     return { text }
   }
 }
+
+const installationUpdates = new InstallationUpdates()
 
 export function register(on: On) {
   on('prompt.submit', async ($, e, next) => {
@@ -5698,15 +5712,17 @@ export function register(on: On) {
   })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, or choose a team', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | org list | org current | org switch <ID>' })
+    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, choose a team, or update Delta', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | update | org list | org current | org switch <ID>' })
     // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
     // appears in the slash-command menu.
     await $.command.register({ name: 'delta-share', description: 'Delta: sync this session and its code to DeltaDB, and choose who sees it', argumentHint: '[<email>…]' })
     // Claude's menu shows a command's description but not its argument hint, so the description carries the format.
     await $.command.register({ name: 'delta-join', description: 'Delta: join a shared conversation. Needs its link: /delta-join <link>', argumentHint: '<shared-link-or-thread>' })
     await $.command.register({ name: 'delta-setup', description: 'Delta: choose which sessions in this repository sync to DeltaDB' })
+    await $.command.register({ name: 'delta-update', description: 'Delta: update the installed Delta app and CLI' })
     await $.command.register({ name: 'delta-org', description: 'Delta: manage your team. /delta-org list, current, switch <ID>, or invite <email>', argumentHint: 'list | current | switch <ID> | invite <email>…' })
     const result = await next(e)
+    $.clock.after(0, () => { void installationUpdates.check(installUpdateHost($)) })
     const session = await $.session.id()
     try { await activate($, session) }
     catch (error) { await report($, error) }
@@ -5776,6 +5792,7 @@ export function register(on: On) {
     ? runDeltaCommand($, `join ${e.args.trim()}`, 'dedicated_command')
     : { text: 'Usage: /delta-join <link>. Paste the Delta link someone shared with you, such as /delta-join https://delta.dev/join/…, or a thread ID.' })
   on('command.run', { command: 'delta-setup' }, async ($, e) => runDeltaCommand($, `setup ${e.args.trim()}`.trim(), 'dedicated_command'))
+  on('command.run', { command: 'delta-update' }, async ($, e) => runDeltaCommand($, `update ${e.args.trim()}`.trim(), 'dedicated_command'))
   on('command.run', { command: 'delta-org' }, async ($, e) => e.args.trim()
     ? runDeltaCommand($, `org ${e.args.trim()}`, 'dedicated_command')
     : { text: 'Usage: /delta-org list (your teams), /delta-org current (the selected one), /delta-org switch <ID>, or /delta-org invite <email>… (invite people to the selected one).' })
