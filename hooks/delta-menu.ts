@@ -14,7 +14,7 @@ const SETUP = 'Set up this repository'
 const TEAM = 'Manage your team'
 const INVITE = 'Invite people'
 const LIST = 'List my teams'
-const CURRENT = 'Show current team'
+const MANAGE = 'Manage team in browser'
 const BACK = 'Back to the menu'
 const CANCEL = 'Cancel'
 
@@ -52,9 +52,9 @@ async function chooseThread(interaction: Interaction): Promise<string | undefine
 /** Ask what to do with the team: an `org` action, `BACK`, or undefined. */
 async function chooseTeamAction(interaction: Interaction): Promise<string | undefined> {
   const answer = await interaction.ask('What would you like to do with your team?',
-    { options: [INVITE, LIST, CURRENT, BACK], header: HEADER })
+    { options: [INVITE, MANAGE, LIST, BACK], header: HEADER })
   if (answer === LIST) return 'org list'
-  if (answer === CURRENT) return 'org current'
+  if (answer === MANAGE) return 'org manage'
   if (answer === BACK) return BACK
   if (answer !== INVITE) return undefined
   const invited = await interaction.ask(

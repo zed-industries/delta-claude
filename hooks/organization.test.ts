@@ -57,3 +57,20 @@ test('invalid organization syntax and CLI failures are returned without sharing'
   expect(fake.exports).toBe(0)
   fake.expectClean()
 })
+
+test('/delta-org manage opens the selected team on the dashboard, or links it where it cannot', async ($, on) => {
+  const fake = fakeThreads(on)
+  fake.organizations = [{ id: 'org-1', name: 'Zed', current: false }, { id: 'org-2', name: 'Acme', current: true }]
+  await $.session.start(sessionStart)
+  const manage = { command: 'delta-org', args: 'manage', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as never
+  expect(await $.command.run(manage)).toEqual({ text: "Opened Acme's members page in your browser: https://dashboard.zed.dev/org-2/members" })
+  expect(fake.opened).toEqual(['https://dashboard.zed.dev/org-2/members'])
+  fake.failOpen = true
+  expect(await $.command.run(manage)).toEqual({ text: "Manage Acme's members here: https://dashboard.zed.dev/org-2/members" })
+  // A headless host never opens a browser.
+  fake.failOpen = false
+  fake.surfaces = []
+  expect(await $.command.run(manage)).toEqual({ text: "Manage Acme's members here: https://dashboard.zed.dev/org-2/members" })
+  expect(fake.opened).toHaveLength(1)
+  fake.expectClean()
+})

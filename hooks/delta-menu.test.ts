@@ -8,7 +8,7 @@ test('each menu answer becomes the action its dedicated command runs', async () 
     [['Set up this repository'], 'setup'],
     [['Join a shared session', ' https://delta.dev/join/abc '], 'join https://delta.dev/join/abc'],
     [['Manage your team', 'List my teams'], 'org list'],
-    [['Manage your team', 'Show current team'], 'org current'],
+    [['Manage your team', 'Manage team in browser'], 'org manage'],
     [['Manage your team', 'Invite people', 'ada@example.com, bo@example.com'], 'org invite ada@example.com bo@example.com'],
     // Text with no address still runs the invite, which says what it needs.
     [['Manage your team', 'Invite people', 'later'], 'org invite'],

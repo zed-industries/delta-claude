@@ -61,6 +61,7 @@ its own opens a menu of these actions.
 | `/delta-org current` | Show the selected team |
 | `/delta-org switch <ID>` | Select a different team |
 | `/delta-org invite <email>…` | Invite people to the selected team |
+| `/delta-org manage` | Open the selected team's members page on the dashboard |
 
 Sharing and joining need an interactive Claude Code terminal or Desktop Code tab.
 

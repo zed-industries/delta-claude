@@ -5119,6 +5119,21 @@ async function deltaMenu($: Runtime): Promise<{ text?: string }> {
   return action ? runDeltaCommand($, action, 'delta_subcommand') : {}
 }
 
+/**
+ * Open the selected organization's members page on Delta's dashboard, where members are managed. A
+ * surface that can't open a browser, or an organization that can't be read, gets the link instead.
+ */
+async function manageOrganization($: Runtime): Promise<string> {
+  let organization: Organization | undefined
+  try { organization = (await listOrganizations($)).find((known) => known.current) }
+  catch (error) { return `Delta couldn't read your current team (${error instanceof Error ? error.message : String(error)}). Manage your teams here: ${DASHBOARD_URL}` }
+  if (!organization) return `Delta has no team selected. Manage your teams here: ${DASHBOARD_URL}`
+  const members = membersUrl(organization.id)
+  if (hasInteractiveSurface(await $.session.surfaces()) && await setupEnv($).openLink(members))
+    return `Opened ${organization.name}'s members page in your browser: ${members}`
+  return `Manage ${organization.name}'s members here: ${members}`
+}
+
 /** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
 async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
@@ -5132,8 +5147,9 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
   const shareArguments = /^share(?:\s+(.*))?$/.exec(action)?.[1] ?? ''
   const shareEmails = emailsIn(shareArguments)
   const shareAction = /^share\b/.test(action) && (!shareArguments.trim() || shareEmails.length > 0)
+  if (action === 'org manage') return { text: await manageOrganization($) }
   if (!shareAction && !locator && !organization && invite === undefined)
-    return { text: 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>…' }
+    return { text: 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage' }
   if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
   if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
   if (organization)
@@ -5715,14 +5731,14 @@ export function register(on: On) {
   })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, or choose a team', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | org list | org current | org switch <ID>' })
+    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, or choose a team', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | org list | org current | org switch <ID> | org manage' })
     // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
     // appears in the slash-command menu.
     await $.command.register({ name: 'delta-share', description: 'Delta: sync this session and its code to DeltaDB, and choose who sees it', argumentHint: '[<email>…]' })
     // Claude's menu shows a command's description but not its argument hint, so the description carries the format.
     await $.command.register({ name: 'delta-join', description: 'Delta: join a shared conversation. Needs its link: /delta-join <link>', argumentHint: '<shared-link-or-thread>' })
     await $.command.register({ name: 'delta-setup', description: 'Delta: choose which sessions in this repository sync to DeltaDB' })
-    await $.command.register({ name: 'delta-org', description: 'Delta: manage your team. /delta-org list, current, switch <ID>, or invite <email>', argumentHint: 'list | current | switch <ID> | invite <email>…' })
+    await $.command.register({ name: 'delta-org', description: 'Delta: manage your team. /delta-org list, current, switch <ID>, invite <email>, or manage', argumentHint: 'list | current | switch <ID> | invite <email>… | manage' })
     const result = await next(e)
     const session = await $.session.id()
     try { await activate($, session) }
@@ -5796,7 +5812,7 @@ export function register(on: On) {
   on('command.run', { command: 'delta-setup' }, async ($, e) => runDeltaCommand($, `setup ${e.args.trim()}`.trim(), 'dedicated_command'))
   on('command.run', { command: 'delta-org' }, async ($, e) => e.args.trim()
     ? runDeltaCommand($, `org ${e.args.trim()}`, 'dedicated_command')
-    : { text: 'Usage: /delta-org list (your teams), /delta-org current (the selected one), /delta-org switch <ID>, or /delta-org invite <email>… (invite people to the selected one).' })
+    : { text: 'Usage: /delta-org list (your teams), /delta-org current (the selected one), /delta-org switch <ID>, /delta-org invite <email>… (invite people to the selected one), or /delta-org manage (open the selected one on the dashboard).' })
 
   on('session.append', async ($, e, next) => {
     if (e.agentId !== undefined) {
