@@ -452,11 +452,13 @@ describe('Delta threads as subagents', () => {
     const agentId = await spawn($)
     await $.session.append(childPrompt(agentId))
     await $.turn.start({ ...turnStart('long-tool', 'Inspect the parser'), agentId } as never)
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.childRecords(agentId).some((record) =>
+      record.update?.sessionUpdate === 'state_update' && record.update.state === 'running') &&
+      fake.childWatches.has(agentId))
     const appends = fake.operations().filter((operation) => operation === 'append').length
     // The child is inside a long tool call, so nothing it records would carry the fence; its watch does.
     fake.supersedeChild(agentId)
-    await fake.clock.settle()
+    await fake.settleUntil(() => fake.taskStops.includes(agentId))
     expect(fake.taskStops).toEqual([agentId])
     expect(fake.operations().filter((operation) => operation === 'append')).toHaveLength(appends)
     // Claude ends the stopped run; its watch closes with the turn, and it is stopped only once.
