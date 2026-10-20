@@ -201,7 +201,9 @@ describe('thread commands', () => {
       ],
     }
     await $.tool.call({ tool: 'Edit', tool_use_id: 'edit-live', file_path: '/repo/a' })
-    await fake.clock.settle()
+    // The edit record lands after the transcript records drain, which one settle does not always reach.
+    await fake.settleUntil(() => fake.records().some((record) =>
+      record.update?._meta?.delta?.activity_kind === 'edit'))
 
     const live = fake.records().filter((record) =>
       ['user_message', 'agent_message', 'agent_thought', 'tool_call_update']
