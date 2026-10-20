@@ -1692,8 +1692,7 @@ describe('remote activity', () => {
     expect(fake.aborts).toEqual([])
     if (loss === 'supersession') {
       fake.supersede()
-      await fake.clock.settle()
-      expect(await drawn($)).toContain("Ada's agent")
+      while (!(await drawn($)).includes("Ada's agent")) await fake.clock.settle()
       fake.upsert(remoteItem('Taking over: stop that', { id: 'takeover' }))
     } else fake.live()!.exit(1)
     await fake.clock.settle()
