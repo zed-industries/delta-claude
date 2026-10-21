@@ -1,9 +1,10 @@
 /** CLI boundary fixture and Claude host; watching never creates, mounts, or publishes. */
-import { expect, mock, type MockClock, type Plugin, type TestRest } from 'claude-code/testing'
+import { expect, mock, type Engine, type MockClock, type Plugin, type TestRest } from 'claude-code/testing'
 import type { ApiMessage, ConfigRow, On, ProcessRunResult } from 'claude-code'
 import type { ThreadState, ThreadUser, WatchChild, WatchComment, WatchItem } from './thread-commands'
 import { cliErrorCodes, cliFixture } from './cli-fixtures'
 import { MINIMUM_CLAUDE_VERSION } from './compatibility'
+import { showAnswer } from './row-delivery'
 
 export type Envelope = {
   schemaVersion: 1
@@ -215,12 +216,22 @@ export const heldClockWait: Plugin = {
   },
 }
 
+/**
+ * The running test's engine, which raises rows as a session stores them; a hook beneath the plugin
+ * may not append rows itself.
+ */
+let testEngine: Engine | undefined
+
 /** `test`, with {@link heldClockWait} loaded beside the plugin under test for every case. */
 export function testsWithHeldClockWait(test: (name: string, ...rest: TestRest) => void) {
   return (name: string, ...rest: TestRest) => {
     const options = rest.length === 2 ? rest[0] : {}
     const body = rest.length === 2 ? rest[1] : rest[0]
-    test(name, { ...options, plugins: [heldClockWait, ...(options.plugins ?? [])] }, body)
+    const run: typeof body = (...args) => {
+      testEngine = args[0]
+      return body(...args)
+    }
+    test(name, { ...options, plugins: [heldClockWait, ...(options.plugins ?? [])] }, run)
   }
 }
 
@@ -237,6 +248,7 @@ export function fakeThreads(on: On, options: {
   env?: Record<string, string>
 } = {}) {
   const session = options.session ?? `session-${++sessions}`
+  const engine = testEngine
   /** Waiters for `waitForLog`; the `ui.log` hook answers them as matching lines arrive. */
   const logWaiters: { start: number; match: (log: string) => boolean; resolve: (log: string) => void }[] = []
   /** Waiters for a share link, which the plugin writes only to the debug log. */
@@ -436,6 +448,12 @@ export function fakeThreads(on: On, options: {
     rows: [] as string[],
     /** Every run of the plugin's own command that reached the host instead of the plugin. */
     commandRuns: [] as { command: string; args: string }[],
+    /**
+     * How the host records the plugin's own `show` runs, as a session stores a command's echo and
+     * output after it answers: `args` as a direct run keeps them, `queued` as a run the prompt queue
+     * replayed stores them without, `none` stores nothing.
+     */
+    showRuns: 'args' as 'args' | 'queued' | 'none',
     /** Every row passed down to `session.append` after the plugin's own hook rewrote it: what the model receives. */
     stored: [] as AppendedRow[],
 
@@ -696,10 +714,16 @@ export function fakeThreads(on: On, options: {
   on('ui.render', { component: 'CommandOutput' }, ($, e) =>
     ({ type: 'Text', props: {}, children: [`the output row: ${e.props.text}`] }))
   on('ui.status', ($, e) => { fake.statuses.push(e.text); return { value: undefined } })
-  on('ui.log', ($, e) => {
+  on('ui.log', async (_$, e) => {
     // Claude drops a log whose destination is anything else, so the person never sees it.
     if (e.to !== undefined && e.to !== 'transcript' && e.to !== 'debug')
       fake.violations.push(`ui.log with an invalid destination ${JSON.stringify(e.to)}: ${e.text}`)
+    const ran = e.to === 'debug' ? /^Ran the plugin's own command to draw the Delta item (\S+)\.$/.exec(e.text) : null
+    if (ran && fake.showRuns !== 'none') {
+      const id = ran[1]!
+      const rows = commandRunRows('delta', fake.showRuns === 'queued' ? '' : `show ${id}`, showAnswer(id), { kind: 'plugin', name: 'delta' })
+      for (const stored of rows) await engine?.session.append({ ...stored, uuid: `${stored.uuid}-${id}` } as never)
+    }
     const row = /^Adding a row to Claude's context: (.*)$/s.exec(e.text)
     if (e.to === 'debug' && e.text.startsWith('Delta update check:')) fake.updateDebug.push(e.text)
     if (e.to !== 'debug') fake.logs.push(e.text)

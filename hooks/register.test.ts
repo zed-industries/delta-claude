@@ -1519,10 +1519,11 @@ describe('remote activity', () => {
     await fake.clock.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['a'])
-    // The engine appends the run's rows beside it; this plugin neutralizes its own as they are kept.
-    await appendAsEngine($, commandRunRows('delta', 'show a', '.', { kind: 'plugin', name: 'delta' }))
+    // The engine stores the run's rows once it answers, and this plugin neutralizes its own as they
+    // are kept; the message's own row follows, once its drawn row is stored.
+    const [...rows] = fake.stored.slice(0, 3)
+    const own = fake.stored[3]
     // The message's own row is the model's one copy of it; no command row carries it.
-    const [own, ...rows] = fake.stored
     expect(own).toMatchObject({ door: 'note', origin: { kind: 'plugin', name: 'delta' },
       content: [{ type: 'text', text: '[Delta] Ada, user message (item a):\nPlease rename the flag.' }] })
     expect(rows.map((row) => row.content)).toEqual([
@@ -1536,7 +1537,50 @@ describe('remote activity', () => {
     const stored = JSON.stringify(rows)
     expect(stored).not.toContain('/delta')
     expect(stored).not.toContain('show a')
+    expect(stored).not.toContain('. a')
     expect(stored).not.toContain('Please rename the flag.')
+    fake.expectClean()
+  })
+
+  test('a drawn row is found by its own id, even when the transcript kept no arguments for its run', async ($, on) => {
+    const fake = fakeThreads(on)
+    // As the prompt queue stores a run it replayed: the echo and output carry no arguments.
+    fake.showRuns = 'queued'
+    await $.session.start(sessionStart)
+    await fake.share($)
+    fake.upsert(remoteItem('Please rename the flag.', { id: 'a' }))
+    await fake.clock.settle()
+    await drawReady($, fake)
+    expectOfferedItems(fake, ['a'])
+    // The echo of the plugin's own run stores nothing, though its arguments were already gone.
+    expect(fake.stored[1]!.content).toEqual([])
+    expect(JSON.stringify(fake.stored)).not.toContain('<command-args>')
+    // The output row draws the message by the row's id; the run's arguments are empty.
+    const drawn = JSON.stringify(await $.ui.render({ ...commandOutput('', '.'), requestId: 'delta--output-a' }))
+    expect(drawn).toContain('Please rename the flag.')
+    expect(drawn).toContain('(person)')
+    // A row of the plugin's command that names no item is left to the host.
+    expect(JSON.stringify(await $.ui.render({ ...commandOutput('', '.'), requestId: 'unknown-row' })))
+      .toContain('the output row')
+    expect(fake.logs.join('\n')).not.toContain('Please rename the flag.')
+    fake.expectClean()
+  })
+
+  test('a drawn row the transcript never stores shows the message plainly, and Claude still gets it', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.showRuns = 'none'
+    await $.session.start(sessionStart)
+    await fake.share($)
+    fake.upsert(remoteItem('Please rename the flag.', { id: 'a' }))
+    await fake.clock.settle()
+    await drawReady($, fake)
+    expect(fake.stored).toEqual([])
+    await fake.clock.advance(2000)
+    await fake.clock.settle()
+    expect(fake.logs).toContain('Please rename the flag.')
+    expectOfferedItems(fake, ['a'])
+    expect(fake.stored.at(-1)).toMatchObject({ door: 'note',
+      content: [{ type: 'text', text: '[Delta] Ada, user message (item a):\nPlease rename the flag.' }] })
     fake.expectClean()
   })
 

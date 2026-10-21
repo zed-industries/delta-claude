@@ -8,7 +8,7 @@ import { snapshotMessages } from './snapshot'
 import { activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, ownsSteering, promptGate, releasesMounts, worktreeChanges } from './lifecycle'
 import { checkResult, reconnectDelay, validateAttachmentReceipt, validateCreationReceipt, validatePublicationReceipt } from './command-outcomes'
 import { copyText, personColor, personKey, renderBand, statusCurrentTurn, statusSpinnerRunning, SPINNER_FRAMES, threadTurnOwned, toolRowParts, type StatusSegment, type StatusState, type TurnStatus } from './status'
-import { announceThought, DrawnRows, DrawQueue, shownCommandRewrite, shownItemId, SHOW_ANSWER } from './row-delivery'
+import { announceThought, DrawnRows, DrawQueue, showAnswer, shownCommandRewrite, shownItemId } from './row-delivery'
 import { restoreBinding } from './binding'
 import { pathKey, samePath } from './paths'
 import { PresenceTracker } from './presence'
@@ -233,6 +233,8 @@ type TitleReader = { path: string; offset: number; scanner: TitleScanner; ranged
 const titleReaders = new Map<string, TitleReader>()
 const drawQueue = new DrawQueue()
 let drawing = false
+/** The item each stored output row of the plugin's own `show` run draws, by the row's message id. */
+const drawnRowItems = new Map<string, string>()
 /** The answer the engine gives a plugin's command when no `command.run` hook of its own answered it. */
 const UNANSWERED_COMMAND = /no command\.run hook answered it/
 /**
@@ -1104,8 +1106,10 @@ function dropQueuedDraws() {
 }
 
 /**
- * Answer the queued message rows, oldest first, from a hook context. Rows wait while a local turn
- * runs, and the queue keeps its order across redraws. Each answer settles the row that queued it.
+ * Run the queued message rows' commands, oldest first, from a hook context. Rows wait while a local
+ * turn runs, and the queue keeps its order across redraws. A row is drawn once its output row is
+ * stored, which the `session.append` hook confirms; a command that fails or goes unanswered settles
+ * its row as not drawn.
  */
 async function drainMessages($: Runtime) {
   const session = feed.session
@@ -1118,9 +1122,9 @@ async function drainMessages($: Runtime) {
       let answer: string | undefined
       try { answer = (await $.command.run({ command: 'delta', args: `show ${entry.id}` })).text }
       catch (error) { entry.settle({ deny: String(error) }); continue }
-      entry.settle(answer === undefined || UNANSWERED_COMMAND.test(answer)
-        ? { deny: 'this host did not run the plugin\'s own command' }
-        : {})
+      if (answer === undefined || UNANSWERED_COMMAND.test(answer))
+        entry.settle({ deny: 'this host did not run the plugin\'s own command' })
+      else $.ui.log(`Ran the plugin's own command to draw the Delta item ${entry.id}.`, { to: 'debug' })
     }
   } finally {
     drawing = false
@@ -1514,6 +1518,36 @@ function liveActivity(update: Update): Update {
 
 function key(session: string) { return `session:${session}` }
 function ledgerKey(session: string) { return `appended:${session}` }
+function drawnRowKey(session: string, row: string) { return `drawn:${session}:${row}` }
+
+/**
+ * Remember which item a stored output row draws, so the row draws again after a restart or resume,
+ * and settle the row's draw. A row that cannot be remembered still draws in this process.
+ */
+async function bindDrawnRow($: Runtime, row: string, item: string) {
+  drawnRowItems.set(row, item)
+  drawQueue.confirm(item)
+  try { await $.store.set(drawnRowKey(await $.session.id(), row), item) }
+  catch (error) { $.ui.log(`Couldn't remember which Delta item a drawn row shows (${String(error)}).`, { to: 'debug' }) }
+}
+
+/**
+ * The item an output row of the plugin's own `show` run draws: by the row's message id, the one
+ * identity the engine documents for a drawn row, else by the run's arguments, which rows stored
+ * by earlier versions of the plugin carry.
+ */
+async function drawnRowItem($: Runtime, row: string, args: string): Promise<string | undefined> {
+  const known = drawnRowItems.get(row)
+  if (known !== undefined) return known
+  try {
+    const stored = await $.store.get(drawnRowKey(await $.session.id(), row))
+    if (typeof stored === 'string') {
+      drawnRowItems.set(row, stored)
+      return stored
+    }
+  } catch { /* drawn by its arguments, if it has them */ }
+  return shownItemId(args)
+}
 
 function recoveryCommand(binding?: Binding) {
   const locator = binding?.joinTransition?.locator ?? (binding?.joined ? binding.locator ?? binding.thread : undefined)
@@ -4991,6 +5025,7 @@ async function pruneStore($: Runtime) {
     for (const agentId of binding.children ?? []) await $.store.delete(childKey(id, agentId))
     await $.store.delete(key(id))
     await $.store.delete(ledgerKey(id))
+    for (const storeKey of keys) if (storeKey.startsWith(drawnRowKey(id, ''))) await $.store.delete(storeKey)
   }
 }
 
@@ -5591,8 +5626,9 @@ export function register(on: On) {
   // The plugin's own command output row: a remote message, event, tool call or comment draws here, from this
   // plugin's own data rather than the row's stored text, which carries none of it.
   on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
-    const id = shownItemId(e.props.args)
-    if (e.props.command !== 'delta' || id === undefined) return next(e)
+    if (e.props.command !== 'delta') return next(e)
+    const id = await drawnRowItem($, e.requestId, e.props.args)
+    if (id === undefined) return next(e)
     const view = feed.view
     const item = view?.items.get(id)
     const { Box, Text, Markdown } = $.ui.resolve(e)
@@ -5815,7 +5851,7 @@ export function register(on: On) {
     // A plugin's own run reads this plugin's name; anyone else who types the internal form is a
     // person or another plugin, and gets the usage text below.
     if (internal !== undefined && e.origin?.kind === 'plugin' && e.origin.name === $.plugin.name)
-      return { text: SHOW_ANSWER }
+      return { text: showAnswer(internal) }
     if (!action) return deltaMenu($, 'menu', DELTA_USAGE, 'delta_subcommand')
     return runDeltaCommand($, action, 'delta_subcommand')
   })
@@ -5849,9 +5885,14 @@ export function register(on: On) {
       return stored
     }
     // The plugin's own `show` run is stored rewritten, so neither the model nor a resumed session's
-    // copy of these rows names the internal command or its item id.
+    // copy of these rows names the internal command or its item id. Its output row names the item
+    // until then, which is how the row is tied to what it draws.
     const shown = shownCommandRewrite($.plugin.name, e)
-    if (shown !== undefined) return next({ ...e, message: { ...e.message, content: shown } })
+    if (shown !== undefined) {
+      const stored = await next({ ...e, message: { ...e.message, content: shown.content } })
+      if (shown.item !== undefined && !('deny' in stored)) await bindDrawnRow($, stored.uuid, shown.item)
+      return stored
+    }
     if (!capturedMessage(e.message, e.door)) return next(e)
     const session = await $.session.id()
     // A row from a brand-new session waits for its capture boundary, so a prompt or its output that

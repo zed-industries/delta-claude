@@ -7,15 +7,46 @@ test('unrelated commands and other plugins retain their rows', () => {
   const echo = '<command-name>/delta</command-name><command-args>show a</command-args>'
   const row = { door: 'command', origin: { kind: 'plugin', name: 'delta-plugin' },
     message: { type: 'user', role: 'user', content: [{ type: 'text', text: echo }] } }
-  expect(shownCommandRewrite('delta-plugin', row)).toEqual([])
+  expect(shownCommandRewrite('delta-plugin', row)).toEqual({ content: [] })
+  // A run the transcript kept without its arguments is still the plugin's own.
+  expect(shownCommandRewrite('delta-plugin', { ...row, message: {
+    ...row.message, content: [{ type: 'text', text: '<command-name>/delta</command-name><command-args></command-args>' }],
+  } })).toEqual({ content: [] })
   for (const origin of [{ kind: 'composer' }, { kind: 'plugin', name: 'other' }])
     expect(shownCommandRewrite('delta-plugin', { ...row, origin })).toBeUndefined()
-  expect(shownCommandRewrite('delta-plugin', { ...row, message: {
-    ...row.message, content: [{ type: 'text', text: '<command-name>/cost</command-name><command-args></command-args>' }],
-  } })).toBeUndefined()
-  expect(shownCommandRewrite('delta-plugin', { ...row, message: {
-    type: 'system', name: 'local_command', content: [{ type: 'text', text: '<local-command-stdout>delta-plugin: .</local-command-stdout>' }],
-  } })).toEqual([{ type: 'text', text: '<local-command-stdout>.</local-command-stdout>' }])
+  for (const text of ['<command-name>/cost</command-name><command-args></command-args>',
+    '<command-name>/delta</command-name><command-args>share</command-args>'])
+    expect(shownCommandRewrite('delta-plugin', { ...row, message: { ...row.message, content: [{ type: 'text', text }] } }))
+      .toBeUndefined()
+  const output = (text: string) => ({ ...row, origin: { kind: 'engine' }, message: {
+    type: 'system', name: 'local_command', content: [{ type: 'text', text: `<local-command-stdout>${text}</local-command-stdout>` }],
+  } })
+  const neutral = [{ type: 'text', text: '<local-command-stdout>.</local-command-stdout>' }]
+  // The answer names the item it draws, which is read out and stored as the bare placeholder.
+  expect(shownCommandRewrite('delta-plugin', output('delta-plugin: . comment:c1'))).toEqual({ content: neutral, item: 'comment:c1' })
+  expect(shownCommandRewrite('delta-plugin', output('delta-plugin: .'))).toEqual({ content: neutral })
+  expect(shownCommandRewrite('delta-plugin', output('.'))).toEqual({ content: neutral })
+  // Another plugin's answer, or a command that printed something else, is left alone.
+  for (const text of ['other: . a', '. a', 'delta-plugin: Usage: /delta share'])
+    expect(shownCommandRewrite('delta-plugin', output(text))).toBeUndefined()
+})
+
+test('a run draws once its output row is stored, and is not drawn when it never is', async () => {
+  const tasks: (() => void)[] = []
+  const after = (_milliseconds: number, action: () => void) => {
+    tasks.push(action)
+    return { cancel() {} }
+  }
+  const queue = new DrawQueue()
+  const stored = queue.wait('session', 'a', () => false, after)
+  const lost = queue.wait('session', 'b', () => false, after)
+  // Both commands ran: neither is waiting for a hook any more.
+  queue.shift()
+  queue.shift()
+  queue.confirm('a')
+  expect(await stored).toEqual({})
+  for (const task of tasks.splice(0)) task()
+  expect((await lost).deny).toBeDefined()
 })
 
 test('an item is drawn once across repeated or corrected model-row offers', async () => {
