@@ -1,5 +1,5 @@
 import { describe, expect, test as kitTest, tier, type Engine } from 'claude-code/testing'
-import { CHECKOUT, CONFIG, FOLDERS, LIVE, MOUNTS, abovePrompt, bash, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart } from './fake-thread-commands'
+import { CHECKOUT, CONFIG, FOLDERS, LIVE, MOUNTS, abovePrompt, bash, drawReady, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart } from './fake-thread-commands'
 import { itemFingerprint } from './conversation'
 import { cliFixture } from './cli-fixtures'
 import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink } from './handoff'
@@ -168,6 +168,30 @@ describe('joining', () => {
     fake.expectClean()
     await $.session.end(sessionEnd(fake.session))
   })
+
+  for (const disabled of [false, true]) {
+    test(`a long thread joined in a fresh session ${disabled ? 'leaves older history out when compaction is off' : 'compacts its older history'}`, async ($, on) => {
+      const fake = sharedThread(on, $, disabled ? { env: { DISABLE_COMPACT: '1' } } : {})
+      // Thirty-two rows of the most a row holds, past the limit a model of unknown window gets.
+      for (let index = 0; index < 32; index++) fake.upsert(remoteItem('x'.repeat(30_000), { id: `m${index}` }))
+      await $.session.start(sessionStart)
+      await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+      await finishJoin(fake)
+      await drawReady($, fake)
+      if (disabled) {
+        expect(fake.compactions).toEqual([])
+        // The opening request, the stand-in for the five after it, the ten older that fit, and the newest sixteen whole.
+        expect(fake.rows).toHaveLength(28)
+      } else {
+        // The five older rows past the limit fit one round; then the eleven within it, and the newest sixteen whole.
+        expect(fake.compactions).toHaveLength(1)
+        expect(fake.compactions[0]).toContain('opening request')
+        expect(fake.rows).toHaveLength(32)
+      }
+      fake.expectClean()
+      await $.session.end(sessionEnd(fake.session))
+    })
+  }
 
   test("a Desktop tab hands the join to a new session in the thread's folder, changing nothing here", async ($, on) => {
     const fake = desktopTab(on, $)

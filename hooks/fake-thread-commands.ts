@@ -104,6 +104,17 @@ export const abovePrompt = {
   props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 80,
     scroll: { offset: 0, bodyRows: 12 }, view: {} },
 } as const
+
+/** Keep redrawing, as a live host does, until the plugin has drawn every row it had ready. */
+export async function drawReady($: Engine, fake: ReturnType<typeof fakeThreads>) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const before = fake.rows.length
+    await $.ui.render(abovePrompt)
+    // A row's draw is awaited by the row loop, so let its continuation queue the next one.
+    await fake.clock.settle()
+    if (fake.rows.length === before) return
+  }
+}
 /** The band's mark while the watch is live: the band draws it however its other parts change. */
 export const LIVE = JSON.stringify({ type: 'Text', props: { color: 'green' }, children: ['●'] })
 /** The band's mark while it connects, or reconnects past a drop's grace. */
@@ -463,6 +474,8 @@ export function fakeThreads(on: On, options: {
      * replayed stores them without, `none` stores nothing.
      */
     showRuns: 'args' as 'args' | 'queued' | 'none',
+    /** The instructions of each compaction the plugin asked for. */
+    compactions: [] as string[],
     /** Every row passed down to `session.append` after the plugin's own hook rewrote it: what the model receives. */
     stored: [] as AppendedRow[],
 
@@ -715,7 +728,10 @@ export function fakeThreads(on: On, options: {
     fake.exports++
     return { value: fake.messages }
   })
-  on('session.compact', () => ({ messages: [{ role: 'user', text: 'Compacted summary', toolUses: [] }] }))
+  on('session.compact', ($, e) => {
+    fake.compactions.push(e.instructions ?? '')
+    return { messages: [{ role: 'user', text: 'Compacted summary', toolUses: [] }] }
+  })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.invalidate', () => { fake.invalidates++; return { value: undefined } })
   // The host draws these sites itself when the plugin passes them on unchanged.

@@ -5,7 +5,7 @@ import { cliFixture } from './cli-fixtures'
 import { claudeVersionWarning } from './compatibility'
 import { personColor, personKey } from './status'
 import {
-  ADA, CHECKOUT, CONFIG, LIVE, PENDING, abovePrompt, bash, commandOutput, commandRunRows, fakeThreads,
+  ADA, CHECKOUT, CONFIG, LIVE, PENDING, abovePrompt, bash, commandOutput, commandRunRows, drawReady, fakeThreads,
   localCommandCaveat, prompt, remoteComment, remoteItem, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait,
   turnComplete, turnStart, typedDelta, userMessage,
 } from './fake-thread-commands'
@@ -25,17 +25,6 @@ const drawn = async ($: Engine) => JSON.stringify(await $.ui.render(abovePrompt)
  * row only reaches Claude when the host draws a site again.
  */
 const redraw = async ($: Engine) => JSON.stringify(await $.ui.render(abovePrompt))
-
-/** Keep redrawing, as a live host does, until the plugin has drawn every row it had ready. */
-async function drawReady($: Engine, fake: ReturnType<typeof fakeThreads>) {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const before = fake.rows.length
-    await redraw($)
-    // A row's draw is awaited by the row loop, so let its continuation queue the next one.
-    await fake.clock.settle()
-    if (fake.rows.length === before) return
-  }
-}
 
 /** Append one command run's rows as the engine does; `fake.stored` holds them as the plugin rewrote them. */
 async function appendAsEngine($: Engine, rows: readonly unknown[]) {
