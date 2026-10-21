@@ -1,6 +1,6 @@
 import { describe, expect, test, tier } from 'claude-code/testing'
 import {
-  DISPLAY_LIMIT, LEDGER_SAVE_INTERVAL, MARKDOWN_LIMIT, OMITTED, RemoteView, SNAPSHOT_TAIL, earlierItemsNotice, omittedItemsRow, addRows, middleTruncate, conversationText, conversationWebLink, isMessageItem, itemAuthor, itemDisplay,
+  DISPLAY_LIMIT, LEDGER_SAVE_INTERVAL, MARKDOWN_LIMIT, OMITTED, RemoteView, SNAPSHOT_TAIL, compactionRound, earlierItemsNotice, omittedItemsRow, addRows, snapshotBudget, snapshotLimit, toolRunRow, middleTruncate, conversationText, conversationWebLink, isMessageItem, itemAuthor, itemDisplay,
   isDrawnItem, itemFingerprint, itemMarkdown, personParagraphs, removedItemRow, renderItem, type Ledger, type PendingRow, type RowSink,
   commentAction, commentDisplay, commentFingerprint, commentKey, commentQuote, renderComment, type QuotedLine,
 } from './conversation'
@@ -525,10 +525,11 @@ describe('adding rows', () => {
 
   test('a snapshot past the budget gives Claude its newest rows, after one row standing in for the rest', async () => {
     const text = 'x'.repeat(100)
-    const size = renderItem(item(text, { id: 'i0' }), 'thread')!.length
+    // Agent messages, since the thread's opening request would be kept.
+    const size = renderItem(item(text, { id: 'i0', kind: 'agent_message' }), 'thread')!.length
     const view = new RemoteView('thread', { thread: 'thread', items: {} }, size * 3)
     const ids = Array.from({ length: 10 }, (_, index) => `i${index}`)
-    for (const id of ids) view.upsert(item(text, { id }))
+    for (const id of ids) view.upsert(item(text, { id, kind: 'agent_message' }))
     view.endSnapshot()
     const sink = fakeSink()
     await addRows(view, sink)
@@ -541,14 +542,14 @@ describe('adding rows', () => {
     expect(Object.keys(sink.saved.at(-1)!.items)).toEqual(ids)
 
     // Claude never read an omitted item, so its edit or removal corrects nothing.
-    view.upsert(item('changed', { id: 'i0' }))
+    view.upsert(item('changed', { id: 'i0', kind: 'agent_message' }))
     view.remove('i1')
     await addRows(view, sink)
     expect(sink.appended).toHaveLength(4)
     expect(view.ledger.items.i1).toBeUndefined()
     // A reconnect repeats neither the rows nor the stand-in.
     view.reset()
-    for (const id of ids.filter((id) => id !== 'i1')) view.upsert(item(id === 'i0' ? 'changed' : text, { id }))
+    for (const id of ids.filter((id) => id !== 'i1')) view.upsert(item(id === 'i0' ? 'changed' : text, { id, kind: 'agent_message' }))
     view.endSnapshot()
     await addRows(view, sink)
     expect(sink.appended).toHaveLength(4)
@@ -557,7 +558,7 @@ describe('adding rows', () => {
 
   test('the newest row always reaches Claude, and a refused stand-in leaves the rest for the next snapshot', async () => {
     const view = new RemoteView('thread', { thread: 'thread', items: {} }, 1)
-    for (const id of ['a', 'b']) view.upsert(item(id, { id }))
+    for (const id of ['a', 'b']) view.upsert(item(id, { id, kind: 'agent_message' }))
     view.endSnapshot()
     const refusing = fakeSink()
     refusing.append = async (row) => row.omits ? { deny: 'policy' } : (refusing.appended.push(row.text), {})
@@ -565,7 +566,7 @@ describe('adding rows', () => {
     expectModelRows(refusing.appended, ['b'])
     expect(view.ledger.items.a).toBeUndefined()
     view.reset()
-    for (const id of ['a', 'b']) view.upsert(item(id, { id }))
+    for (const id of ['a', 'b']) view.upsert(item(id, { id, kind: 'agent_message' }))
     view.endSnapshot()
     // Claude already has `b`, so `a` is now the newest row it lacks, and reaches it whole.
     const sink = fakeSink()
@@ -574,9 +575,125 @@ describe('adding rows', () => {
     expect(view.ledger.items.a).not.toBe(OMITTED)
   })
 
+  test('older rows past the budget are summarized, each run of tool calls as one row, and the newest stay whole', async () => {
+    const output = 'o'.repeat(5_000)
+    const view = new RemoteView('thread', { thread: 'thread', items: {} }, 1_000)
+    view.upsert(item('Rename the flag.', { id: 'u0' }))
+    view.upsert(call('t1', 'execute', { title: 'Terminal', name: 'Bash', status: 'failed', rawInput: { command: 'npm test' } }))
+    view.upsert(call('t2', 'read', { title: 'Read src/a.ts', rawInput: { file_path: '/repo/src/a.ts' } }))
+    view.upsert(call('t3', 'edit', { title: 'Edit', rawInput: { file_path: '/repo/src/a.ts' }, rawOutput: output }))
+    view.upsert(call('t4', 'edit', { title: 'Edit', content: [{ type: 'diff', path: '/repo/src/b.ts', newText: output }] }))
+    view.upsert(item('Renamed it.', { id: 'm5', kind: 'agent_message', author: { user_id: null, name: 'Claude' } }))
+    view.upsert(item('Tests pass now.', { id: 'm6', kind: 'agent_message', author: { user_id: null, name: 'Claude' } }))
+    view.endSnapshot()
+    const sink = fakeSink()
+    await addRows(view, sink)
+    expect(sink.appended).toHaveLength(4)
+    expectModelRows([sink.appended[0]!], ['u0'], ['Rename the flag.'])
+    expect(sink.appended[1]).toBe('[Delta] Claude, 4 tool calls, summarized to save room:\n' +
+      'ran 1 command, read 1 file; edited /repo/src/a.ts, /repo/src/b.ts; 1 failed: Terminal · npm test')
+    expectModelRows(sink.appended.slice(2), ['m5', 'm6'])
+    // A summarized call is never drawn or corrected on its own.
+    expect(sink.drawn).toEqual(['u0', 'm5', 'm6'])
+    expect(sink.saved.at(-1)!.items).toMatchObject({ t1: OMITTED, t2: OMITTED, t3: OMITTED, t4: OMITTED })
+    view.upsert(call('t3', 'edit', { title: 'Edit', rawOutput: 'changed' }))
+    await addRows(view, sink)
+    expect(sink.appended).toHaveLength(4)
+  })
+
+  test('a run of tool calls breaks where its author changes, and names only the first few of many', async () => {
+    const calls = Array.from({ length: 10 }, (_, index) => call(`e${index}`, 'edit', { title: 'Edit', rawInput: { path: `f${index}.ts` } }))
+    expect(toolRunRow(calls)).toContain('edited f0.ts, f1.ts, f2.ts, f3.ts, f4.ts, f5.ts, f6.ts, f7.ts and 2 more')
+    expect(toolRunRow([call('x', 'think', {})])).toContain('called 1 other tool')
+    const view = new RemoteView('thread', { thread: 'thread', items: {} }, 600)
+    view.upsert(call('c1', 'execute', { rawInput: { command: 'ls' }, rawOutput: 'o'.repeat(5_000) }))
+    view.upsert(call('c2', 'execute', { rawInput: { command: 'ls' }, rawOutput: 'o'.repeat(5_000) }, 'Ada'))
+    view.upsert(item('done', { id: 'last', kind: 'agent_message' }))
+    view.endSnapshot()
+    const added = await rows(view)
+    expect(added.map((row) => row.id)).toEqual(['delta:tools:c1', 'delta:tools:c2', 'last'])
+    expect(added[0]!.text).toContain('Claude, 1 tool call, summarized')
+    expect(added[1]!.text).toContain('Ada, 1 tool call, summarized')
+  })
+
+  test('past the limit, the thread\'s opening request is kept before the row standing in for the rest', async () => {
+    const text = 'x'.repeat(100)
+    const size = renderItem(item(text, { id: 'a1', kind: 'agent_message' }), 'thread')!.length
+    const view = new RemoteView('thread', { thread: 'thread', items: {} }, size * 3, size * 4)
+    const ids = Array.from({ length: 9 }, (_, index) => `a${index + 1}`)
+    view.upsert(item(text, { id: 'u0' }))
+    for (const id of ids) view.upsert(item(text, { id, kind: 'agent_message' }))
+    view.endSnapshot()
+    const sink = fakeSink()
+    await addRows(view, sink)
+    expectModelRows([sink.appended[0]!], ['u0'])
+    // The request takes the room the newest of the summary would have had.
+    expect(sink.appended[1]).toBe(omittedItemsRow(6, 'thread'))
+    expectModelRows(sink.appended.slice(2), ['a7', 'a8', 'a9'])
+  })
+
+  test('a view that may compact adds the summary past the limit in rounds, compacting after each, then the rest of it and the newest whole', async () => {
+    const { view, ids } = longThread()
+    const compactions: number[] = []
+    const sink = fakeSink({ async compact(instructions) {
+      expect(instructions).toContain("opening request")
+      compactions.push(sink.appended.length)
+      return true
+    } })
+    await addRows(view, sink)
+    expectModelRows(sink.appended, ids)
+    // The summary within the limit, `a6`, is added after the last compaction, as it is.
+    expect(compactions).toEqual([2, 4, 6])
+    // The ledger is saved before each compaction, so a restart repeats nothing compacted.
+    expect(Object.keys(sink.saved[0]!.items)).toEqual(ids.slice(0, 2))
+    expect(view.settled).toBe(true)
+  })
+
+  test('a failed compaction leaves the older history not added yet out, behind one row', async () => {
+    const { view, ids } = longThread()
+    const sink = fakeSink({ compact: async () => false })
+    await addRows(view, sink)
+    expectModelRows(sink.appended.slice(0, 2), ids.slice(0, 2))
+    expect(sink.appended[2]).toBe(omittedItemsRow(4, 'thread'))
+    expectModelRows(sink.appended.slice(3), ids.slice(6))
+    expect(sink.saved.at(-1)!.items).toMatchObject(Object.fromEntries(ids.slice(2, 6).map((id) => [id, OMITTED])))
+  })
+
+  test('a compaction a turn interrupts waits for the rows to resume', async () => {
+    const { view, ids } = longThread()
+    let held = false
+    let tries = 0
+    const sink = fakeSink({
+      held: () => held,
+      async compact() { tries++; if (tries === 1) { held = true; return false } return true },
+    })
+    await addRows(view, sink)
+    expect(sink.appended).toHaveLength(2)
+    expect(view.compactionDue).toBe(true)
+    held = false
+    await addRows(view, sink)
+    expectModelRows(sink.appended, ids)
+    expect(tries).toBe(4)
+  })
+
+  test('the snapshot budget and limit are shares of the model\'s window, and one compaction reads at most a set amount', () => {
+    expect(snapshotBudget(undefined)).toBe(400_000)
+    expect(snapshotBudget(200_000)).toBe(180_000)
+    expect(snapshotBudget(1_000_000)).toBe(450_000)
+    expect(snapshotBudget(10_000)).toBe(60_000)
+    expect(snapshotLimit(undefined)).toBe(666_666)
+    expect(snapshotLimit(200_000)).toBe(300_000)
+    expect(snapshotLimit(1_000_000)).toBe(1_500_000)
+    // A small window's floor for the newest rows leaves no room for a summary.
+    expect(snapshotLimit(10_000)).toBe(60_000)
+    expect(compactionRound(100_000)).toBe(150_000)
+    expect(compactionRound(200_000)).toBe(300_000)
+    expect(compactionRound(1_000_000)).toBe(300_000)
+  })
+
   test('the person\'s notice says how many undrawn items are not in Claude\'s context either', () => {
     expect(earlierItemsNotice(3, 'thread')).toContain('3 earlier items are in Claude\'s context but not shown here')
-    expect(earlierItemsNotice(3, 'thread', 2)).toContain('the oldest 2 are not in Claude\'s context either')
+    expect(earlierItemsNotice(3, 'thread', 2)).toContain('and 2 of them are not in Claude\'s context either')
     expect(earlierItemsNotice(1, 'thread', 1)).toContain('1 earlier item is not shown here or in Claude\'s context')
   })
 
@@ -674,6 +791,21 @@ function item(text: string, fields: Partial<WatchItem> = {}): WatchItem {
     id: 'item-1', kind: 'user_message', after_id: null, turn_id: null, author: { user_id: 'u', name: 'Ada' },
     created_at: 1, open: false, content: { text }, ...fields,
   }
+}
+
+/** Ten agent messages past a budget of three and a limit of four, in a view that compacts every two of its older ones. */
+function longThread() {
+  const text = 'x'.repeat(100)
+  const size = renderItem(item(text, { id: 'a0', kind: 'agent_message' }), 'thread')!.length
+  const view = new RemoteView('thread', { thread: 'thread', items: {} }, size * 3, size * 4, size * 2.5)
+  const ids = Array.from({ length: 10 }, (_, index) => `a${index}`)
+  for (const id of ids) view.upsert(item(text, { id, kind: 'agent_message' }))
+  view.endSnapshot()
+  return { view, ids }
+}
+
+function call(id: string, kind: string, content: Record<string, unknown>, author = 'Claude'): WatchItem {
+  return item('', { id, kind: 'tool_call', author: { user_id: null, name: author }, content: { toolCallId: id, kind, status: 'completed', ...content } })
 }
 
 function expectModelRows(actual: string[], ids: string[], contents: string[] = []) {

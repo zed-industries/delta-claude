@@ -20,9 +20,9 @@ import {
   type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadStatus, type ThreadTurn, type ThreadUpload, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
 import {
-  RemoteView, addRows, commentAction, commentAuthor, commentDisplay, commentMarkdown, commentQuote,
+  RemoteView, addRows, commentAction, commentAuthor, commentDisplay, commentMarkdown, commentQuote, compactionRound,
   conversationText, conversationWebLink, isDrawnItem, isEventItem, itemAuthor, itemDisplay, itemMarkdown, keyedComment,
-  toolCallParts, THOUGHT_KIND, type Ledger, type PendingRow,
+  snapshotBudget, snapshotLimit, toolCallParts, THOUGHT_KIND, type Ledger, type PendingRow,
 } from './conversation'
 import { TitleScanner, transcriptRead } from './title'
 import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
@@ -389,9 +389,13 @@ async function startConversation($: Runtime, session: string): Promise<ThreadRea
     await stopping
     if (!ownsStartup()) throw new Error('Thread watcher startup was cancelled')
     const saved = await $.store.get(ledgerKey(session)) as Ledger | undefined
+    const window = await contextWindow($)
+    // A joined session's conversation holds only its thread until its first rows are added, so only
+    // there can compacting it make room for a long thread without touching anyone's own work.
+    const compacts = saved === undefined && !!stateFor(session).binding?.joined && !await compactionDisabled($)
     if (!ownsStartup()) throw new Error('Thread watcher startup was cancelled')
     feed.view = new RemoteView(thread, saved?.thread === thread && saved.items !== null && typeof saved.items === 'object'
-      ? saved : { thread, items: {} })
+      ? saved : { thread, items: {} }, snapshotBudget(window), snapshotLimit(window), compacts ? compactionRound(window) : undefined)
     launched = true
     void consumeConversation($, session, revision, cancel.signal, readiness).catch((error) => {
       if (!ownsStartup()) return
@@ -1194,6 +1198,7 @@ function settleRemote($: Runtime, session: string): Promise<void> | undefined {
         announce: (text) => showToPerson($, text),
         debug: (text) => $.ui.log(text, { to: 'debug' }),
         fail: (reason) => settleFailure($, reason),
+        compact: (instructions) => compactHistory($, instructions),
       })
     } finally {
       if (feed.settling === task) feed.settling = undefined
@@ -1552,6 +1557,30 @@ async function shownRow($: Runtime, row: string): Promise<ShownRow | undefined> 
 async function drawnRowItem($: Runtime, row: string, args: string): Promise<string | undefined> {
   const shown = await shownRow($, row)
   return typeof shown === 'string' ? shown : shownItemId(args)
+}
+
+/** The session model's context window in tokens, which sizes a snapshot; undefined when the host does not say. */
+async function contextWindow($: Runtime): Promise<number | undefined> {
+  try { return (await $.session.usage()).context.window || undefined }
+  catch { return }
+}
+
+/** Claude refuses every compaction when `DISABLE_COMPACT` is set, so a snapshot then leaves older history out instead. */
+async function compactionDisabled($: Runtime): Promise<boolean> {
+  try { return /^(1|true|yes|on)$/i.test((await $.env.get('DISABLE_COMPACT'))?.trim() ?? '') }
+  catch { return false }
+}
+
+/** Compact a joined session's conversation between turns; whether it was compacted. */
+async function compactHistory($: Runtime, instructions: string): Promise<boolean> {
+  try {
+    const result = await $.session.compact({ instructions })
+    if (result.skip === undefined) return true
+    $.ui.log(`Delta thread history was not compacted: ${result.skip}`, { to: 'debug' })
+  } catch (error) {
+    $.ui.log(`Delta thread history could not be compacted (${String(error)}).`, { to: 'debug' })
+  }
+  return false
 }
 
 function recoveryCommand(binding?: Binding) {

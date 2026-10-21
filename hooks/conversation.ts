@@ -19,11 +19,44 @@ export const MARKDOWN_LIMIT = 10_000
 /** How many of a snapshot's newest first-seen items are drawn for the person. */
 export const SNAPSHOT_TAIL = 5
 /**
- * How many characters of a snapshot's first-seen rows reach Claude, newest first (about 100k tokens
- * at four characters a token); older items are left out behind one row naming how to read them, so
- * joining a long thread does not fill Claude's context.
+ * How many characters of a snapshot's newest first-seen rows reach Claude whole when the model's
+ * context window is unknown (about 130k tokens at three characters a token). Older items are
+ * summarized, compacted or left out, so joining a long thread does not fill Claude's context.
  */
 export const SNAPSHOT_BUDGET = 400_000
+/** Of the model's context window, the share a snapshot's newest rows may take whole, within a floor and a cap in tokens. */
+const SNAPSHOT_WINDOW_SHARE = 0.3
+/** Of the window, the share a snapshot's rows may take in all, its older items in summary filling what the newest leave. */
+const SNAPSHOT_LIMIT_SHARE = 0.5
+const SNAPSHOT_TOKENS_MIN = 20_000
+const SNAPSHOT_TOKENS_MAX = 150_000
+/** Of the window, how much summarized history one compaction reads, within a cap in tokens. */
+const COMPACTION_WINDOW_SHARE = 0.5
+const COMPACTION_TOKENS_MAX = 100_000
+/** Characters per token for rows Claude has not read yet: few, since code and JSON tokenize densely. */
+const CHARS_PER_TOKEN = 3
+
+/** The snapshot budget for a model whose context window is `window` tokens, or the default when it is unknown. */
+export function snapshotBudget(window: number | undefined): number {
+  if (!window) return SNAPSHOT_BUDGET
+  const tokens = Math.min(Math.max(window * SNAPSHOT_WINDOW_SHARE, SNAPSHOT_TOKENS_MIN), SNAPSHOT_TOKENS_MAX)
+  return Math.floor(tokens * CHARS_PER_TOKEN)
+}
+
+/**
+ * How many characters a snapshot's rows may take in all, newest and summarized together, for a
+ * context window of `window` tokens; never less than the newest rows' budget.
+ */
+export function snapshotLimit(window: number | undefined): number {
+  if (!window) return Math.floor(SNAPSHOT_BUDGET * SNAPSHOT_LIMIT_SHARE / SNAPSHOT_WINDOW_SHARE)
+  return Math.max(Math.floor(window * SNAPSHOT_LIMIT_SHARE * CHARS_PER_TOKEN), snapshotBudget(window))
+}
+
+/** How many characters of summarized history one compaction reads, for a context window of `window` tokens. */
+export function compactionRound(window: number | undefined): number {
+  const tokens = window ? Math.min(window * COMPACTION_WINDOW_SHARE, COMPACTION_TOKENS_MAX) : COMPACTION_TOKENS_MAX
+  return Math.floor(tokens * CHARS_PER_TOKEN)
+}
 
 /** Claude's text nodes allow tabs and newlines, but reject other control characters. */
 export function conversationText(text: string): string {
@@ -262,14 +295,77 @@ export function renderItem(item: WatchItem, thread: string, edited = false): str
   return clip(`${header}\n${body}`, ROW_LIMIT)
 }
 
+type RunCount = readonly [verb: string, one: string, many: string]
+/** How a run's summary counts each ACP tool kind whose files it does not name. */
+const RUN_COUNTS: Record<string, RunCount> = {
+  execute: ['ran', 'command', 'commands'],
+  read: ['read', 'file', 'files'],
+  search: ['ran', 'search', 'searches'],
+  fetch: ['fetched', 'page', 'pages'],
+}
+const OTHER_TOOLS: RunCount = ['called', 'other tool', 'other tools']
+/** Kinds whose files a run's summary names, since what changed matters most in old history. */
+const RUN_CHANGES: Record<string, string> = { edit: 'edited', delete: 'deleted', move: 'moved' }
+/** How many files of each change, or failed calls, a run's summary names before counting the rest. */
+const RUN_NAMED = 8
+
 /**
- * The person's notice that a snapshot's earlier items were not drawn; the oldest `omitted` of them
- * did not reach Claude's context either.
+ * Consecutive tool calls by one author as one model-visible row, for older snapshot items summarized
+ * to fit the budget: how many of each kind ran, the files they changed, and the calls that failed.
+ */
+export function toolRunRow(calls: readonly WatchItem[]): string {
+  const counted = new Map<RunCount, number>()
+  const changed = new Map<string, Set<string>>()
+  const failed: string[] = []
+  for (const call of calls) {
+    const kind = typeof call.content.kind === 'string' ? call.content.kind : ''
+    const verb = RUN_CHANGES[kind]
+    if (verb) {
+      const paths = changed.get(verb) ?? new Set()
+      for (const path of changedPaths(call)) paths.add(middleTruncate(path, TOOL_LINE_LIMIT))
+      changed.set(verb, paths)
+    } else {
+      const count = RUN_COUNTS[kind] ?? OTHER_TOOLS
+      counted.set(count, (counted.get(count) ?? 0) + 1)
+    }
+    if (call.content.status === 'failed') {
+      const { name, detail } = toolCallParts(call)
+      failed.push(detail ? `${name} · ${middleTruncate(detail, TOOL_LINE_LIMIT)}` : name)
+    }
+  }
+  const parts = [[...counted].map(([[verb, one, many], count]) => `${verb} ${count} ${count === 1 ? one : many}`).join(', ')]
+  for (const [verb, paths] of changed) parts.push(`${verb} ${namedFew([...paths])}`)
+  if (failed.length) parts.push(`${failed.length} failed: ${namedFew(failed)}`)
+  return `[Delta] ${itemAuthor(calls[0]!)}, ${calls.length} tool call${calls.length === 1 ? '' : 's'}, summarized to save room:\n` +
+    parts.filter(Boolean).join('; ')
+}
+
+/** The files a change names: its patches' or locations' paths, else its input's path, else its title. */
+function changedPaths(call: WatchItem): string[] {
+  const listed = [call.content.content, call.content.locations]
+    .flatMap((list) => Array.isArray(list) ? list.map((entry) => entry?.path) : [])
+  const input = call.content.rawInput
+  const given = typeof input === 'object' && input !== null
+    ? ['file_path', 'path', 'notebook_path'].map((key) => (input as Record<string, unknown>)[key]) : []
+  const paths = (values: unknown[]) => values.filter((path): path is string => typeof path === 'string' && !!path.trim()).map(singleLine)
+  const fromLists = paths(listed)
+  const found = fromLists.length ? fromLists : paths(given)
+  return found.length ? found : [toolCallParts(call).name]
+}
+
+function namedFew(names: string[]): string {
+  const rest = names.length - RUN_NAMED
+  return names.slice(0, RUN_NAMED).join(', ') + (rest > 0 ? ` and ${rest} more` : '')
+}
+
+/**
+ * The person's notice that a snapshot's earlier items were not drawn; `omitted` of them did not
+ * reach Claude's context either.
  */
 export function earlierItemsNotice(count: number, thread: string, omitted = 0): string {
   const items = `${count} earlier item${count === 1 ? '' : 's'}`
   const where = omitted >= count ? `${count === 1 ? 'is' : 'are'} not shown here or in Claude's context`
-    : omitted ? `${count === 1 ? 'is' : 'are'} not shown here, and the oldest ${omitted} ` +
+    : omitted ? `${count === 1 ? 'is' : 'are'} not shown here, and ${omitted} of them ` +
       `${omitted === 1 ? 'is' : 'are'} not in Claude's context either`
     : `${count === 1 ? 'is' : 'are'} in Claude's context but not shown here`
   return `Continuing a Delta thread: ${items} ${where}. ` +
@@ -283,6 +379,17 @@ export function omittedItemsRow(count: number, thread: string): string {
     'follow. If you need them, read ' +
     `them with \`delta thread show ${thread} --format messages --messages 1-20\`; messages are numbered from 1 ` +
     'across the whole thread, at most 20 per call; page forward (21-40, …).'
+}
+
+/**
+ * What the summarizer keeps when a joined thread's older history is compacted before its newest
+ * items are added; a later round folds the summary before it into its own.
+ */
+export function compactionInstructions(): string {
+  return 'This conversation holds the earlier history of a shared Delta thread as Delta recorded it, each run of tool ' +
+    'calls summarized in one row; the thread\'s newest items follow the summary in full. Summarize it for continuing ' +
+    'the work: the thread\'s opening request in its own words, what was decided and why, the files changed, what was ' +
+    'tried and failed, open questions, and where the work stands. Say who asked for what and who did it.'
 }
 
 /** The model-visible row saying that an item Claude was shown no longer exists. */
@@ -471,7 +578,8 @@ function escapeMarkup(text: string): string {
 
 /**
  * Remote items already added to Claude's transcript, each with the fingerprint of what was added, or
- * `OMITTED` for a snapshot item left out of Claude's context, which is never added or corrected.
+ * `OMITTED` for a snapshot item left out of Claude's context or added only within a run's summary,
+ * which is never added or corrected.
  */
 export type Ledger = { thread: string; items: Record<string, string> }
 
@@ -479,6 +587,41 @@ export const OMITTED = 'omitted'
 
 /** The id of the row standing in for a snapshot's omitted items; no item or comment has it. */
 const OMITTED_ROW = 'delta:omitted'
+/** The id of a run's summary row is this, then the run's first tool call's id. */
+const TOOL_RUN_ROW = 'delta:tools:'
+
+/** A first-seen snapshot item or comment as its row renders. */
+type SnapshotEntry = { id: string; text: string; drawn: boolean; item?: WatchItem }
+
+/**
+ * An older snapshot row as it is summarized: one item or comment as it renders, or a run of one
+ * author's consecutive tool calls as one row. `row` is the id the row is committed under.
+ */
+type Summarized = { row: string; ids: string[]; text: string; run: boolean; opening: boolean }
+
+/** Entries as they are summarized; `opening` marks the first user message, the thread's request. */
+function summarized(entries: readonly SnapshotEntry[]): Summarized[] {
+  const segments: Summarized[] = []
+  let calls: WatchItem[] = []
+  const endRun = () => {
+    if (calls.length) segments.push({ row: `${TOOL_RUN_ROW}${calls[0]!.id}`, ids: calls.map(({ id }) => id), text: toolRunRow(calls), run: true, opening: false })
+    calls = []
+  }
+  let opened = false
+  for (const entry of entries) {
+    if (entry.item?.kind === 'tool_call') {
+      if (calls.length && itemAuthor(calls[0]!) !== itemAuthor(entry.item)) endRun()
+      calls.push(entry.item)
+      continue
+    }
+    endRun()
+    const opening: boolean = !opened && entry.item?.kind === 'user_message'
+    opened ||= opening
+    segments.push({ row: entry.id, ids: [entry.id], text: entry.text, run: false, opening })
+  }
+  endRun()
+  return segments
+}
 
 /** A transcript row to add; `fingerprint` is recorded once it is added, or the item forgotten when absent. */
 export type PendingRow = {
@@ -532,8 +675,25 @@ export class RemoteView {
   private omitted = new Set<string>()
   /** The omitted items whose stand-in row has not been offered yet. */
   private omitting: string[] = []
+  /** Summary rows for runs of older tool calls, by the run's first call, until offered. */
+  private runs = new Map<string, Summarized>()
+  /** Older tool calls Claude reads only within their run's summary row. */
+  private collapsed = new Set<string>()
+  /** Older snapshot items to be compacted, until they are. */
+  private compacting = new Set<string>()
+  /** The rows after which the history added so far is compacted. */
+  private roundEnds = new Set<string>()
+  /** Whether the history added so far is compacted before the next row. */
+  compactionDue = false
 
-  constructor(readonly thread: string, readonly ledger: Ledger, private readonly budget = SNAPSHOT_BUDGET) {}
+  /**
+   * `budget` is how much of a snapshot's newest rows are added whole, and `limit` how much its rows
+   * take in all, older ones in summary. `round` is how much summarized history one compaction reads,
+   * given only where the view may compact Claude's conversation; without it, older history past the
+   * limit is left out.
+   */
+  constructor(readonly thread: string, readonly ledger: Ledger, private readonly budget = SNAPSHOT_BUDGET,
+    private readonly limit = budget, private readonly round?: number) {}
 
   /** Start a connection's snapshot. */
   reset() {
@@ -546,6 +706,11 @@ export class RemoteView {
     this.hiddenOmitted = 0
     this.omitted.clear()
     this.omitting = []
+    this.runs.clear()
+    this.collapsed.clear()
+    this.compacting.clear()
+    this.roundEnds.clear()
+    this.compactionDue = false
   }
 
   upsert(item: WatchItem) {
@@ -604,13 +769,13 @@ export class RemoteView {
   wasRemoved(id: string): boolean { return this.removed.has(id) }
 
   /**
-   * End the snapshot; items Claude was shown that it no longer has were removed meanwhile. Of the
-   * items Claude has not seen, only the newest within the budget reach its context, and only the
-   * newest few of those are drawn for the person, so joining a long thread does not replay it.
+   * End the snapshot; items Claude was shown that it no longer has were removed meanwhile. The items
+   * Claude has not seen are fitted to the budget, and only the newest few are drawn for the person,
+   * so joining a long thread does not replay it.
    */
   endSnapshot() {
     this.snapshotDone = true
-    const unseen = [...this.unsettled].flatMap(([id, change]) => {
+    const unseen = [...this.unsettled].flatMap(([id, change]): SnapshotEntry[] => {
       if (!change.quiet || this.ledger.items[id] !== undefined) return []
       const commentId = keyedComment(id)
       if (commentId !== undefined) {
@@ -620,17 +785,11 @@ export class RemoteView {
       }
       const item = this.items.get(id)
       const text = item && !item.open ? renderItem(item, this.thread) : undefined
-      return text === undefined ? [] : [{ id, text, drawn: isDrawnItem(item!) }]
+      return text === undefined ? [] : [{ id, text, drawn: isDrawnItem(item!), item }]
     })
-    // The newest row always fits; everything older than the first row past the budget is left out.
-    let used = 0
-    let kept = unseen.length
-    while (kept > 0 && (kept === unseen.length || used + unseen[kept - 1]!.text.length <= this.budget))
-      used += unseen[--kept]!.text.length
-    this.omitting = unseen.slice(0, kept).map(({ id }) => id)
-    this.omitted = new Set(this.omitting)
+    this.fit(unseen)
     const drawn = unseen.filter((entry) => entry.drawn).map(({ id }) => id)
-    this.tail = new Set(drawn.filter((id) => !this.omitted.has(id)).slice(-SNAPSHOT_TAIL))
+    this.tail = new Set(drawn.filter((id) => !this.omitted.has(id) && !this.collapsed.has(id)).slice(-SNAPSHOT_TAIL))
     this.hidden = drawn.length - this.tail.size
     this.hiddenOmitted = drawn.filter((id) => this.omitted.has(id)).length
     for (const id of Object.keys(this.ledger.items)) {
@@ -641,10 +800,70 @@ export class RemoteView {
   }
 
   /**
+   * Fit a snapshot's first-seen rows: the newest whole within the budget, and older ones in summary,
+   * each run of tool calls as one row, up to the limit. The oldest of the summary past the limit are
+   * compacted in rounds where the view may compact; elsewhere the thread's opening request is kept
+   * and the oldest of the rest are left out behind one row.
+   */
+  private fit(unseen: readonly SnapshotEntry[]) {
+    if (unseen.reduce((size, entry) => size + entry.text.length, 0) <= this.budget) return
+    // The newest row is always added whole.
+    let used = 0
+    let kept = unseen.length
+    while (kept > 0 && (kept === unseen.length || used + unseen[kept - 1]!.text.length <= this.budget))
+      used += unseen[--kept]!.text.length
+    const older = summarized(unseen.slice(0, kept))
+    let room = this.limit - used
+    let start = older.length
+    while (start > 0 && older[start - 1]!.text.length <= room) room -= older[--start]!.text.length
+    // Where the view may compact, the summary past the limit is compacted, and the rest kept as it is.
+    const round = this.round ?? 0
+    const compacted = round ? start : 0
+    let size = 0
+    older.slice(0, compacted).forEach((segment, index) => {
+      for (const id of segment.ids) this.compacting.add(id)
+      size += segment.text.length
+      const next = older[index + 1]
+      if (index === compacted - 1 || size + next!.text.length > round) {
+        this.roundEnds.add(segment.row)
+        size = 0
+      }
+    })
+    const opening = compacted ? -1 : older.findIndex((segment) => segment.opening)
+    if (opening >= 0 && opening < start) {
+      // The thread's opening request outranks the oldest of the rest.
+      room -= older[opening]!.text.length
+      while (room < 0 && start < older.length) room += older[start++]!.text.length
+    }
+    older.forEach((segment, index) => {
+      if (!compacted && index < start && index !== opening) for (const id of segment.ids) this.omitted.add(id)
+      else if (segment.run) {
+        this.runs.set(segment.ids[0]!, segment)
+        for (const id of segment.ids) this.collapsed.add(id)
+      }
+    })
+    this.omitting = [...this.omitted]
+  }
+
+  /**
    * Whether no row is needed now. A snapshot adds nothing until it is complete, since which of its
    * items are drawn depends on which are the newest.
    */
-  get settled(): boolean { return !this.snapshotDone || this.unsettled.size === 0 }
+  get settled(): boolean { return !this.snapshotDone || (this.unsettled.size === 0 && !this.compactionDue) }
+
+  /** The history added so far was compacted. */
+  compacted() {
+    this.compactionDue = false
+  }
+
+  /** Compaction failed, so the older history not added yet is left out behind one row instead. */
+  abandonCompaction() {
+    this.compactionDue = false
+    this.roundEnds.clear()
+    for (const id of this.compacting) if (this.ledger.items[id] === undefined) this.omitted.add(id)
+    this.compacting.clear()
+    this.omitting = [...this.omitted].filter((id) => this.ledger.items[id] === undefined)
+  }
 
   /**
    * The next row Claude's transcript needs, oldest change first, or undefined when none is
@@ -652,20 +871,27 @@ export class RemoteView {
    * correction row.
    */
   async nextRow(): Promise<PendingRow | undefined> {
-    if (this.snapshotDone && this.omitting.length) {
-      const omits = this.omitting
-      this.omitting = []
-      return { id: OMITTED_ROW, text: omittedItemsRow(omits.length, this.thread), quiet: false, omits }
-    }
-    while (!this.settled) {
+    while (this.snapshotDone && this.unsettled.size) {
       const [id, change] = this.unsettled.entries().next().value!
       this.unsettled.delete(id)
       const known = this.ledger.items[id]
+      // One row stands in for the omitted items, where the first of them would be.
+      if (this.omitted.has(id) && this.omitting.length) {
+        const omits = this.omitting
+        this.omitting = []
+        return { id: OMITTED_ROW, text: omittedItemsRow(omits.length, this.thread), quiet: false, omits }
+      }
       // Claude never read an omitted item, so it gets no row and no correction; a removal forgets it.
       if (known === OMITTED || this.omitted.has(id)) {
         if (known === OMITTED && change.removed) delete this.ledger.items[id]
         continue
       }
+      const run = this.runs.get(id)
+      if (run) {
+        this.runs.delete(id)
+        return { id: run.row, text: run.text, quiet: true, omits: run.ids }
+      }
+      if (this.collapsed.has(id)) continue
       const commentId = keyedComment(id)
       if (commentId !== undefined) {
         const row = await this.commentRow(id, commentId, change, known)
@@ -726,6 +952,7 @@ export class RemoteView {
     for (const id of row.omits ?? []) this.ledger.items[id] = OMITTED
     if (row.fingerprint) this.ledger.items[row.id] = row.fingerprint
     else delete this.ledger.items[row.id]
+    if (this.roundEnds.delete(row.id)) this.compactionDue = true
   }
 
   private mark(id: string, change: Unsettled) {
@@ -750,6 +977,11 @@ export type RowSink = {
   debug(text: string): void
   /** Report a row that could not be added or a ledger that could not be saved. */
   fail(reason: string): void
+  /**
+   * Compact Claude's conversation, telling the summarizer what to keep; whether it was compacted.
+   * Asked only of a view given a compaction round; a sink without it never compacts.
+   */
+  compact?(instructions: string): Promise<boolean>
 }
 
 /** A large snapshot batch saves its ledger this often, so stopping midway repeats few rows. */
@@ -770,6 +1002,17 @@ export async function addRows(view: RemoteView, sink: RowSink): Promise<void> {
   }
   try {
     while (sink.current() && !view.settled && !sink.held()) {
+      if (view.compactionDue) {
+        await save()
+        sink.debug("Compacting the Delta thread's older history before adding more of it.")
+        let compacted = false
+        try { compacted = await sink.compact?.(compactionInstructions()) ?? false }
+        catch (error) { sink.debug(`Couldn't compact the Delta thread's older history (${String(error)}).`) }
+        if (compacted) view.compacted()
+        // A turn that started meanwhile holds the rows, and the compaction waits for them to resume.
+        else if (sink.current() && !sink.held()) view.abandonCompaction()
+        continue
+      }
       const row = await view.nextRow()
       if (!row || !sink.current()) continue
       if (row.announcement) sink.announce(row.announcement)
