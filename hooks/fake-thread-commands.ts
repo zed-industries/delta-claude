@@ -117,6 +117,14 @@ export function commandOutput(args: string, text: string, command = 'delta', col
   } as const
 }
 
+/** A user row as Desktop raises it: every row reads as the SDK's, drawn in full. */
+export function userMessage(requestId: string, text: string) {
+  return {
+    component: 'UserMessage', requestId, surface: 'desktop',
+    props: { text, origin: { kind: 'sdk' }, isExpanded: true },
+  } as const
+}
+
 /** The caveat the engine stores above every command run, which the person never sees as typed. */
 export const localCommandCaveat =
   '<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a ' +
@@ -714,6 +722,8 @@ export function fakeThreads(on: On, options: {
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', props: {}, children: ['the band'] }))
   on('ui.render', { component: 'CommandOutput' }, ($, e) =>
     ({ type: 'Text', props: {}, children: [`the output row: ${e.props.text}`] }))
+  on('ui.render', { component: 'UserMessage' }, ($, e) =>
+    ({ type: 'Text', props: {}, children: [`the user row: ${e.props.text}`] }))
   on('ui.status', ($, e) => { fake.statuses.push(e.text); return { value: undefined } })
   on('ui.log', async (_$, e) => {
     // Claude drops a log whose destination is anything else, so the person never sees it.

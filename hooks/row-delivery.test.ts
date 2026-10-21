@@ -7,11 +7,11 @@ test('unrelated commands and other plugins retain their rows', () => {
   const echo = '<command-name>/delta</command-name><command-args>show a</command-args>'
   const row = { door: 'command', origin: { kind: 'plugin', name: 'delta-plugin' },
     message: { type: 'user', role: 'user', content: [{ type: 'text', text: echo }] } }
-  expect(shownCommandRewrite('delta-plugin', row)).toEqual({ content: [] })
+  expect(shownCommandRewrite('delta-plugin', row)).toEqual({ content: [], echo: true })
   // A run the transcript kept without its arguments is still the plugin's own.
   expect(shownCommandRewrite('delta-plugin', { ...row, message: {
     ...row.message, content: [{ type: 'text', text: '<command-name>/delta</command-name><command-args></command-args>' }],
-  } })).toEqual({ content: [] })
+  } })).toEqual({ content: [], echo: true })
   for (const origin of [{ kind: 'composer' }, { kind: 'plugin', name: 'other' }])
     expect(shownCommandRewrite('delta-plugin', { ...row, origin })).toBeUndefined()
   for (const text of ['<command-name>/cost</command-name><command-args></command-args>',

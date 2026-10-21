@@ -73,6 +73,9 @@ export class DrawQueue {
   }
 }
 
+/** The engine's words for a stored row left with no content, as the plugin's emptied echo is. */
+export const EMPTY_ROW_TEXT = '(no content)'
+
 /** What the stored output row of the plugin's own `show` run reads, for the model and a resumed session. */
 export const SHOW_ANSWER = '.'
 const SHOW_OUTPUT_ROW = `<local-command-stdout>${SHOW_ANSWER}</local-command-stdout>`
@@ -93,22 +96,22 @@ export function shownItemId(args: string): string | undefined {
 
 /**
  * Rewrite only this plugin's hidden command echo and output, not unrelated command rows: the echo
- * is stored empty, and the output as {@link SHOW_ANSWER}, with the item it draws returned beside
- * it. The plugin runs its own `/delta` only to draw, so an echo of that run is hidden whatever
- * arguments the transcript kept for it.
+ * is stored empty and marked `echo`, and the output as {@link SHOW_ANSWER}, with the item it draws
+ * returned beside it. The plugin runs its own `/delta` only to draw, so an echo of that run is
+ * hidden whatever arguments the transcript kept for it.
  */
 export function shownCommandRewrite(plugin: string, row: {
   door: string
   origin?: unknown
   message: { type: string; name?: string; role?: string; content: readonly { type: string; text?: string }[] }
-}): { content: { type: 'text'; text: string }[]; item?: string } | undefined {
+}): { content: { type: 'text'; text: string }[]; item?: string; echo?: true } | undefined {
   if (row.door !== 'command') return
   const text = row.message.content.flatMap((block) =>
     block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n')
   const origin = row.origin as { kind?: string; name?: string } | undefined
   if (row.message.role === 'user' && origin?.kind === 'plugin' && origin.name === plugin &&
       /<command-name>\/delta<\/command-name>/.test(text) && /<command-args>(?:show\s+\S+)?<\/command-args>/.test(text))
-    return { content: [] }
+    return { content: [], echo: true }
   if (row.message.type !== 'system' || row.message.name !== 'local_command') return
   const output = /^<local-command-stdout>(?:(\S+): )?(.*)<\/local-command-stdout>$/s.exec(text)
   if (!output || (output[1] !== undefined && output[1] !== plugin)) return

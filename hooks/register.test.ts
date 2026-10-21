@@ -7,7 +7,7 @@ import { personColor, personKey } from './status'
 import {
   ADA, CHECKOUT, CONFIG, LIVE, PENDING, abovePrompt, bash, commandOutput, commandRunRows, fakeThreads,
   localCommandCaveat, prompt, remoteComment, remoteItem, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait,
-  turnComplete, turnStart, typedDelta,
+  turnComplete, turnStart, typedDelta, userMessage,
 } from './fake-thread-commands'
 
 tier('user')
@@ -1563,6 +1563,26 @@ describe('remote activity', () => {
     expect(JSON.stringify(await $.ui.render({ ...commandOutput('', '.'), requestId: 'unknown-row' })))
       .toContain('the output row')
     expect(fake.logs.join('\n')).not.toContain('Please rename the flag.')
+    fake.expectClean()
+  })
+
+  test('the show run\'s echo draws as nothing where a surface draws it as a user row', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    fake.upsert(remoteItem('Please rename the flag.', { id: 'a' }))
+    await fake.clock.settle()
+    await drawReady($, fake)
+    // As the prompt queue stores a run it replayed: its echo carries no arguments either.
+    fake.showRuns = 'queued'
+    fake.upsert(remoteItem('And the docs.', { id: 'b' }))
+    await fake.clock.settle()
+    await drawReady($, fake)
+    expectOfferedItems(fake, ['a', 'b'])
+    // Desktop draws each stored echo as a user row reading the engine's words for an empty row.
+    for (const echo of ['delta-show a-echo-a', 'delta--echo-b'])
+      expect(JSON.stringify(await $.ui.render(userMessage(echo, '(no content)')))).not.toContain('the user row')
+    expect(JSON.stringify(await $.ui.render(userMessage('someone-else', '(no content)')))).toContain('the user row')
     fake.expectClean()
   })
 

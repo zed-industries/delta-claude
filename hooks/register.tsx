@@ -8,7 +8,7 @@ import { snapshotMessages } from './snapshot'
 import { activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, ownsSteering, promptGate, releasesMounts, worktreeChanges } from './lifecycle'
 import { checkResult, reconnectDelay, validateAttachmentReceipt, validateCreationReceipt, validatePublicationReceipt } from './command-outcomes'
 import { copyText, personColor, personKey, renderBand, statusCurrentTurn, statusSpinnerRunning, SPINNER_FRAMES, threadTurnOwned, toolRowParts, type StatusSegment, type StatusState, type TurnStatus } from './status'
-import { announceThought, DrawnRows, DrawQueue, showAnswer, shownCommandRewrite, shownItemId } from './row-delivery'
+import { announceThought, DrawnRows, DrawQueue, EMPTY_ROW_TEXT, showAnswer, shownCommandRewrite, shownItemId } from './row-delivery'
 import { restoreBinding } from './binding'
 import { pathKey, samePath } from './paths'
 import { PresenceTracker } from './presence'
@@ -233,8 +233,9 @@ type TitleReader = { path: string; offset: number; scanner: TitleScanner; ranged
 const titleReaders = new Map<string, TitleReader>()
 const drawQueue = new DrawQueue()
 let drawing = false
-/** The item each stored output row of the plugin's own `show` run draws, by the row's message id. */
-const drawnRowItems = new Map<string, string>()
+/** A stored row of the plugin's own `show` run: the item its output row draws, or its echo. */
+type ShownRow = string | { echo: true }
+const shownRows = new Map<string, ShownRow>()
 /** The answer the engine gives a plugin's command when no `command.run` hook of its own answered it. */
 const UNANSWERED_COMMAND = /no command\.run hook answered it/
 /**
@@ -1521,14 +1522,26 @@ function ledgerKey(session: string) { return `appended:${session}` }
 function drawnRowKey(session: string, row: string) { return `drawn:${session}:${row}` }
 
 /**
- * Remember which item a stored output row draws, so the row draws again after a restart or resume,
- * and settle the row's draw. A row that cannot be remembered still draws in this process.
+ * Remember what a stored row of the plugin's own `show` run is, so it draws the same after a restart
+ * or resume; one the store refuses is still remembered by this process.
  */
-async function bindDrawnRow($: Runtime, row: string, item: string) {
-  drawnRowItems.set(row, item)
-  drawQueue.confirm(item)
-  try { await $.store.set(drawnRowKey(await $.session.id(), row), item) }
-  catch (error) { $.ui.log(`Couldn't remember which Delta item a drawn row shows (${String(error)}).`, { to: 'debug' }) }
+async function rememberShownRow($: Runtime, row: string, shown: ShownRow) {
+  shownRows.set(row, shown)
+  try { await $.store.set(drawnRowKey(await $.session.id(), row), shown) }
+  catch (error) { $.ui.log(`Couldn't remember a drawn Delta row (${String(error)}).`, { to: 'debug' }) }
+}
+
+/** What a stored row of the plugin's own `show` run is, by the row's message id. */
+async function shownRow($: Runtime, row: string): Promise<ShownRow | undefined> {
+  const known = shownRows.get(row)
+  if (known !== undefined) return known
+  try {
+    const stored = await $.store.get(drawnRowKey(await $.session.id(), row)) as ShownRow | undefined
+    if (typeof stored === 'string' || stored?.echo === true) {
+      shownRows.set(row, stored)
+      return stored
+    }
+  } catch { /* not known by its id */ }
 }
 
 /**
@@ -1537,16 +1550,8 @@ async function bindDrawnRow($: Runtime, row: string, item: string) {
  * by earlier versions of the plugin carry.
  */
 async function drawnRowItem($: Runtime, row: string, args: string): Promise<string | undefined> {
-  const known = drawnRowItems.get(row)
-  if (known !== undefined) return known
-  try {
-    const stored = await $.store.get(drawnRowKey(await $.session.id(), row))
-    if (typeof stored === 'string') {
-      drawnRowItems.set(row, stored)
-      return stored
-    }
-  } catch { /* drawn by its arguments, if it has them */ }
-  return shownItemId(args)
+  const shown = await shownRow($, row)
+  return typeof shown === 'string' ? shown : shownItemId(args)
 }
 
 function recoveryCommand(binding?: Binding) {
@@ -5624,6 +5629,14 @@ export function register(on: On) {
     return next(questions ? { ...e, props: { ...e.props, questions } } : e)
   })
 
+  // The plugin's own `show` echo, which Desktop draws as a user row. It is known by its id: Desktop
+  // reports every row's origin as the SDK's. Only empty rows are looked up, as the echo is one.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    if (e.props.text !== EMPTY_ROW_TEXT || typeof await shownRow($, e.requestId) !== 'object') return next(e)
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+
   // The plugin's own command output row: a remote message, event, tool call or comment draws here, from this
   // plugin's own data rather than the row's stored text, which carries none of it.
   on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
@@ -5891,7 +5904,13 @@ export function register(on: On) {
     const shown = shownCommandRewrite($.plugin.name, e)
     if (shown !== undefined) {
       const stored = await next({ ...e, message: { ...e.message, content: shown.content } })
-      if (shown.item !== undefined && !('deny' in stored)) await bindDrawnRow($, stored.uuid, shown.item)
+      if (!('deny' in stored)) {
+        if (shown.item !== undefined) {
+          drawQueue.confirm(shown.item)
+          await rememberShownRow($, stored.uuid, shown.item)
+        }
+        if (shown.echo) await rememberShownRow($, stored.uuid, { echo: true })
+      }
       return stored
     }
     if (!capturedMessage(e.message, e.door)) return next(e)
