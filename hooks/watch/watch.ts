@@ -589,7 +589,12 @@ function observeThreadTurn($: Runtime, session: string) {
     feed.remoteTurn = started
     // A new turn counts its time, and its quiet, from when it is first reported.
     void $.clock.now().then((now) => { started.since ??= now })
-  } else if (remote && feed.remoteTurn) feed.remoteTurn.turnId ??= turn.turn_id
+  } else if (remote && feed.remoteTurn) {
+    feed.remoteTurn.turnId ??= turn.turn_id
+    // Delta reports a turn before it knows who requested it, then again once it does.
+    const name = conversationText(turn.user?.name ?? '').trim()
+    if (name) Object.assign(feed.remoteTurn, { name, ...turn.user ? { id: personKey(turn.user) } : {} })
+  }
   refreshTurn($)
 }
 
