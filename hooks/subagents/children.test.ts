@@ -1,7 +1,7 @@
 import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import {
-  CHECKOUT, childActor, fakeThreads, MOUNTS, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
+  CHECKOUT, childActor, fakeThreads, FOLDERS, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
   turnComplete, turnStart, userText,
 } from '../testing/fake-thread-commands'
 
@@ -28,7 +28,6 @@ describe('subagents', () => {
     expect(fake.server.subagents.get(agentId)).toMatchObject({
       parent: fake.threadId, name: 'Inspect the parser', sharedWorktrees: true,
     })
-    expect(fake.server.subagents.get(agentId)?.detached).toBeUndefined()
     const records = fake.childRecords(agentId)
     expect(records.map((record) => [record.update?.sessionUpdate, record.update?.state, record.turnSequence])).toEqual([
       ['state_update', 'running', 1], ['user_message', undefined, 1], ['agent_message', undefined, 1],
@@ -79,19 +78,6 @@ describe('subagents', () => {
     fake.expectClean()
   })
 
-  test('a Delta that cannot record subagents leaves them to Claude', async ($, on) => {
-    const fake = fakeThreads(on)
-    fake.contractRange = { min: 1, max: 6 }
-    await $.session.start(sessionStart)
-    await fake.share($)
-    await mainTurn($, 'main')
-    const agentId = await spawn($)
-    await childRun($, agentId, 'child-turn', 'Parser looks fine')
-    await fake.settle()
-    expect(fake.server.subagents.size).toBe(0)
-    fake.expectClean()
-  })
-
   test('forks and teammates are not recorded, nor is anything their own agents spawn', async ($, on) => {
     const fake = await sharedSession($, on)
     await mainTurn($, 'main')
@@ -113,14 +99,40 @@ describe('subagents', () => {
     fake.cwd = worktree
     await childRun($, agentId, 'isolated-turn', 'Edited in the worktree')
     fake.cwd = CHECKOUT
-    // Claude may remove the worktree once the run's completion hook returns, so it is detached by then.
+    // Claude may remove the checkout once the run ends; its thread keeps the worktree attachment.
     const child = fake.server.subagents.get(agentId)!
     expect(child.sharedWorktrees).toBe(false)
-    expect(child.detached?.directory).toBe(worktree)
-    expect(child.checkout).toBeUndefined()
+    expect(child.checkout?.directory).toBe(worktree)
+    expect(fake.activeCheckouts.has(worktree)).toBe(false)
     await fake.settle()
     // The session's own checkout stays attached to the session's thread.
     expect(fake.server.mount?.directory).toBe(CHECKOUT)
+    fake.expectClean()
+  })
+
+  test("a subagent's run ends only once Delta stops syncing the worktree Claude may then remove", async ($, on) => {
+    const fake = await sharedSession($, on)
+    await mainTurn($, 'main')
+    const agentId = await spawn($)
+    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
+    fake.cwd = worktree
+    let release = () => {}
+    fake.holdCheckoutRelease = new Promise((resolve) => { release = resolve })
+    await $.session.append(childPrompt(agentId))
+    await $.turn.start({ ...turnStart('held-turn', 'Inspect the parser'), agentId } as never)
+    let ended = false
+    const ending = $.turn.complete({ ...turnComplete('held-turn'), agentId } as never).then(() => { ended = true })
+    await fake.settleUntil(() => fake.releasingCheckouts.has(worktree))
+    // The mount command has ended, but Delta still syncs the directory, so the hook keeps waiting.
+    expect(fake.activeCheckouts.has(worktree)).toBe(false)
+    await fake.advance(1_000)
+    expect(ended).toBe(false)
+    release()
+    // The next check of the directory finds it released.
+    await fake.advance(1_000)
+    await ending
+    expect(fake.releasingCheckouts.has(worktree)).toBe(false)
+    fake.cwd = CHECKOUT
     fake.expectClean()
   })
 
@@ -139,7 +151,7 @@ describe('subagents', () => {
     const { agentId } = await spawning
     const child = fake.server.subagents.get(agentId)!
     expect(child).toMatchObject({ isolatedWorktrees: true, sharedWorktrees: false, name: 'Fix the lexer' })
-    expect(created.worktreePath).toBe(`${MOUNTS}/${child.mountedFor}`)
+    expect(created.worktreePath).toBe(`${FOLDERS}/${child.mountedFor}`)
 
     // It records as any subagent does, and Claude's checkout is never attached to its thread.
     fake.cwd = created.worktreePath!
@@ -148,7 +160,7 @@ describe('subagents', () => {
     await fake.settle()
     expect(fake.childRecords(agentId).map((record) => record.update?.state ?? record.update?.content?.[0]?.text))
       .toEqual(['running', 'Inspect the parser', 'Fixed the lexer', 'idle'])
-    expect(child.checkout ?? child.detached).toBeUndefined()
+    expect(child.checkout).toBeUndefined()
     // Its fork has no git branch here, so the parent is told how to merge it.
     await $.turn.complete(turnComplete('main'))
     await fake.settle()
@@ -177,8 +189,8 @@ describe('subagents', () => {
     expect(parentThread).toMatchObject({ sharedWorktrees: false, checkout: { directory: worktree } })
     // The nested child works in its parent's worktree, so it attaches no checkout of its own.
     const child = fake.server.subagents.get(nested)!
-    expect([child.parent, child.sharedWorktrees, child.checkout, child.detached])
-      .toEqual([parentThread.reference, true, undefined, undefined])
+    expect([child.parent, child.sharedWorktrees, child.checkout])
+      .toEqual([parentThread.reference, true, undefined])
     expect(fake.childRecords(nested)[1]!.update?._meta?.delta?.sender).toEqual({ external_id: parent })
     await $.turn.complete({ ...turnComplete('parent-turn'), agentId: parent } as never)
     fake.cwd = CHECKOUT
@@ -239,7 +251,7 @@ describe('subagents', () => {
       input: { description: 'Fix the lexer', subagent_type: 'general-purpose', isolation: 'worktree' },
       result: { status: 'completed', agentId: 'isolated' },
     }, {
-      // A worktree Claude kept, because its agent changed something, is attached and detached again.
+      // A worktree Claude kept remains attached after its mount is stopped.
       tool_use_id: 'kept-call', tool: 'Agent',
       input: { description: 'Rename the lexer', subagent_type: 'general-purpose', isolation: 'worktree' },
       result: { status: 'completed', agentId: 'kept', worktreePath: `${CHECKOUT}/.claude/worktrees/agent-kept` },
@@ -255,8 +267,7 @@ describe('subagents', () => {
     expect(Object.fromEntries([...fake.server.subagents].map(([id, child]) => [id, child.sharedWorktrees]))).toEqual({
       earlier: true, isolated: false, kept: false, running: true, vanished: true,
     })
-    expect(fake.server.subagents.get('isolated')?.detached).toBeUndefined()
-    expect(fake.server.subagents.get('kept')?.detached?.directory).toBe(`${CHECKOUT}/.claude/worktrees/agent-kept`)
+    expect(fake.server.subagents.get('kept')?.checkout?.directory).toBe(`${CHECKOUT}/.claude/worktrees/agent-kept`)
     expect(fake.server.subagents.get('vanished')?.name).toBe('Check the lexer')
     expect(fake.childRecords('vanished')).toHaveLength(2)
     const earlier = fake.childRecords('earlier')
@@ -310,13 +321,14 @@ describe('subagents', () => {
     await fake.settle()
     expect(fake.taskStops).toEqual(['apart'])
 
-    // Its run ends in its isolated worktree, which is attached before the run's detach.
+    // Its run ends in its isolated checkout; the mount stops but membership remains.
     const worktree = `${CHECKOUT}/.claude/worktrees/agent-apart`
     fake.cwd = worktree
     await $.turn.complete({ ...turnComplete('apart-turn'), agentId: 'apart' } as never)
     fake.cwd = CHECKOUT
     await fake.settle()
-    expect(fake.server.subagents.get('apart')?.detached?.directory).toBe(worktree)
+    expect(fake.server.subagents.get('apart')?.checkout?.directory).toBe(worktree)
+    expect(fake.activeCheckouts.has(worktree)).toBe(false)
     fake.expectClean()
   })
 

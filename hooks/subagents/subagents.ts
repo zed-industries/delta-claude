@@ -13,8 +13,9 @@ import {
 } from '../recording/delivery'
 import { deliveryRetryDelay } from '../recording/delivery-policy'
 import {
-  threadCreate, threadMergeCommandLine, threadWatch, verifiedContract, watchEvents, worktreeAttach, worktreeUnmount,
+  checkoutSyncing, stopWorktreeMount, threadCreate, threadMergeCommandLine, threadWatch, verifiedContract, watchEvents,
 } from '../cli/delta-cli'
+import { attachWorktree, mountCheckout } from '../sharing/checkout'
 import { mountThread, unmountThread } from '../sharing/join'
 import { samePath } from '../core/paths'
 import { deliverNote } from '../watch/rows'
@@ -57,8 +58,8 @@ export type ChildRuntime = {
   turnWatch?: { sequence: number; stop: () => void }
   /** Its parent had no thread yet; the session's next successful delivery tries again. */
   waitingForParent?: boolean
-  /** The detach of its own checkout in flight, which every caller shares. */
-  detaching?: Promise<void>
+  /** The release of its checkout mount in flight, which every caller shares. */
+  finishingCheckout?: Promise<void>
   /**
    * What the next prompt Claude runs it with is recorded as: the message that was sent, without the
    * thread history Claude was handed with it.
@@ -414,12 +415,14 @@ async function deliverChildOnce($: Runtime, child: ChildRuntime) {
     return
   }
   if (binding.checkout && !binding.checkoutReference) {
-    const attached = await worktreeAttach($, binding.checkout, reference)
+    const attachedReference = await attachWorktree($, binding.checkout, thread)
     await childStep($, child, async () => {
-      await saveChild($, { ...await loadChild($, child), checkoutReference: attached.reference })
+      await saveChild($, { ...await loadChild($, child), checkoutReference: attachedReference })
     })
     binding = await loadChild($, child)
   }
+  if (binding.checkout && binding.checkoutReference)
+    await mountCheckout($, { session: child.session, checkout: binding.checkout, checkoutReference: binding.checkoutReference })
   watchChildTurn($, child, binding)
   while (binding.pending.length) {
     const { count, fenced, failure } = await appendPending($, {
@@ -447,7 +450,7 @@ async function deliverChildOnce($: Runtime, child: ChildRuntime) {
   }
   // A checkout of its own is attached only while the child runs there; once nothing runs and what it
   // recorded is delivered, the thread keeps Delta's copy and the checkout is Claude's again.
-  if (!binding.execution && binding.checkoutReference) await detachChildCheckout($, child)
+  if (!binding.execution && binding.checkoutReference) await finishChildCheckout($, child)
 }
 
 /** Create or reuse the subagent `agentId`'s child thread under `parent`, with its parent's worktrees or forks of them. */
@@ -508,16 +511,32 @@ function watchChildTurn($: Runtime, child: ChildRuntime, binding: ChildBinding) 
   })
 }
 
-/** How long a child's `turn.complete` hook delivers before detaching; see `finishChildRun`. */
+/** How long a child's `turn.complete` hook delivers before ending its mount; see `finishChildRun`. */
 const CHILD_FINISH_DELIVERY_BUDGET_MS = 3_000
-/** How long detaching a finished child's checkout may take within its hook's budget. */
-const CHILD_DETACH_TIMEOUT_MS = 4_000
+/**
+ * How long a child's hook waits for Delta to stop syncing its checkout after its mount ends. Delta
+ * bounds the final upload at 5 seconds, then stops watching the directory.
+ */
+const CHILD_RELEASE_BUDGET_MS = 6_000
+/** How often a finishing child's checkout is checked for Delta's release. */
+const CHILD_RELEASE_POLL_MS = 100
+
+/** Wait until Delta no longer syncs `directory`, within `CHILD_RELEASE_BUDGET_MS`. */
+async function awaitCheckoutReleased($: Runtime, directory: string) {
+  const deadline = await $.clock.now() + CHILD_RELEASE_BUDGET_MS
+  while (true) {
+    const remaining = deadline - await $.clock.now()
+    if (remaining <= 0)
+      throw new Error(`Delta was still syncing ${directory} ${CHILD_RELEASE_BUDGET_MS / 1000} seconds after its mount ended`)
+    if (!await checkoutSyncing($, directory, remaining)) return
+    await $.clock.sleep(Math.min(CHILD_RELEASE_POLL_MS, remaining))
+  }
+}
 
 /**
- * After a child's run ends, deliver what it recorded within a short budget, then stop sharing a
- * checkout of its own. Claude may remove that worktree as soon as the run's completion hooks
- * return, so the detach happens before this hook does; delivery that takes longer continues on its
- * own.
+ * After a child's run ends, deliver what it recorded within a short budget, then end its
+ * checkout mount. The attachment remains available in the thread after Claude removes its
+ * checkout; delivery that takes longer continues on its own.
  */
 async function finishChildRun($: Runtime, child: ChildRuntime) {
   const expiry = new AbortController()
@@ -526,7 +545,7 @@ async function finishChildRun($: Runtime, child: ChildRuntime) {
     $.clock.sleep(CHILD_FINISH_DELIVERY_BUDGET_MS, { signal: expiry.signal }).catch(() => undefined),
   ])
   expiry.abort()
-  await detachChildCheckout($, child)
+  await finishChildCheckout($, child)
   await noteForkMerge($, child)
 }
 
@@ -553,23 +572,26 @@ async function parentReference($: Runtime, session: string, parent: string): Pro
   return binding.locator ?? binding.thread
 }
 
-/** Detach a child's own checkout from its thread once no run of it is going on, once at a time. */
-function detachChildCheckout($: Runtime, child: ChildRuntime): Promise<void> {
-  child.detaching ??= detachChildCheckoutOnce($, child).finally(() => { child.detaching = undefined })
-  return child.detaching
+/** End a child's mount once no run of it is going on, retaining its worktree in the thread for later review. */
+function finishChildCheckout($: Runtime, child: ChildRuntime): Promise<void> {
+  child.finishingCheckout ??= finishChildCheckoutOnce($, child).finally(() => { child.finishingCheckout = undefined })
+  return child.finishingCheckout
 }
 
-async function detachChildCheckoutOnce($: Runtime, child: ChildRuntime) {
+async function finishChildCheckoutOnce($: Runtime, child: ChildRuntime) {
   const binding = await loadChild($, child).catch(() => undefined)
   if (!binding || binding.execution || !binding.thread || !binding.checkout || !binding.checkoutReference) return
+  // A mount still preparing is stopped too, so it cannot become ready over a removed worktree.
+  let stopped: boolean
   try {
-    await worktreeUnmount($, {
-      reference: binding.checkoutReference, directory: binding.checkout, thread: binding.thread,
-    }, CHILD_DETACH_TIMEOUT_MS)
+    stopped = await stopWorktreeMount(child.session, binding.checkout)
   } catch (error) {
     await reportChild($, child, error)
     return
   }
+  // Delta finishes a checkout after its mount command ends, and Claude may remove the worktree as
+  // soon as this hook returns, so Delta stops watching the directory first.
+  if (stopped) await awaitCheckoutReleased($, binding.checkout).catch((error) => reportChild($, child, error))
   await childStep($, child, async () => {
     const current = await loadChild($, child)
     if (current.execution) return

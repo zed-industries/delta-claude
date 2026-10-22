@@ -2,13 +2,14 @@
  * `/delta join` and what a joined session keeps up: mounting the thread's worktrees, moving Claude
  * into them, Desktop hand-offs, and restoring and releasing mounts.
  */
-import { activate, handedOff, pluginData } from '../setup/activation'
+import { activate, finishRestoredActivation, handedOff, pluginData } from '../setup/activation'
 import { AccessRequiredError, requireAuthentication } from '../cli/auth'
 import { finishProgress, setProgress } from '../band/band'
 import { drain, endDeliveryFailures, flushUnsaved, isInDirectory, recoverExecution, verifyCheckout } from '../recording/delivery'
 import { deliveryRetryDelay } from '../recording/delivery-policy'
 import {
-  type CommandForm, rememberContract, requireContract, resolveCli, threadMount, threadStatus, threadUnmount,
+  type CommandForm, rememberContract, requireContract, resolveCli, stopSessionMounts, stopThreadMounts, threadMount,
+  threadStatus,
 } from '../cli/delta-cli'
 import { type Handoff, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff } from './handoff'
 import { authenticationHost, OPEN_TIMEOUT_MS } from '../setup/interaction'
@@ -58,7 +59,8 @@ async function joinSession($: Runtime, request: JoinRequest) {
     const runtime = stateFor(request.session)
     if (runtime.currentTurnId || runtime.promptEntering)
       throw new Error('Wait for Claude to become idle before joining')
-    if (runtime.restoring) throw new Error("Wait for Delta to finish restoring this session's worktrees before joining")
+    if (runtime.restoring || runtime.restoringCheckout)
+      throw new Error("Wait for Delta to finish restoring this session's worktrees before joining")
     if (activeBackgroundAgents(await $.agent.list()))
       throw new Error('Stop background agents and teammates before joining; an idle main turn is not sufficient')
     // Refuse a CLI this plugin cannot record against before any transition, mount, or clear.
@@ -264,18 +266,19 @@ async function completeJoin($: Runtime, session: string, plan: JoinPlan, request
 }
 
 /**
- * Ask Delta to keep the checkout of every worktree of a joined thread mounted for this session.
- * `folder` makes even a one-worktree thread's directory its thread folder, which Desktop opens as
- * a plain folder rather than a repository it would make yet another worktree of.
+ * Keep the checkout of every worktree of a joined thread mounted for this session, as its thread's
+ * attachments change, until this plugin process stops the mount.
  */
 export async function mountThread(
   $: Runtime,
   binding: { session: string; thread?: string; locator?: string; owner?: string },
-  options: { folder?: boolean; reportJoin?: boolean; form?: CommandForm } = {},
+  options: { reportJoin?: boolean; form?: CommandForm } = {},
 ): Promise<MountedThread> {
+  const locator = binding.locator ?? binding.thread
+  if (!locator) throw new Error('This session has no thread to mount')
   return threadMount($, {
-    locator: binding.locator ?? binding.thread!, owner: binding.owner ?? binding.session,
-    folder: options.folder, join: !!options.reportJoin, form: options.form,
+    session: binding.session, thread: binding.thread ?? locator, locator, owner: binding.owner ?? binding.session,
+    join: !!options.reportJoin, form: options.form,
   })
 }
 
@@ -290,10 +293,9 @@ async function offerHandoff($: Runtime, request: JoinRequest, status: ThreadStat
   const owner = `desktop-${crypto.randomUUID()}`
   const check = () => assertJoinSession($, request.session, request)
   setProgress($, "Mounting the thread's worktrees…", 'active')
-  const single = status.worktrees.status === 'available' && status.worktrees.items.length === 1
   const mounted = await mountThread(
     $, { session: request.session, thread: status.thread_id, locator: request.locator, owner },
-    { folder: single, reportJoin: true, form: request.form },
+    { reportJoin: true, form: request.form },
   )
   const handoff: Handoff = {
     owner, thread: status.thread_id, locator: request.locator, directory: mounted.directory,
@@ -459,7 +461,7 @@ export function beginRestore($: Runtime, session: string) {
       await startParticipation($, session, binding, owns)
       if (!owns()) return
       finishProgress($, `Restored ${binding.mounts?.length ?? 0} worktree${binding.mounts?.length === 1 ? '' : 's'}`, 'done')
-      if (!runtime.captureFailure && binding.pending.length) void drain($, session).catch((error) => report($, error))
+      await finishRestoredActivation($, session, binding, owns)
     } catch (error) {
       if (!owns()) return
       const text = `Delta couldn't restore this session's worktrees: ${errorText(error)}. Retry ${recoveryCommand(runtime.binding)}; the prompt was not submitted.`
@@ -472,26 +474,16 @@ export function beginRestore($: Runtime, session: string) {
   })
 }
 
-/**
- * Ask Delta to release a joined session's checkouts, waiting only until the release is recorded.
- * Delta then uploads and deletes them in its own time, so nothing here waits for synchronization.
- * The request is awaited because Claude kills a request still running when it exits (a probe's
- * 0.3 s command was lost); if it is lost anyway, Delta releases a group whose owner process is gone.
- */
+/** End this session's mount commands; Delta owns the bounded cleanup after they disconnect. */
 async function releaseMounts($: Runtime, session: string) {
-  let binding: Binding | undefined
-  try { binding = await storedBinding($, key(session)) }
-  catch { return }
-  if (!binding?.joined || binding.session !== session || !binding.thread) return
-  await unmountThread($, binding.locator ?? binding.thread, binding.owner ?? session)
+  try { await stopSessionMounts(session) }
+  catch (error) { await $.ui.log(`Delta mount process did not stop: ${String(error)}`, { to: 'debug' }) }
 }
 
-/** Ask Delta to release `owner`'s mounts of `thread`; a failure is only logged, since exiting cannot wait on it. */
+/** Stop `owner`'s mount of `thread`, if this plugin process still holds it; a failure is only logged. */
 export async function unmountThread($: Runtime, thread: string, owner: string) {
-  try {
-    const result = await threadUnmount($, thread, owner)
-    if (result.exitCode !== 0) await $.ui.log(`Delta thread unmount failed: ${result.stderr.trim() || result.stdout.trim()}`, { to: 'debug' })
-  } catch (error) { await $.ui.log(`Delta thread unmount did not run: ${String(error)}`, { to: 'debug' }) }
+  try { await stopThreadMounts(owner) }
+  catch (error) { await $.ui.log(`Delta could not stop ${thread}'s mount: ${String(error)}`, { to: 'debug' }) }
 }
 
 /** The worktrees of a joined thread changed: re-mount, then tell Claude and the person. */

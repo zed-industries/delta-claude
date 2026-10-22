@@ -8,8 +8,9 @@ import { childKey } from '../subagents/children'
 import {
   collectAcknowledgedOutbox, drain, endDeliveryFailures, recordsOffline, recoverExecution, scheduleOutboxCleanup,
 } from '../recording/delivery'
-import { CONTRACT_TIMEOUT_MS, requireContract, resolveCli, threadCreate, worktreeAttach } from '../cli/delta-cli'
+import { CONTRACT_TIMEOUT_MS, requireContract, resolveCli, threadCreate } from '../cli/delta-cli'
 import { authenticationHost, claudeInteraction, notifyOnce, setupEnv } from './interaction'
+import { attachWorktree, beginRestoreCheckout, checkoutNeedsMount, mountCheckout } from '../sharing/checkout'
 import { beginRestore, claimHandoff, pendingHandoff, startParticipation } from '../sharing/join'
 import { hasInteractiveSurface } from '../sharing/lifecycle'
 import { listOrganizations, organizationName } from './organizations'
@@ -108,6 +109,8 @@ export async function activate($: Runtime, session: string, isCurrent = () => tr
       retryAutomaticActivation($, session, runtime)
       return
     }
+    // A shared session's own checkout stays synchronized only while this process runs its mount.
+    const needsCheckoutMount = checkoutNeedsMount(session, binding)
     if (binding.snapshot && boundDirectory(binding)) {
       pauseCheckout(runtime, 'watcher')
       try { await requireContract($, session) }
@@ -126,6 +129,12 @@ export async function activate($: Runtime, session: string, isCurrent = () => tr
         beginRestore($, session)
         return
       }
+    }
+    if (needsCheckoutMount) {
+      beginRestoreCheckout($, session)
+      return
+    }
+    if (binding.snapshot && boundDirectory(binding)) {
       if (recordsOffline(session, binding)) {
         // Offline recording does not wait for the watcher: start it in the background and let a
         // prompt or the outbox proceed meanwhile.
@@ -147,6 +156,18 @@ export async function activate($: Runtime, session: string, isCurrent = () => tr
   } finally {
     if (epoch === activation.epoch) activation.activating = ''
   }
+}
+
+/** Resume the recovery steps activation skipped while it waited for a mount. */
+export async function finishRestoredActivation($: Runtime, session: string, binding: Binding, owns: () => boolean) {
+  const runtime = stateFor(session)
+  if (binding.autoUpload) followUpload($, session)
+  if (!isPaused(runtime)) await recoverExecution($, session)
+  if (!owns()) return
+  if (!runtime.captureFailure && binding.pending.length)
+    void drain($, session).catch((error) => report($, error))
+  if (binding.children?.length)
+    void restoreChildren($, session, binding).catch((error) => report($, error))
 }
 
 /** The source `classic.SessionStart` reported for each session, until the session ends. */
@@ -494,11 +515,16 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
         externalId: session, organization: { id: upload.organization, visibility: upload.mode },
       })
       if (!ownsActivation()) return
-      const attached = await worktreeAttach($, root, created.thread_id)
+      const reference = await attachWorktree($, root, created.thread_id, existing.checkoutReference, undefined, session)
+      if (!ownsActivation()) return
+      await serial(async () => save($, { ...await load($, session), checkoutReference: reference, pendingWorktree: undefined }))
+      await mountCheckout($, { session, checkout: root, checkoutReference: reference }, async () => {
+        if (!ownsActivation()) throw new Error('The session ended while its checkout was being mounted')
+      })
       if (!ownsActivation()) return
       // Every step succeeded: now the thread and checkout become visible to drain and verification.
       await serial(async () => save($, {
-        ...await load($, session), thread: created.thread_id, checkout: root, checkoutReference: attached.reference,
+        ...await load($, session), thread: created.thread_id, checkout: root, checkoutReference: reference,
       }))
       if (!ownsActivation()) return
       runtime.binding = await serial(() => load($, session))

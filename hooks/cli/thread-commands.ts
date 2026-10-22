@@ -399,13 +399,13 @@ function inspectionUnavailableMessage(error: { code: string; reason?: string; me
  * The oldest recording-output contract version this plugin speaks. Neither the plugin nor the CLI
  * has shipped, so nothing older is supported; raise this rather than keep a gate for an old CLI.
  */
-const PLUGIN_CONTRACT_MIN = 6
+const PLUGIN_CONTRACT_MIN = 8
 /**
  * The newest recording-output contract version this plugin speaks. A capability added by a later
  * version is gated on the session's negotiated version (`contractVersion`) until `PLUGIN_CONTRACT_MIN`
  * reaches it.
  */
-const PLUGIN_CONTRACT_MAX = 7
+const PLUGIN_CONTRACT_MAX = 8
 /**
  * The name Delta shows for this producer: the recording's attribution (`append --producer-name`)
  * and the harness beside a present person (`watch --participate`). Identity stays the source and
@@ -486,7 +486,8 @@ export function validateThreadCheckout(
   const matches = state.worktrees.items.flatMap((worktree) => worktree.checkouts
     .filter((checkout) => binding.checkout !== undefined && samePath(checkout.directory, binding.checkout) &&
       worktree.reference === binding.checkoutReference &&
-      checkout.state === 'attached' && checkout.active !== false)
+      ((checkout.state === 'attached' && checkout.active !== false) ||
+        (checkout.state === 'detached' && checkout.active === true)))
     .map((checkout) => ({ directory: checkout.directory, reference: worktree.reference })))
   if (matches.length !== 1)
     throw new Error('The bound checkout is detached, inactive, missing, ambiguous, or has a different reference; the existing binding was preserved. Run /delta-share from the intended checkout.')

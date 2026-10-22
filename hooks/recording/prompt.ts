@@ -5,6 +5,7 @@ import {
   retryAutomaticActivation,
 } from '../setup/activation'
 import { recordsOffline, verifyCheckout } from './delivery'
+import { beginRestoreCheckout, checkoutNeedsMount } from '../sharing/checkout'
 import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_PROMPT } from '../sharing/handoff'
 import { ownsSteering, promptGate } from '../sharing/lifecycle'
 import {
@@ -83,6 +84,8 @@ export async function admitPrompt($: Runtime, e: HookEvent<'prompt.submit'>, nex
   if (offline || incomplete) {
     if (runtime.pauses.has('delivery')) resumeCheckout(runtime, 'delivery')
     retryAutomaticActivation($, session, runtime)
+    // A checkout whose mount failed to come back, or ended, is restored again in the background.
+    if (offline && !incomplete && checkoutNeedsMount(session, runtime.binding)) beginRestoreCheckout($, session)
   } else if (runtime.pauses.has('delivery')) {
     // Watching again cannot lift a refusal, so do not restart the watcher for one.
     return { drop: `${runtime.pauses.get('delivery') ?? pauseNotice(runtime)} The prompt was not submitted.` }
@@ -101,8 +104,9 @@ export async function admitPrompt($: Runtime, e: HookEvent<'prompt.submit'>, nex
   try {
     if (runtime.captureFailure || runtime.binding.captureFailure)
       throw new Error(`local conversation capture is paused; ${recoveryAdvice(runtime.binding)} before continuing`)
-    // A prompt that arrives mid-activation records locally while create, upload, and attach finish.
-    if (!activationIncomplete(runtime)) {
+    // A prompt that arrives mid-activation records locally while create, upload, and attach finish,
+    // and one that arrives while the checkout's mount is restored records locally until it is.
+    if (!activationIncomplete(runtime) && !runtime.restoringCheckout) {
       await verifyCheckout($, runtime.binding)
       if (isPaused(runtime)) throw new Error(pauseNotice(runtime))
     }

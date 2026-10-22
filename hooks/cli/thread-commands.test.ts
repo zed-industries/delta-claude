@@ -150,9 +150,12 @@ describe('thread watch', () => {
       ] },
     })
     expect(validateJoinedMounts(state(), [mount])).toBeUndefined()
+    expect(validateThreadCheckout(state(), { checkout: directory, checkoutReference: mount.reference }))
+      .toEqual({ directory: reported, reference: mount.reference })
     expect(validateThreadCheckout(state({ state: 'attached' }), { checkout: directory, checkoutReference: mount.reference }))
       .toEqual({ directory: reported, reference: mount.reference })
     expect(() => validateThreadCheckout(state(), { checkout: directory })).toThrow()
+    expect(() => validateThreadCheckout(state({ active: false }), { checkout: directory, checkoutReference: mount.reference })).toThrow('inactive')
     expect(() => validateJoinedMounts(state(), [{ ...mount, reference: 'other' }])).toThrow(JoinNotReadyError)
     for (const patch of [{ active: false }, { state: 'missing' }, { directory: `${reported}-other` }])
       expect(() => validateJoinedMounts(state(patch), [mount])).toThrow(JoinNotReadyError)
@@ -383,7 +386,7 @@ describe('operation receipts', () => {
 
 describe('recording contract', () => {
   test('decodes a contract range and refuses a malformed one', () => {
-    expect(parseThreadContract(JSON.stringify(cliFixture('contract')))).toEqual({ operation: 'contract', min: 1, max: 7 })
+    expect(parseThreadContract(JSON.stringify(cliFixture('contract')))).toEqual({ operation: 'contract', min: 8, max: 8 })
     expect(parseThreadContract('{"operation":"contract","min":1,"max":4}')).toEqual({ operation: 'contract', min: 1, max: 4 })
     for (const bad of [
       '{"operation":"status","min":1,"max":1}',
@@ -398,11 +401,10 @@ describe('recording contract', () => {
 
   test('records only against a CLI whose range covers the current contract', () => {
     const at = (min: number, max: number) => ({ operation: 'contract' as const, min, max })
-    for (const range of [at(1, 6), at(6, 7), at(7, 8)]) expect(contractRefusal(range)).toBeUndefined()
-    for (const range of [at(1, 5), undefined]) expect(contractRefusal(range)).toContain('Update Delta')
-    expect(contractRefusal(at(8, 9))).toContain('Update the Delta plugin')
-    // A later capability is gated on the version both sides speak.
-    expect([at(3, 6), at(3, 9)].map(contractVersion)).toEqual([6, 7])
+    for (const range of [at(8, 8), at(7, 8), at(8, 9)]) expect(contractRefusal(range)).toBeUndefined()
+    for (const range of [at(1, 7), undefined]) expect(contractRefusal(range)).toContain('Update Delta')
+    expect(contractRefusal(at(9, 10))).toContain('Update the Delta plugin')
+    expect(contractVersion(at(8, 9))).toBe(8)
   })
 })
 

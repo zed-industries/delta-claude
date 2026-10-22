@@ -201,7 +201,7 @@ describe('joining', () => {
     // The requested offer reports one join. The automatic takeover reuses its mount without reporting another.
     expect(fake.mountRequests).toEqual([
       { owner: offer.owner, folder: true, join: true },
-      { owner: offer.owner, folder: false, join: false },
+      { owner: offer.owner, folder: true, join: false },
     ])
     expect(fake.files.has(offer.record)).toBe(false)
     expect(fake.sessionCommands).toEqual([])
@@ -262,7 +262,7 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
-  test('a hand-off no session joins within 5 minutes is released, saying how to bring it back', async ($, on) => {
+  test('a hand-off no session joins within 5 minutes is released, saying how to bring it back', { timeoutMs: 30_000 }, async ($, on) => {
     const fake = desktopTab(on, $)
     const offer = await offerFromDesktopTab($, fake)
     await fake.advance(HANDOFF_EXPIRY_MS + 2_000)

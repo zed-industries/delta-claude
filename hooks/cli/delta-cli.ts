@@ -8,10 +8,11 @@
 import type { ProcessRunResult, ProcessSpawnResult } from 'claude-code'
 import { DeltaCli } from './cli'
 import {
-  type AttachmentReceipt, checkResult, type CreationReceipt, type PublicationReceipt, validateAttachmentReceipt,
-  validateCreationReceipt, validatePublicationReceipt,
+  checkoutStillSyncing, checkResult, type CreationReceipt, localWorktreesAt, type MembershipReceipt, type PublicationReceipt,
+  validateAttachmentReceipt, validateCreationReceipt, validatePublicationReceipt, validateWorktreeCreationReceipt,
+  validateWorktreeMembershipReceipt, type WorktreeCreationReceipt,
 } from './command-outcomes'
-import { readCommandStream } from './command-reader'
+import { readCommandStream, readMountReady } from './command-reader'
 import { isJsonObject, type JsonObject } from '../core/json'
 import { type Runtime, stillActive } from '../core/session-state'
 import {
@@ -43,8 +44,6 @@ const cli = new DeltaCli()
 export const CONTRACT_TIMEOUT_MS = 30_000
 /** A mount may materialize several large checkouts before it answers. */
 const MOUNT_TIMEOUT_MS = 600_000
-/** How long exiting waits for Delta to record a release. */
-const RELEASE_TIMEOUT_MS = 5_000
 /**
  * The contract version negotiated with each session's CLI build, once it answered a range this plugin
  * speaks; a refusal is never remembered. A capability newer than `PLUGIN_CONTRACT_MIN` is gated on it.
@@ -259,24 +258,89 @@ export async function threadInvite(
 }
 
 /**
- * Mount every worktree of the thread `locator` names for `owner`. `folder` makes even a one-worktree
- * thread's directory its thread folder; `join` reports the mount as a join, run as `form`.
+ * A running `thread mount` or `worktree mount`. Delta keeps the mounts while the process runs and
+ * releases them once it ends, so stopping it is how the plugin lets go of them.
  */
-export async function threadMount($: Runtime, mount: {
-  locator: string; owner: string; folder?: boolean; join?: boolean; form?: CommandForm
-}): Promise<MountedThread> {
-  const { locator, owner, join } = mount
-  const args = ['thread', 'mount', locator, '--owner', owner, ...mount.folder ? ['--folder'] : []]
-  if (join) args.push('--join')
-  // A first mount can materialize large checkouts, which the CLI waits for.
-  return parseThreadMount(await readCommand($, args, 'thread mount', {
-    timeoutMs: MOUNT_TIMEOUT_MS, env: join ? commandFormEnv(mount.form) : {},
-  }), owner)
+type MountProcess = {
+  session: string
+  /** `thread:<thread>:<owner>` or `worktree:<session>:<directory>`. */
+  key: string
+  stream: ReturnType<Runtime['process']['spawn']>
+  abort: AbortController
+  /** The worktree a `worktree mount` keeps mounted, once it is ready. */
+  reference?: string
+  stopping: boolean
+}
+/** The ready mount process of each key; a later one replaces it. */
+const mountProcesses = new Map<string, MountProcess>()
+/** Every mount process not yet stopped, still preparing or ready. */
+const liveMountProcesses = new Set<MountProcess>()
+
+/** End a mount process, which tells Delta to release what it mounted. */
+async function stopMountProcess(process: MountProcess) {
+  if (process.stopping) return
+  process.stopping = true
+  process.abort.abort()
+  liveMountProcesses.delete(process)
+  if (mountProcesses.get(process.key) === process) mountProcesses.delete(process.key)
+  await process.stream.return?.({ code: null, signal: 'SIGTERM' })
 }
 
-/** Release `owner`'s mounts of `thread`, leaving its exit status to the caller. */
-export async function threadUnmount($: Runtime, thread: string, owner: string): Promise<ProcessRunResult> {
-  return runJson($, ['thread', 'unmount', thread, '--owner', owner], { timeoutMs: RELEASE_TIMEOUT_MS })
+/**
+ * Start a mount command for `session` and wait for its readiness line, leaving it running. It replaces
+ * the ready process of the same key. `check` runs once the CLI is found and again once it is ready.
+ */
+async function mountCommand<T>($: Runtime, mount: {
+  session: string; key: string; args: string[]; name: string; env?: Record<string, string>
+  check?: () => Promise<void>
+}, parseReady: (line: string) => T): Promise<T> {
+  const { session, key, args, name, env, check } = mount
+  const executable = await resolveCli($)
+  if (check) await check()
+  const stream = $.process.spawn({ argv: [executable, '--json', ...args], env: { ...env, ...INTEGRATION_ENV } })
+  const process: MountProcess = { session, key, stream, stopping: false, abort: new AbortController() }
+  liveMountProcesses.add(process)
+  try {
+    // A first mount can materialize large checkouts, which the CLI waits for.
+    const { line } = await readMountReady(stream, name, process.abort.signal,
+      (milliseconds, deadline) => $.clock.sleep(milliseconds, { signal: deadline }), MOUNT_TIMEOUT_MS)
+    const ready = parseReady(line)
+    if (check) await check()
+    const prior = mountProcesses.get(key)
+    mountProcesses.set(key, process)
+    if (prior) await stopMountProcess(prior)
+    return ready
+  } catch (error) {
+    await stopMountProcess(process)
+    throw error
+  }
+}
+
+/**
+ * Mount every worktree of the thread `locator` names for `owner`, for as long as `session` keeps the
+ * command running; `join` reports the mount as a join, run as `form`. `thread` keys the process.
+ */
+export async function threadMount($: Runtime, mount: {
+  session: string; thread: string; locator: string; owner: string; join?: boolean; form?: CommandForm
+}): Promise<MountedThread> {
+  const { session, thread, locator, owner, join } = mount
+  return mountCommand($, {
+    session, key: `thread:${thread}:${owner}`, name: 'thread mount',
+    args: ['thread', 'mount', locator, '--owner', owner, ...join ? ['--join'] : []],
+    env: join ? commandFormEnv(mount.form) : {},
+  }, (line) => parseThreadMount(line, owner))
+}
+
+/** Stop the mount processes `session` started, ready or still preparing. */
+export async function stopSessionMounts(session: string) {
+  await Promise.all([...liveMountProcesses].filter((process) => process.session === session).map(stopMountProcess))
+}
+
+/** Stop `owner`'s thread mount processes, if this plugin process still holds them. */
+export async function stopThreadMounts(owner: string) {
+  await Promise.all([...liveMountProcesses]
+    .filter((process) => process.key.startsWith('thread:') && process.key.endsWith(`:${owner}`))
+    .map(stopMountProcess))
 }
 
 /** Fork a refused thread's offline changes into a kept thread. */
@@ -382,19 +446,71 @@ function shellQuote(word: string): string {
   return /^[\w@%+=:,./#-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`
 }
 
-/** Attach the checkout `directory` to `thread`. `check` runs once the CLI is found, before the command. */
+/** The references of the local worktrees checked out at `directory`, from `worktree list`. */
+export async function worktreeList($: Runtime, directory: string, check?: () => Promise<void>): Promise<string[]> {
+  return localWorktreesAt(await command($, ['worktree', 'list'], 'worktree list', { check }), directory)
+}
+
+/** Create a local worktree for the checkout `directory`; nothing is attached or mounted yet. */
+export async function worktreeCreate(
+  $: Runtime, directory: string, check?: () => Promise<void>,
+): Promise<JsonObject & WorktreeCreationReceipt> {
+  const created = await command($, ['worktree', 'create', directory], 'worktree create', { check })
+  validateWorktreeCreationReceipt(created)
+  return created
+}
+
+/** Make the worktree `reference` a member of `thread`, without mounting it. */
 export async function worktreeAttach(
-  $: Runtime, directory: string, thread: string, check?: () => Promise<void>,
-): Promise<JsonObject & AttachmentReceipt> {
-  const attached = await command($, ['worktree', 'attach', directory, '--thread', thread], 'worktree attach', { check })
-  validateAttachmentReceipt(attached, directory)
+  $: Runtime, reference: string, thread: string, check?: () => Promise<void>,
+): Promise<JsonObject & MembershipReceipt> {
+  const attached = await command($, ['worktree', 'attach', reference, '--thread', thread], 'worktree attach', { check })
+  validateWorktreeMembershipReceipt(attached, thread, reference)
   return attached
 }
 
-/** Detach the checkout `directory`, attached as `reference`, from `thread`, within `timeoutMs`. */
-export async function worktreeUnmount(
-  $: Runtime, worktree: { reference: string; directory: string; thread: string }, timeoutMs: number,
-): Promise<JsonObject> {
-  return command($, ['worktree', 'unmount', worktree.reference, worktree.directory, '--thread', worktree.thread],
-    'worktree unmount', { timeoutMs })
+/**
+ * Keep the existing checkout `directory` synchronized as the worktree `reference` for as long as
+ * `session` keeps the command running. A process already running for it is reused.
+ */
+export async function worktreeMount($: Runtime, mount: {
+  session: string; reference: string; directory: string; check?: () => Promise<void>
+}): Promise<{ reference: string; directory: string }> {
+  const { session, reference, directory, check } = mount
+  const key = `worktree:${session}:${directory}`
+  const existing = mountProcesses.get(key)
+  if (existing && !existing.stopping && existing.reference === reference) return { reference, directory }
+  const mounted = await mountCommand($, {
+    session, key, name: 'worktree mount', check,
+    args: ['worktree', 'mount', reference, directory, '--existing-checkout'],
+  }, (line) => {
+    const result: unknown = JSON.parse(line)
+    if (!isJsonObject(result)) throw new Error('Invalid checkout attachment receipt; saved records remain queued')
+    validateAttachmentReceipt(result, directory)
+    return { reference: result.reference, directory: result.directory }
+  })
+  const process = mountProcesses.get(key)
+  if (process) process.reference = mounted.reference
+  return mounted
+}
+
+/** Whether `session` has a ready `worktree mount` for the checkout `directory`. */
+export function hasWorktreeMount(session: string, directory: string): boolean {
+  return mountProcesses.has(`worktree:${session}:${directory}`)
+}
+
+/**
+ * Stop `session`'s `worktree mount` processes for the checkout `directory`, still preparing or ready,
+ * and say whether there were any.
+ */
+export async function stopWorktreeMount(session: string, directory: string): Promise<boolean> {
+  const key = `worktree:${session}:${directory}`
+  const processes = [...liveMountProcesses].filter((process) => process.key === key)
+  await Promise.all(processes.map(stopMountProcess))
+  return processes.length > 0
+}
+
+/** Whether Delta still syncs the checkout `directory`, from a `worktree list` answered within `timeoutMs`. */
+export async function checkoutSyncing($: Runtime, directory: string, timeoutMs: number): Promise<boolean> {
+  return checkoutStillSyncing(await command($, ['worktree', 'list'], 'worktree list', { timeoutMs }), directory)
 }
