@@ -1,5 +1,5 @@
 /** The oldest supported host, also pinned in CI and documented in the README. */
-export const MINIMUM_CLAUDE_VERSION = '2.1.300'
+export const MINIMUM_CLAUDE_VERSION = '2.1.303'
 
 /** Warn without blocking startup when the host is older than the supported minimum. */
 export function claudeVersionWarning(version: string | undefined): string | undefined {

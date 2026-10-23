@@ -7,8 +7,10 @@ import { clearProgress, finishProgress, setProgress, threadOrganization } from '
 import { messageUpdates, resultUpdate } from '../recording/content'
 import { drain, flushUnsaved, recordsOffline, rememberToolResults, stageRecord, verifyCheckout } from '../recording/delivery'
 import {
-  type CommandForm, requireContract, resolveCli, threadCreate, threadInvite, threadShare, threadStatus, worktreeAttach,
+  type CommandForm, requireContract, resolveCli, threadCreate, threadInvite, threadShare, threadStatus,
 } from '../cli/delta-cli'
+import { worktreeHistory } from '../cli/command-outcomes'
+import { attachWorktree, mountCheckout } from './checkout'
 import { authenticationHost, claudeInteraction } from '../setup/interaction'
 import {
   currentOrganizationId, isPersonalOrganizationId, loadOrganizationDirectory, organizationName, savedOrganization,
@@ -228,8 +230,8 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   // A session that records offline does not wait for the watcher and takes no such pause.
   if (!recordsOffline(session, binding)) pauseCheckout(runtime, 'watcher')
   setProgress($, 'Attaching the checkout…', 'active', [3, 5])
-  let attached: Awaited<ReturnType<typeof worktreeAttach>>
-  try { attached = await worktreeAttach($, root, thread, check) }
+  let reference: string
+  try { reference = await attachWorktree($, root, thread, binding.checkoutReference, check, session) }
   catch (error) {
     // A checkout Delta manages for another thread, which no session here joined.
     if (error instanceof DeltaCommandError && error.reason === 'worktree_directory_in_use')
@@ -239,10 +241,11 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   await serial(async () => {
     const current = await load($, session)
     if ((current.checkout && !samePath(current.checkout, root)) ||
-        (current.checkoutReference !== undefined && current.checkoutReference !== attached.reference))
+        (current.checkoutReference !== undefined && worktreeHistory(current.checkoutReference) !== worktreeHistory(reference)))
       throw new Error('Delta returned a different checkout reference or directory; the existing binding was preserved')
-    await save($, { ...current, checkout: root, checkoutReference: attached.reference })
+    await save($, { ...current, checkout: root, checkoutReference: reference, pendingWorktree: undefined })
   })
+  await mountCheckout($, { session, checkout: root, checkoutReference: reference }, check)
   await assertShareSession($, request)
   let outcome: ShareOutcome = { band: audience.kind === 'unchanged' ? 'Reconnected' : 'Synced privately' }
   if (audience.kind === 'unchanged' && !sessionSyncs(binding))
@@ -277,6 +280,7 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
     throw new Error('a live row could not be saved locally; fix the outbox error and retry /delta-share')
   await verifyCheckout($, await load($, session))
   await assertShareSession($, request)
+  runtime.joinFailure = undefined
   return { ...outcome, url: outcome.url ?? (await serial(() => load($, session))).url }
 }
 

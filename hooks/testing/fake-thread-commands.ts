@@ -4,6 +4,7 @@ import type { AgentInfo, ApiMessage, ConfigRow, On, ProcessRunResult } from 'cla
 import type { ThreadState, ThreadUser, WatchChild, WatchComment, WatchItem } from '../cli/thread-commands'
 import { cliErrorCodes, cliFixture } from './cli-fixtures'
 import { MINIMUM_CLAUDE_VERSION } from '../core/compatibility'
+import { samePath } from '../core/paths'
 import { showAnswer } from '../watch/row-delivery'
 
 export type Envelope = {
@@ -67,9 +68,8 @@ export type FakeChild = {
   mountedFor?: string
   next: number
   records: Map<number, Accepted>
-  /** The subagent's own checkout while attached, and the last one detached. */
+  /** The subagent's own checkout while attached. */
   checkout?: { directory: string; reference: string }
-  detached?: { directory: string; reference: string }
 }
 
 export const CHECKOUT = '/repo'
@@ -365,7 +365,7 @@ export function fakeThreads(hostOn: On, options: {
     opened: [] as string[],
     /** `open` fails, as it does where there is no macOS `open` to run. */
     failOpen: false,
-    /** Each `thread mount` the plugin asked for, including its independent folder and join flags. */
+    /** Each `thread mount` process the plugin started. */
     mountRequests: [] as { owner: string; folder: boolean; join: boolean }[],
     holdCommandListFor: undefined as ((session: string) => Promise<void> | undefined) | undefined,
     root: undefined as string | undefined,
@@ -379,7 +379,16 @@ export function fakeThreads(hostOn: On, options: {
     /** The timeout each `delta --json org` command ran with, in order. */
     orgTimeouts: [] as (number | undefined)[],
     watches: [] as Watch[],
+    mountStreams: [] as Watch[],
+    activeCheckouts: new Map<string, Watch>(),
+    /** A `worktree mount` that has not answered yet waits for this before its readiness line. */
+    holdCheckoutMount: undefined as Promise<void> | undefined,
+    /** After a `worktree mount` ends, Delta keeps syncing its directory until this resolves. */
+    holdCheckoutRelease: undefined as Promise<void> | undefined,
+    /** Directories whose mount ended while Delta still syncs them, listed as mounted. */
+    releasingCheckouts: new Set<string>(),
     statusProcesses: [] as { closed: boolean; emittedBytes: number }[],
+    nextWorktree: 0,
     violations: [] as string[],
     /** Shared state survives watcher restarts, which have no write effects. */
     server: {
@@ -391,6 +400,7 @@ export function fakeThreads(hostOn: On, options: {
       checkout: 'missing' as 'attached' | 'inactive' | 'detached' | 'missing',
       /** The sharer's own checkout, attached to the thread; a joiner's mounts are separate. */
       mount: undefined as { thread: string; directory: string; reference: string } | undefined,
+      localWorktrees: new Map<string, { directory: string; mounted: boolean }>(),
       /** The worktrees attached to the thread, in attachment order; `thread mount` places each one. */
       worktrees: undefined as { reference: string; name: string }[] | undefined,
       /** The mounted checkouts of each owner that asked for them, and the directory each was told to work in. */
@@ -477,6 +487,7 @@ export function fakeThreads(hostOn: On, options: {
     mountReply: undefined as ((owner: string) => Record<string, any>) | undefined,
     attachmentPatch: undefined as Record<string, unknown> | undefined,
     mountPatch: undefined as Record<string, unknown> | undefined,
+    checkoutMountPatch: undefined as Record<string, unknown> | undefined,
     /** Every `thread unmount` the plugin asked for. */
     unmounts: [] as { thread: string; owner: string }[],
     publicationPatch: undefined as Record<string, unknown> | undefined,
@@ -623,7 +634,14 @@ export function fakeThreads(hostOn: On, options: {
         record.update?.sessionUpdate === 'state_update' && record.update.state === 'idle' ? [record.turnSequence] : [])
     },
     delta(): string[][] { return fake.commands.filter((argv) => argv[0] === '/selected/delta') },
-    operations(): (string | undefined)[] { return fake.delta().map((argv) => cliArguments(argv)?.positionals[1]) },
+    operations(): (string | undefined)[] {
+      return fake.delta().map((argv) => {
+        const parsed = cliArguments(argv)
+        const operation = parsed?.positionals[1]
+        return parsed?.positionals[0] === 'worktree' && ['create', 'mount', 'list'].includes(operation ?? '')
+          ? `worktree ${operation}` : operation
+      })
+    },
     /** The `--producer-name` each `append` passed, in order; undefined where it passed none. */
     producerNames(): (string | undefined)[] {
       return fake.delta().map(cliArguments).filter((parsed) => parsed?.positionals[1] === 'append')
@@ -1064,17 +1082,62 @@ export function fakeThreads(hostOn: On, options: {
       }
       return output('')
     }
-    const runHold = await fake.holdRun?.(operation)
+    const runHold = await fake.holdRun?.(parsed?.positionals[0] === 'worktree' && operation === 'create'
+      ? 'worktree create' : operation)
     if (runHold) await runHold
     const subagent = subagentCommand(parsed, argv, operation, (e as any).init?.stdin ?? '', output)
     if (subagent) return subagent
+    if (parsed?.positionals[0] === 'worktree' && operation === 'list') {
+      if (!matchesCommand(argv, ['worktree', 'list'], {}))
+        fake.violations.push(`unexpected worktree list: ${argv.join(' ')}`)
+      const local = new Map(fake.server.localWorktrees)
+      if (fake.server.mount && !local.has(fake.server.mount.reference.split('#')[0]!))
+        local.set(fake.server.mount.reference.split('#')[0]!, { directory: fake.server.mount.directory, mounted: true })
+      return output(JSON.stringify({ operation: 'listed', worktrees: [...local.entries()].map(([reference, entry]) => ({
+        reference: `${reference}#t=0`, worktree_id: null, repository: 'repo', timeline: '0',
+        directories: entry.mounted ? [{
+          directory: entry.directory, error: null, owners: [],
+          state: fake.activeCheckouts.has(entry.directory) || fake.releasingCheckouts.has(entry.directory) ? 'mounted' : 'inactive',
+        }] : [],
+      })) }))
+    }
+    if (parsed?.positionals[0] === 'worktree' && operation === 'create') {
+      if (!matchesCommand(argv, ['worktree', 'create', parsed.positionals[2]!], {}))
+        fake.violations.push(`unexpected worktree create: ${argv.join(' ')}`)
+      const fault = fake.commandFault?.operation === 'worktree create' ? fake.commandFault : undefined
+      if (fault) return output(JSON.stringify(cliFixture('error', faultEnvelope(fault))), fault.exitCode ?? 2)
+      const reference = `00000000-0000-4000-8000-${(++fake.nextWorktree).toString(16).padStart(12, '0')}`
+      fake.server.localWorktrees.set(reference, { directory: parsed.positionals[2]!, mounted: false })
+      return output(JSON.stringify({ operation: 'created', worktree_id: reference, reference }))
+    }
+    if (parsed?.positionals[0] === 'worktree' && operation === 'attach') {
+      const thread = String(parsed.options['--thread'])
+      if (!matchesCommand(argv, ['worktree', 'attach', parsed.positionals[2]!], { '--thread': thread }))
+        fake.violations.push(`unexpected worktree attach: ${argv.join(' ')}`)
+      const fault = fake.commandFault?.operation === 'attach' ? fake.commandFault : undefined
+      if (fault && !fault.after)
+        return output(JSON.stringify(cliFixture('error', faultEnvelope(fault))), fault.exitCode ?? 2)
+      const local = String(parsed.positionals[2]).split('#')[0]!
+      const checkout = fake.server.localWorktrees.get(local) ??
+        (fake.server.mount?.reference.split('#')[0] === local
+          ? { directory: fake.server.mount.directory, mounted: true } : undefined)
+      const child = [...fake.server.subagents.values()].find((entry) => entry.thread === thread)
+      if (!checkout && !child) {
+        fake.violations.push(`attached an unknown local worktree: ${argv.join(' ')}`)
+        return output(JSON.stringify(cliFixture('error', faultEnvelope({ code: 'worktree_invalid_reference', message: 'unknown worktree' }))), 2)
+      }
+      const reference = `${local}#t=0`
+      if (child) child.checkout = { directory: checkout?.directory ?? CHECKOUT, reference }
+      else {
+        fake.server.mount = { thread, directory: checkout!.directory, reference }
+        if (!fake.activeCheckouts.has(checkout!.directory)) fake.server.checkout = 'inactive'
+      }
+      return fault ? output(JSON.stringify(cliFixture('error', faultEnvelope(fault))), fault.exitCode ?? 2)
+        : output(JSON.stringify({ operation: 'attached', thread_id: thread, reference, ...fake.attachmentPatch }))
+    }
     if (operation === 'unmount') {
-      const owner = String(parsed?.options['--owner'])
-      if (!matchesCommand(argv, ['thread', 'unmount', threadLocator(parsed!.positionals[2])], { '--owner': ownerOf(owner) }))
-        fake.violations.push(`unexpected unmount arguments ${argv}`)
-      fake.unmounts.push({ thread: fake.server.thread!, owner: String(parsed!.options['--owner']) })
-      fake.server.groups.delete(String(parsed!.options['--owner']))
-      return output(JSON.stringify(cliFixture('unmount', { thread_id: fake.server.thread, owner: parsed!.options['--owner'] })))
+      fake.violations.push(`obsolete unmount command: ${argv.join(' ')}`)
+      return output(JSON.stringify(cliFixture('error', faultEnvelope({ code: 'worktree_unsupported', message: 'unmount was removed' }))), 2)
     }
     const source = { '--source': 'claude-code', '--external-id': fake.producer ?? fake.session }
     const positionals = operation === 'create' ? [] : operation === 'attach' ? [CHECKOUT] : [threadLocator(parsed?.positionals[2])]
@@ -1237,32 +1300,79 @@ export function fakeThreads(hostOn: On, options: {
       }
     }
     const operation = cliArguments(e.argv)?.positionals[1]
+    const parsed = cliArguments(e.argv)
     if (operation) fake.cliIntegrations.push({ operation, integration: e.env?.DELTA_CLI_INTEGRATION,
       ...e.env?.DELTA_CLI_COMMAND_FORM ? { commandForm: e.env.DELTA_CLI_COMMAND_FORM } : {} })
+    if (operation === 'mount' && parsed?.positionals[0] === 'worktree') {
+      fake.commands.push([...e.argv])
+      const reference = parsed.positionals[2]!
+      const directory = parsed.positionals[3]!
+      if (!matchesCommand(e.argv, ['worktree', 'mount', reference, directory], { '--existing-checkout': true }))
+        fake.violations.push(`unexpected checkout mount: ${e.argv.join(' ')}`)
+      const fault = fake.commandFault?.operation === 'worktree mount' ? fake.commandFault : undefined
+      if (fault) {
+        yield { stream: 'stdout', text: JSON.stringify(cliFixture('error', faultEnvelope(fault))) + '\n' }
+        return { value: { code: fault.exitCode ?? 2, signal: null } }
+      }
+      const local = fake.server.localWorktrees.get(reference.split('#')[0]!)
+      if (local && !samePath(local.directory, directory))
+        fake.violations.push(`mounted checkout at a different root: ${e.argv.join(' ')}`)
+      if (fake.holdCheckoutMount) await fake.holdCheckoutMount
+      if (local) local.mounted = true
+      const watch = createWatch(e)
+      fake.mountStreams.push(watch)
+      fake.activeCheckouts.set(directory, watch)
+      if (fake.server.mount && samePath(fake.server.mount.directory, directory)) fake.server.checkout = 'attached'
+      watch.frame({ operation: 'mounted', reference, directory, ...fake.checkoutMountPatch })
+      try { return yield* relayWatch(watch, next.signal) }
+      finally {
+        if (fake.activeCheckouts.get(directory) === watch) {
+          fake.activeCheckouts.delete(directory)
+          if (fake.server.mount && samePath(fake.server.mount.directory, directory)) fake.server.checkout = 'inactive'
+          // Like Delta, the directory stays synced until the final upload after disconnect ends.
+          const release = fake.holdCheckoutRelease
+          if (release) {
+            fake.releasingCheckouts.add(directory)
+            void release.then(() => fake.releasingCheckouts.delete(directory))
+          }
+        }
+      }
+    }
     const forked = operation === 'mount'
-      ? [...fake.server.subagents.values()].find((child) => child.reference === cliArguments(e.argv)?.positionals[2]) : undefined
+      ? [...fake.server.subagents.values()].find((child) => child.reference === parsed?.positionals[2]) : undefined
     if (forked) {
       fake.commands.push([...e.argv])
-      const owner = String(cliArguments(e.argv)?.options['--owner'])
+      const owner = String(parsed?.options['--owner'])
       if (!forked.isolatedWorktrees || !matchesCommand(e.argv, ['thread', 'mount', forked.reference], { '--owner': owner }))
         fake.violations.push(`unexpected child mount: ${e.argv.join(' ')}`)
       forked.mountedFor = owner
-      const directory = `${MOUNTS}/${owner}`
-      yield { stream: 'stdout', text: JSON.stringify(cliFixture('mount', {
+      const checkout = `${MOUNTS}/${owner}`
+      const directory = `${FOLDERS}/${owner}`
+      const mounted = cliFixture('mount', {
         thread_id: forked.thread, owner, directory,
-        worktrees: [{ reference: `fork-of-${forked.thread}#t=1`, name: 'repo', directory, state: 'mounted' }],
-      })) }
-      return { value: { code: 0, signal: null } }
+        worktrees: [{ reference: `fork-of-${forked.thread}#t=1`, name: 'repo', directory: checkout, state: 'mounted' }],
+      })
+      const group = { directory, mounts: new Map([[mounted.worktrees[0].reference, { name: 'repo', directory: checkout, active: true }]]) }
+      fake.server.groups.set(owner, group)
+      const watch = createWatch(e)
+      fake.mountStreams.push(watch)
+      watch.frame(mounted)
+      try { return yield* relayWatch(watch, next.signal) }
+      finally {
+        if (fake.server.groups.get(owner) === group) {
+          fake.server.groups.delete(owner)
+          forked.mountedFor = undefined
+          fake.unmounts.push({ thread: forked.thread, owner })
+        }
+      }
     }
     if (operation === 'mount') {
       fake.commands.push([...e.argv])
-      const parsed = cliArguments(e.argv)
       const owner = String(parsed?.options['--owner'])
-      const folder = parsed?.options['--folder'] === true
       const joining = parsed?.options['--join'] === true
-      fake.mountRequests.push({ owner, folder, join: joining })
+      fake.mountRequests.push({ owner, folder: true, join: joining })
       if (!matchesCommand(e.argv, ['thread', 'mount', threadLocator(parsed?.positionals[2])],
-        { '--owner': ownerOf(owner), ...folder ? { '--folder': true } : {}, ...joining ? { '--join': true } : {} }))
+        { '--owner': ownerOf(owner), ...joining ? { '--join': true } : {} }))
         fake.violations.push(`unexpected mount arguments: ${e.argv.join(' ')}`)
       const hold = await fake.holdRun?.(operation)
       if (hold) await hold
@@ -1275,15 +1385,28 @@ export function fakeThreads(hostOn: On, options: {
         yield { stream: 'stdout', text: JSON.stringify(cliFixture('error', { error: { code: 'not_visible', reason: 'thread_gone', message: 'no such thread', retryable: false } })) }
         return { value: { code: 2, signal: null } }
       }
-      const mounted = fake.mountReply?.(owner) ?? cliFixture('mount', { thread_id: fake.server.thread, owner })
-      fake.server.groups.set(owner, {
+      const mounted = fake.mountReply?.(owner) ?? cliFixture('mount', {
+        thread_id: fake.server.thread, owner, directory: `${FOLDERS}/${owner}`,
+        worktrees: (fake.server.worktrees ?? [{ reference: 'reference', name: 'delta' }])
+          .map((tree, index) => ({ ...tree, directory: `${MOUNTS}/${owner}${index ? `/${tree.name}` : ''}`, state: 'mounted' })),
+      })
+      const group = {
         directory: mounted.directory,
-        mounts: new Map(mounted.worktrees.map((tree: any) => [
+        mounts: new Map<string, { name: string; directory: string; active: boolean }>(mounted.worktrees.map((tree: any) => [
           tree.reference, { name: tree.name, directory: tree.directory, active: true },
         ])),
-      })
-      yield { stream: 'stdout', text: JSON.stringify({ ...mounted, ...fake.mountPatch }) }
-      return { value: { code: 0, signal: null } }
+      }
+      fake.server.groups.set(owner, group)
+      const watch = createWatch(e)
+      fake.mountStreams.push(watch)
+      watch.frame({ ...mounted, ...fake.mountPatch })
+      try { return yield* relayWatch(watch, next.signal) }
+      finally {
+        if (fake.server.groups.get(owner) === group) {
+          fake.server.groups.delete(owner)
+          fake.unmounts.push({ thread: fake.server.thread!, owner })
+        }
+      }
     }
     const statusChild = operation === 'status'
       ? fake.server.subagents.get(String(cliArguments(e.argv)?.options['--external-id'])) : undefined
@@ -1434,21 +1557,6 @@ export function fakeThreads(hostOn: On, options: {
       const child = byReference(parsed.options['--thread'])!
       child.checkout = { directory: parsed.positionals[2]!, reference: `checkout-of-${child.thread}#t=0` }
       return output(JSON.stringify(cliFixture('attach', { reference: child.checkout.reference, directory: child.checkout.directory })))
-    }
-    if (operation === 'unmount' && parsed.positionals[0] === 'thread' && byReference(parsed.positionals[2])?.mountedFor) {
-      const child = byReference(parsed.positionals[2])!
-      if (parsed.options['--owner'] !== child.mountedFor) fake.violations.push(`unexpected child unmount: ${argv.join(' ')}`)
-      child.mountedFor = undefined
-      return output(JSON.stringify(cliFixture('unmount', { thread_id: child.thread, owner: parsed.options['--owner'] })))
-    }
-    if (operation === 'unmount' && parsed.positionals[0] === 'worktree') {
-      // Detaching names the exact thread, as Delta's thread index keys it, not a reference.
-      const child = children.find((entry) => entry.thread === parsed.options['--thread'])
-      if (!child?.checkout || parsed.positionals[2] !== child.checkout.reference || parsed.positionals[3] !== child.checkout.directory)
-        fake.violations.push(`unexpected worktree unmount: ${argv.join(' ')}`)
-      if (child) child.detached = child.checkout
-      if (child) child.checkout = undefined
-      return output(JSON.stringify(cliFixture('detach', { detached_thread: child?.thread })))
     }
   }
 
@@ -1625,7 +1733,7 @@ function cliArguments(argv: readonly string[]) {
     if (argument === '--') { positionals.push(...argv.slice(index + 1)); break }
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
-    if (argument === '--json' || argument === '--folder' || argument === '--force' || argument === '--join' || argument === '--shared-worktrees' || argument === '--isolated-worktrees') { options[argument] = true; continue }
+    if (argument === '--json' || argument === '--force' || argument === '--join' || argument === '--existing-checkout' || argument === '--shared-worktrees' || argument === '--isolated-worktrees') { options[argument] = true; continue }
     if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined

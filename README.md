@@ -7,7 +7,7 @@ own Claude Code session, from [delta.dev](https://delta.dev), or from the Delta 
 
 ## Installation
 
-You need Claude Code **2.1.300 or newer**. Older versions show a warning but are
+You need Claude Code **2.1.303 or newer**. Older versions show a warning but are
 not blocked. Inside Claude Code, add the marketplace:
 
 ```text

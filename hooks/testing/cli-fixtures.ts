@@ -3,9 +3,9 @@ import { cliFixtureData } from './cli-fixture-data'
 const names = {
   status: 'thread-status.granted', recorded: 'thread-append.recorded',
   fenced: 'thread-append.fenced', duplicate: 'thread-append.duplicate', create: 'thread-create',
-  share: 'thread-share', attach: 'worktree-attach', mount: 'thread-mount',
-  unmount: 'thread-unmount', contract: 'thread-contract', invite: 'thread-invite',
-  childCreate: 'thread-create.child', detach: 'worktree-unmount.detached',
+  share: 'thread-share', attach: 'worktree-attach', checkoutMount: 'worktree-mount', mount: 'thread-mount',
+  contract: 'thread-contract', invite: 'thread-invite',
+  childCreate: 'thread-create.child', detach: 'worktree-detach',
 }
 
 export const cliWatchFrames = cliFixtureData['thread-watch.frames'] as Record<string, any>[]

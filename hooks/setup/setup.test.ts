@@ -58,7 +58,7 @@ function harness(options: {
     },
     gitCommonDir: async () => options.commonDir,
     remotes: async () => options.remotes ?? ['origin'],
-    contract: async () => ({ operation: 'contract', min: 1, max: options.contractMax ?? 6 }),
+    contract: async () => ({ operation: 'contract', min: options.contractMax === undefined ? 8 : 1, max: options.contractMax ?? 8 }),
     authenticate: async () => { signIns++ },
     openLink: async (url) => {
       opened.push(url)

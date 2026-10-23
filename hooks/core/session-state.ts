@@ -39,6 +39,8 @@ export type Binding = {
   /** Last confirmed location of a shared session's attached checkout, not proof that the thread still owns it. */
   checkout?: string
   checkoutReference?: string
+  /** Local identity saved before membership, so a lost attach receipt cannot create another worktree. */
+  pendingWorktree?: { directory: string; reference: string }
   /**
    * A joined session's mount owner: its Claude session ID, or for a session that took over a
    * Desktop hand-off, the owner the offering tab mounted under.
@@ -191,6 +193,8 @@ export type SessionState = {
    * of it: a restore mounts first and keeps prompts waiting until the watch has started.
    */
   restoring?: true
+  /** A saved checkout's mount is being restored while prompts proceed and record locally. */
+  restoringCheckout?: true
   /** Where Claude has to move between turns, because its worktree is no longer the thread's one directory. */
   moveTo?: string
   /**
@@ -358,6 +362,7 @@ export function endActivationOf(session: string) {
 export function resetRuntime(runtime: SessionState) {
   runtime.mounted = undefined
   runtime.restoring = undefined
+  runtime.restoringCheckout = undefined
   runtime.moveTo = undefined
   runtime.notes = []
   runtime.nativeTurns.clear()

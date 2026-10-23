@@ -274,7 +274,7 @@ describe('sharing', () => {
     expect(manifest.checkout).toBe(operation === 'attach' ? undefined : CHECKOUT)
     expect(manifest.url).toBeUndefined()
     expectStagedRecords(fake, [1])
-    expect(fake.server.checkout).toBe('attached')
+    expect(fake.server.checkout).toBe(operation === 'attach' ? 'inactive' : 'attached')
     const mount = { ...fake.server.mount }
     expect(fake.server.shared).toBe(operation === 'share')
     expect(fake.records()).toEqual([])
@@ -307,7 +307,7 @@ describe('sharing', () => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
     fake.attachmentPatch = patch
-    expect(await fake.share($)).toContain('Invalid checkout attachment receipt')
+    expect(await fake.share($)).toContain('Invalid worktree membership receipt')
     const manifest = fake.store.get(`session:${fake.session}`) as any
     expect(manifest.thread).toBe(fake.threadId)
     expect(manifest.checkout).toBeUndefined()
@@ -415,7 +415,7 @@ describe('sharing', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     await $.session.end(sessionEnd(fake.session))
-    expect(fake.server.checkout).toBe('attached')
+    expect(fake.server.checkout).toBe('inactive')
     if (state === 'unshared') fake.server.shared = false
     else fake.server.checkout = state
     const mount = { ...fake.server.mount }
@@ -448,6 +448,31 @@ describe('sharing', () => {
     expect(fake.records()[1]?.update).toMatchObject({ toolCallId: 'after-resume' })
     expect((fake.store.get(`session:${fake.session}`) as any).pending).toEqual([])
     expect(fake.exports).toBe(1)
+    fake.expectClean()
+  })
+
+  test('resume takes prompts while its checkout mount waits for Delta, and delivers them once it is back', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('one')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    // Offline, Delta holds a shared checkout's mount until it can connect.
+    let connect = () => {}
+    fake.holdCheckoutMount = new Promise((resolve) => { connect = resolve })
+    await $.session.start(sessionStart)
+    await fake.advance(0)
+    expect(fake.activeCheckouts.size).toBe(0)
+    expect((await $.prompt.submit(prompt('while the checkout restores'))).drop).toBeUndefined()
+    await $.tool.call(bash('while-restoring', 'echo while restoring'))
+    await fake.advance(0)
+    // The records queue until the checkout syncs again.
+    expect(fake.records().map((record) => record.sequence)).toEqual([1])
+    connect()
+    fake.holdCheckoutMount = undefined
+    await fake.settleUntil(() => fake.records().length === 2)
+    expect(fake.activeCheckouts.size).toBe(1)
+    expect(fake.records()[1]?.update).toMatchObject({ toolCallId: 'while-restoring' })
+    expect((fake.store.get(`session:${fake.session}`) as any).pending).toEqual([])
     fake.expectClean()
   })
 
@@ -1827,6 +1852,8 @@ describe('the watch', () => {
     }
     const before = fake.watches.length
     const starting = $.session.start(sessionStart)
+    // Resuming restores the checkout's mount on the clock, which reads the store it holds.
+    await fake.advance(0)
     await waiting
     await $.session.end(sessionEnd(fake.session))
     release()
@@ -1855,6 +1882,8 @@ describe('the watch', () => {
       return held
     }
     const starting = $.session.start(sessionStart)
+    // Resuming restores the checkout's mount on the clock, which resolves the CLI it holds.
+    await fake.advance(0)
     await waiting
     const before = fake.commands.length
     await $.session.end(sessionEnd(fake.session))
@@ -2758,7 +2787,7 @@ describe('the recording contract', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 8, max: 9 }
+    fake.contractRange = { min: 9, max: 10 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -2795,7 +2824,7 @@ describe('the recording contract', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 8, max: 9 }
+    fake.contractRange = { min: 9, max: 10 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
@@ -2817,7 +2846,7 @@ describe('the recording contract', () => {
     const checksAtAppend: number[] = []
     fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
     // An incompatible CLI is refused before anything is appended.
-    fake.contractRange = { min: 8, max: 9 }
+    fake.contractRange = { min: 9, max: 10 }
     await $.session.start(sessionStart)
     await fake.settle()
     expect(checksAtAppend).toEqual([])

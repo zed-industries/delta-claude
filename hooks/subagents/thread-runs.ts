@@ -235,8 +235,7 @@ async function runThread($: Runtime, session: string, sender: string, target: Th
     directories = await parentDirectories($, { session, parent: session })
   } else {
     mountOwner = `${session}-${read.thread_id.slice(-12)}`
-    const mounted = await mountThread($, { session, thread: read.thread_id, locator: target.reference, owner: mountOwner },
-      { folder: read.worktrees.length > 1 })
+    const mounted = await mountThread($, { session, thread: read.thread_id, locator: target.reference, owner: mountOwner })
     requireMounted(mounted, read.thread_id)
     cwd = mounted.directory
     directories = [mounted.directory]
