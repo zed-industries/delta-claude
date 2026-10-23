@@ -2674,6 +2674,28 @@ describe('the status band', () => {
     fake.expectClean()
   })
 
+  test("another participant's turn takes its owner's name once Delta resolves who requested it", async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    // Delta reports the turn before it knows the requester's user, then again once it does.
+    const adaColor = `"color":"${personColor(personKey(ADA))}"`
+    fake.turn('running', { user_id: null, name: null, actor_id: 'actor-ada' }, 'remote-turn')
+    await fake.settle()
+    expect(await drawBandText($)).toContain('An agent')
+    expect(await drawBandText($)).not.toContain(adaColor)
+    // A user resolved before their name still colors the agent as theirs.
+    fake.turn('running', { user_id: ADA.user_id, name: null, actor_id: 'actor-ada' }, 'remote-turn')
+    await fake.settle()
+    expect(await drawBandText($)).toContain('An agent')
+    expect(await drawBandText($)).toContain(adaColor)
+    fake.turn('running', { ...ADA, actor_id: 'actor-ada' }, 'remote-turn')
+    await fake.settle()
+    expect(await drawBandText($)).toContain("Ada's agent")
+    expect(await drawBandText($)).toContain(adaColor)
+    fake.expectClean()
+  })
+
   test("another participant's agent shows what it is doing once a call or thought has been open half a second", async ($, on) => {
     const fake = fakeThreads(on)
     await $.session.start(sessionStart)
