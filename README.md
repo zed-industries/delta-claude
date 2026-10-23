@@ -30,19 +30,20 @@ background, with a ten-second budget. It notifies you when an update is availabl
 it never installs updates or opens a browser as part of this check. A failed check
 does not stop syncing or sharing.
 
-Run `/delta-update` (or `/delta update`) to update the installed Delta app and CLI,
-then restart Claude Code once installation finishes. On Windows, the installer
-runs after the Delta CLI exits, and the command waits up to ten more minutes for
-it; approve the Windows prompt if one appears. If Windows reports that a restart
-is required, restart Windows before using Delta. If the installer outlasts the
-wait, it keeps running; let it finish, then run `delta update --check` before retrying.
+Run `/delta-update` (or `/delta update`) to update the installed Delta app and CLI.
+A running Delta app, including the one serving synced and shared sessions,
+restarts to install the update; those sessions briefly disconnect and reconnect
+on their own, and an app that had a window reopens. On Windows, the installer runs
+after the Delta CLI exits, and the command waits up to ten more minutes for it;
+approve the Windows prompt if one appears. If Windows reports that a restart is
+required, restart Windows before using Delta. If the installer outlasts the wait,
+it keeps running; let it finish, then run `delta update --check` before retrying.
 Download and installation progress appears in the transcript
 while the command runs. This does not update the Claude plugin itself.
 The startup notice offers this command only when the CLI can install the update.
 Otherwise, follow the CLI's platform-specific instructions: for example, run the
 Windows installer, or update a package-managed installation through its package
 manager. Older CLIs that lack the update command point to [delta.dev](https://delta.dev).
-If Delta reports that the app is running, quit the Delta app before retrying.
 
 ## Usage
 

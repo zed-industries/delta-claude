@@ -90,7 +90,7 @@ export class InstallationUpdates {
       switch (result.status) {
         case 'updated': return result.restartRequired
           ? `Updated Delta to ${result.latestVersion}. Windows reports that a restart is required to finish the installation; restart Windows, then Claude Code.`
-          : `Updated Delta to ${result.latestVersion}. Restart Claude Code to use the updated installation.`
+          : `Updated Delta to ${result.latestVersion}.`
         case 'up_to_date': return `Delta ${result.currentVersion} is already up to date.`
         case 'unsupported': return `Delta cannot update this installation: ${result.message}`
         case 'update_available': return `Delta was not updated: ${result.message}`

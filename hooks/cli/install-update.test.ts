@@ -59,7 +59,6 @@ for (const command of ['delta-update', 'delta'] as const)
     release()
     const result = await updating
     expect(result.text).toContain('Updated Delta to 1.1.0')
-    expect(result.text).toContain('Restart Claude Code')
     const updates = fake.installUpdates.filter((entry) => !entry.argv.includes('--check'))
     expect(updates.map((entry) => entry.argv)).toEqual([['/selected/delta', 'update', '--json']])
     expect(updates[0]!.env).toMatchObject({
@@ -70,7 +69,7 @@ for (const command of ['delta-update', 'delta'] as const)
   })
 
 const WINDOWS_OUTCOMES = {
-  installed: 'Updated Delta to 1.1.0. Restart Claude Code to use the updated installation.',
+  installed: 'Updated Delta to 1.1.0.',
   restart: 'Updated Delta to 1.1.0. Windows reports that a restart is required to finish the installation; restart Windows, then Claude Code.',
   refused: 'Delta installation update failed: update: app_running: Delta is running. Quit it, then update again.',
   crash: 'Delta installation update failed: The Delta installer helper exited with code 3221225477. Run `delta update --check` before retrying /delta-update.',
