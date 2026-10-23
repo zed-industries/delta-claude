@@ -15,6 +15,7 @@ import {
 import { readCommandStream, readMountReady } from './command-reader'
 import { isJsonObject, type JsonObject } from '../core/json'
 import { type Runtime, stillActive } from '../core/session-state'
+import { claudeInteraction } from '../setup/interaction'
 import {
   createdOrganizationFrom, type InviteResult, inviteResultsFrom, type Organization, organizationsFrom,
 } from '../setup/setup'
@@ -73,7 +74,16 @@ export async function resolveCli($: Runtime, install?: (progress: string) => voi
   return cli.resolve((argv, init) => $.process.run(argv, { ...init, env: { ...init?.env, ...INTEGRATION_ENV } }),
     install !== undefined,
     install, await $.env.get('OS') === 'Windows_NT'
-      ? { exists: (path) => $.fs.exists(path) } : false)
+      ? {
+        exists: (path) => $.fs.exists(path),
+        confirmInstall: async () => {
+          const answer = await claudeInteraction($).ask(
+            'Delta is not installed. Download and run the official Windows installer? It installs the Delta app and CLI and may ask for Windows administrator permission.',
+            { options: ['Install Delta', 'Not now'], header: 'Delta setup' },
+          )
+          return answer === 'Install Delta'
+        },
+      } : false)
 }
 
 /**

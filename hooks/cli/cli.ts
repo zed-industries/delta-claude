@@ -1,8 +1,11 @@
 import type { EngineInterface } from 'claude-code'
 import { errorText } from '../core/text'
+import { installWindows } from './windows-install'
 
 type Run = EngineInterface['process']['run']
-type WindowsDiscovery = Pick<EngineInterface['fs'], 'exists'>
+type WindowsDiscovery = Pick<EngineInterface['fs'], 'exists'> & {
+  confirmInstall?: () => Promise<boolean>
+}
 class MissingCliError extends Error {}
 
 /** Discovery never starts Delta or downloads anything, including during resume. */
@@ -114,7 +117,20 @@ export class DeltaCli {
         catch { continue }
         if (await windows.exists(candidate)) return candidate
       }
-      throw new Error('Delta CLI, install Delta for Windows from https://delta.dev, restart your terminal and Claude Code, and retry /delta-share or /delta-join <link>.')
+      if (!allowInstall)
+        throw new MissingCliError('Delta CLI is missing. Run /delta-share or /delta-join <link> explicitly to install Delta and reconnect.')
+      if (!await windows.confirmInstall?.())
+        throw new Error('Delta was not installed. Retry /delta-setup, /delta-share, or /delta-join <link> to approve installation, or install Delta manually from https://delta.dev.')
+      progress('Installing Delta. Approve the Windows installer prompt if one appears…')
+      const installed = await run(
+        ['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', installWindows],
+        { timeoutMs: 600_000 },
+      ).catch((error) => {
+        throw new Error(`Delta installation could not finish: ${errorText(error)}. An installer may still be running; let it finish and check the installation before retrying.`)
+      })
+      if (installed.exitCode !== 0 || installed.isStdoutTruncated || installed.isStderrTruncated)
+        throw new Error(`Delta installation did not finish: ${installed.stderr.trim() || 'installer failed or output was truncated'}. Check the installation before retrying /delta-share or /delta-join <link>.`)
+      return this.setup(run, false, progress, windows)
     }
     const result = await run(['sh', '-c', discover], { timeoutMs: 30_000 })
     if (result.isStdoutTruncated || result.isStderrTruncated) throw new Error('Delta CLI discovery output was truncated; retry.')

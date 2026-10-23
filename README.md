@@ -20,10 +20,16 @@ Then install the plugin:
 /plugin install delta@zed-industries
 ```
 
-The plugin uses the `delta` CLI. If it isn't installed on macOS or Linux, the
+The plugin uses the `delta` CLI. If it isn't installed on macOS, Linux, or Windows, the
 plugin installs it the first time you set up syncing, share, or join, and Delta
 offers to open your browser to sign in. You don't need to open the Delta app first.
-On Windows, install Delta from [delta.dev](https://delta.dev) first.
+When Delta is missing on Windows, setup first asks you in Claude whether to install it.
+Only choosing **Install Delta** downloads and runs the official stable installer for your native architecture.
+Choosing **Not now** leaves it uninstalled; retry setup, share, or join when ready, or install from [delta.dev](https://delta.dev).
+It uses the installer's default scope; approve a Windows permission prompt if one
+appears. If Windows requires a restart, restart before retrying setup. The plugin
+finds the installed CLI through the registry, without requiring a PATH refresh.
+Background discovery never installs Delta.
 
 At startup the plugin checks an existing Delta installation for updates in the
 background, with a ten-second budget. It notifies you when an update is available;
@@ -122,6 +128,13 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 npx --yes --package typescript@7.0.2 tsc -p . --verbatimModuleSyntax
 python3 scripts/check-cli-setup.py
+```
+
+Run the shell setup check on macOS, Linux, or WSL. On Windows, also exercise the
+PowerShell installation orchestration with mocked downloads and installer processes:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -File scripts/check-windows-setup.ps1
 ```
 
 The type check reads the declarations Claude Code writes into `.claude-plugin/types/` whenever it loads

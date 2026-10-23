@@ -132,7 +132,7 @@ test('Windows missing CLI and invalid discovery never invoke an installer', asyn
     return results.shift()!
   }
   for (let attempt = 0; attempt < 3; attempt++)
-    await expect(cli.resolve(run, true, (text) => progress.push(text), { exists: async () => false })).rejects.toThrow(Error)
+    await expect(cli.resolve(run, false, (text) => progress.push(text), { exists: async () => false })).rejects.toThrow(Error)
   expect(calls).toEqual([
     ['where.exe', '$PATH:delta.exe'],
     ...['HKCU', 'HKLM'].map((hive) =>
@@ -140,6 +140,54 @@ test('Windows missing CLI and invalid discovery never invoke an installer', asyn
     ...Array(2).fill(['where.exe', '$PATH:delta.exe']),
   ])
   expect(progress).toEqual([])
+})
+
+test('Windows explicit installation rediscovers the registry without a refreshed PATH', async () => {
+  let installed = false
+  let installations = 0
+  const run = async (argv: readonly string[]) => {
+    if (argv[0] === 'powershell.exe') {
+      installations++
+      installed = true
+      return output('')
+    }
+    if (argv[0] === 'reg.exe' && installed)
+      return output('    InstallFolder    REG_SZ    D:\\Delta\r\n')
+    return output('', 1)
+  }
+  const cli = new DeltaCli()
+  let approved = false
+  let prompts = 0
+  const windows = {
+    exists: async (path: string) => path === 'D:\\Delta\\bin\\delta.exe',
+    confirmInstall: async () => { prompts++; return approved },
+  }
+  await expect(cli.resolve(run, false, undefined, windows)).rejects.toThrow(Error)
+  expect(prompts).toBe(0)
+  await expect(cli.resolve(run, true, undefined, windows)).rejects.toThrow(Error)
+  expect(installations).toBe(0)
+  approved = true
+  expect(await cli.resolve(run, true, undefined, windows)).toBe('D:\\Delta\\bin\\delta.exe')
+  expect(installations).toBe(1)
+  expect(prompts).toBe(2)
+  expect(await cli.resolve(run, true, undefined, windows)).toBe('D:\\Delta\\bin\\delta.exe')
+  expect(prompts).toBe(2)
+})
+
+test('Windows installation failure is retryable and never caches a CLI', async () => {
+  let installations = 0
+  const run = async (argv: readonly string[]) => {
+    if (argv[0] === 'powershell.exe') {
+      installations++
+      return output('', 1, 'Windows requires a restart')
+    }
+    return output('', 1)
+  }
+  const cli = new DeltaCli()
+  for (let attempt = 0; attempt < 2; attempt++)
+    await expect(cli.resolve(run, true, undefined, { exists: async () => false, confirmInstall: async () => true }))
+      .rejects.toThrow(Error)
+  expect(installations).toBe(2)
 })
 
 function output(stdout: string, exitCode = 0, stderr = '') {
