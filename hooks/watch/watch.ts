@@ -593,7 +593,8 @@ function observeThreadTurn($: Runtime, session: string) {
     feed.remoteTurn.turnId ??= turn.turn_id
     // Delta reports a turn before it knows who requested it, then again once it does.
     const name = conversationText(turn.user?.name ?? '').trim()
-    if (name) Object.assign(feed.remoteTurn, { name, ...turn.user ? { id: personKey(turn.user) } : {} })
+    if (name) feed.remoteTurn.name = name
+    if (name || turn.user?.user_id) feed.remoteTurn.id = personKey(turn.user)
   }
   refreshTurn($)
 }
