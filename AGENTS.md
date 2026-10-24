@@ -17,8 +17,10 @@ python3 scripts/check-cli-setup.py
 
 ## Landing changes
 
-`main` is what installed plugins update from, so a commit reaches `main` only after CI has passed
-on that exact commit: `main` requires the `CI Pass` check. Members of the zed-industries GitHub
-organization may push a tested commit to `main` directly; everyone else opens a pull request. Read
-`.agents/skills/land/SKILL.md` for the flow, including its permission gate: never modify `main`
-without the user's explicit permission to land the specific change.
+Changes land on `develop`, which is trunk. `main` is stable: installed plugins update from it by
+default, and it moves only when `develop` is released to it. A commit reaches either branch only
+after CI has passed on that exact commit: both require the `CI Pass` check. Members of the
+zed-industries GitHub organization may push a tested commit to `develop` directly; everyone else
+opens a pull request against `develop`. Read `.agents/skills/land/SKILL.md` for the flow, including
+its permission gate: never modify `develop` or `main` without the user's explicit permission to
+land or release the specific change.

@@ -55,7 +55,7 @@ jobs:
       - name: Check CLI setup
         run: python3 scripts/check-cli-setup.py
 
-  # The one check `main` requires, so the matrix can change without touching the rule. See
+  # The one check `develop` and `main` require, so the matrix can change without touching the rule. See
   # `.agents/skills/land/SKILL.md`.
   ci_pass:
     name: CI Pass
@@ -68,7 +68,7 @@ jobs:
     steps:
       - name: Check the tests passed
         run: test "${{ needs.test.result }}" = success
-      # This job's own check run satisfies a pull request. A direct push to `main` is checked
+      # This job's own check run satisfies a pull request. A direct push to `develop` or `main` is checked
       # against the commit's status rollup, which counts commit statuses but not necessarily the
       # check runs of a branch push, so publish one. Pull requests from forks get a read-only token
       # and never need it.
