@@ -13,12 +13,13 @@ import type {
  */
 export type Host = {
   agent: Pick<EngineInterface['agent'], 'list' | 'spawn'>
-  clock: Pick<EngineInterface['clock'], 'after' | 'now' | 'sleep'>
+  clock: Pick<EngineInterface['clock'], 'after' | 'every' | 'now' | 'sleep'>
   command: Pick<EngineInterface['command'], 'list' | 'register' | 'run'>
   config: Pick<EngineInterface['config'], 'list'>
   env: {
     claudeCodeRemote(): Promise<string | undefined>
     claudeConfigDir(): Promise<string | undefined>
+    disableNonessentialTraffic(): Promise<string | undefined>
     home(): Promise<string | undefined>
     os(): Promise<string | undefined>
     userProfile(): Promise<string | undefined>
@@ -26,6 +27,7 @@ export type Host = {
   fs: Pick<EngineInterface['fs'], 'exists' | 'list' | 'stat' | 'write'> & {
     read(path: string): Promise<string>
   }
+  http: Pick<EngineInterface['http'], 'fetch'>
   plugin: Pick<EngineInterface['plugin'], 'name' | 'root'>
   process: Pick<EngineInterface['process'], 'run' | 'spawn'>
   prompt: Pick<EngineInterface['prompt'], 'submit'>

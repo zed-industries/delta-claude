@@ -1,6 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 import { DeltaCli } from './cli'
 import { errorText } from '../core/text'
+import { claimInstallation, installation } from '../core/installation'
 import { isJsonObject, isNonEmptyString, isOneOf, isSafeInteger } from '../core/json'
 import { commandErrorFromEnvelope, DeltaCommandError } from './thread-commands'
 
@@ -68,7 +69,6 @@ export function parseInstallUpdate(stdout: string): UpdateResult {
 /** Checks once per plugin host; installation only runs from an explicit command. */
 export class InstallationUpdates {
   private started = false
-  private updating = false
   private revision = 0
 
   async check(host: UpdateHost): Promise<void> {
@@ -93,8 +93,10 @@ export class InstallationUpdates {
   }
 
   async update(host: UpdateHost, form: CommandForm): Promise<string> {
-    if (this.updating) return 'A Delta installation update is already in progress. Wait for its result.'
-    this.updating = true
+    const release = claimInstallation('app')
+    if (!release) return installation?.kind === 'plugin'
+      ? 'A Delta plugin update or activation is in progress. Wait for its result before running /delta-update.'
+      : 'A Delta installation update is already in progress. Wait for its result.'
     this.revision++
     try {
       await host.log('Updating Delta installation…', 'transcript')
@@ -121,7 +123,7 @@ export class InstallationUpdates {
       return `Delta installation update failed: ${errorText(error)}`
     } finally {
       host.progress(undefined)
-      this.updating = false
+      release()
     }
   }
 

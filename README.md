@@ -51,6 +51,38 @@ Otherwise, follow the CLI's platform-specific instructions: for example, run the
 Windows installer, or update a package-managed installation through its package
 manager. Older CLIs that lack the update command point to [delta.dev](https://delta.dev).
 
+### Plugin updates
+
+At startup and hourly, the plugin checks GitHub for a newer release of itself,
+even when the marketplace's auto-update is off. When there is one, the status
+band offers **Update**, **Later** (24 hours) and **Mute**; nothing installs
+without your action. In a terminal, updating reloads plugins right away
+(`/reload-plugins --force`, which reloads every enabled plugin). Desktop may
+apply the update when the session is idle; otherwise start a new Code session.
+
+- `/delta-plugin-update` updates the plugin; `/delta-plugin-update check` only
+  checks.
+- `/delta-plugin-update notifications off` (or `on`) turns the background checks
+  and notices off.
+
+Both also work as `/delta plugin-update …`, and the `/delta` menu offers them
+under **More actions**. One check an hour is shared by every session.
+
+Installs follow the marketplace branch they were added from (`main`, or
+`develop` with `#develop`); local copies, other sources and other refs are left
+alone. Checks need a standalone `claude` CLI (2.1.303 or newer) on PATH, and
+don't run in headless sessions or when
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set.
+
+If your installed plugin predates the updater, refresh the marketplace and update
+once from your shell. For a project or local installation, run it from that
+project with `--scope project` or `--scope local`. Then run `/reload-plugins`, or
+start a new Desktop Code session.
+
+```sh
+claude plugin marketplace update zed-industries && claude plugin update delta@zed-industries --scope user
+```
+
 ## Usage
 
 ### Setup
@@ -90,6 +122,7 @@ its own opens a menu of these actions.
 | `/delta-join <link>` | Join a shared thread in a fresh session, in the thread's checkout |
 | `/delta-setup` | Choose this repository's team and which sessions sync |
 | `/delta-update` | Update the installed Delta app and CLI |
+| `/delta-plugin-update [check \| notifications on\|off]` | Update the Claude Code plugin and reload, check its version, or control update notifications |
 | `/delta-org list` | List your Delta teams |
 | `/delta-org current` | Show the selected team |
 | `/delta-org switch <ID>` | Select a different team |
@@ -128,6 +161,15 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 npx --yes --package typescript@7.0.2 tsc -p . --verbatimModuleSyntax
 python3 scripts/check-cli-setup.py
+```
+
+On macOS, Linux, or WSL, exercise the real plugin install, update and
+same-session reload against a disposable local marketplace, without changing
+your installed plugins. Add `--notifications` to also check the startup notice
+against GitHub's public release manifest:
+
+```sh
+python3 scripts/check-plugin-update.py
 ```
 
 Run the shell setup check on macOS, Linux, or WSL. On Windows, also exercise the
