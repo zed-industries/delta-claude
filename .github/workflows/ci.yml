@@ -54,6 +54,8 @@ jobs:
         run: npx --yes --package typescript@7.0.2 tsc -p . --verbatimModuleSyntax
       - name: Check CLI setup
         run: python3 scripts/check-cli-setup.py
+      - name: Check Desktop sandbox controls
+        run: python3 scripts/check-plugin-update-desktop.py
 
   # The one check `develop` and `main` require, so the matrix can change without touching the rule. See
   # `.agents/skills/land/SKILL.md`.

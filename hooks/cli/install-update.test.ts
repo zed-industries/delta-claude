@@ -128,7 +128,12 @@ test('a Windows installer still running at the deadline is left to finish', asyn
   await fake.advance(600_000)
   expect((await updating).text).toBe('Delta installation update failed: The Delta installer is still running after 10 minutes; it may be waiting for you to approve a Windows prompt. Let it finish, then run `delta update --check` before retrying /delta-update.')
   expect(fake.helperStopped).toBe(false)
+  expect((await $.command.run(typedDelta('plugin-update'))).text).toContain('installation update is still running')
+  expect((await $.command.run(typedDelta('update'))).text).toContain('already in progress')
   release()
+  await fake.settle()
+  fake.holdHelper = undefined
+  expect((await $.command.run(typedDelta('update'))).text).toContain('Updated Delta')
   fake.expectClean()
 })
 

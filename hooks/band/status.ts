@@ -267,6 +267,27 @@ function updateStep(step: UpdateStep, frame: string, give: { bar: boolean; versi
 const textWidth = (text: string) => [...text].length
 const width = (segments: readonly StatusSegment[]) => segments.reduce((sum, { text }) => sum + textWidth(text), 0)
 
+/**
+ * A plugin release and its bracketed buttons share one row. Drop the prefix, then secondary actions
+ * as space runs out; long prerelease versions truncate before the buttons do. Columns exclude padding.
+ */
+export function pluginUpdateRow(version: string, ready: boolean, columns: number, canReload = true) {
+  const action = ready ? canReload ? 'Reload' : 'Details' : 'Update'
+  for (const layout of [
+    { prefix: 'Plugin ', later: true, mute: true },
+    { prefix: '', later: true, mute: true },
+    { prefix: '', later: true, mute: false },
+    { prefix: '', later: false, mute: false },
+  ]) {
+    // Native terminal buttons render as "[ label ]": four cells of chrome, one between buttons.
+    const controls = action.length + 4 + (layout.later ? 10 : 0) + (layout.mute ? 9 : 0)
+    const room = Math.floor(columns) - controls - 1 - 2 - layout.prefix.length
+    if (room < Math.min(8, version.length)) continue
+    const shown = middleTruncate(version, room)
+    return { ...layout, version: shown, action, summaryColumns: 2 + layout.prefix.length + shown.length }
+  }
+}
+
 /** What the band's renderer draws for the copy control. */
 export function copyText(copy: { label: string; copied?: true }): string {
   return copy.copied ? '✔ copied' : copy.label

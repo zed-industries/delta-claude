@@ -359,6 +359,28 @@ export function fakeThreads(hostOn: On, options: {
     session,
     cwd: CHECKOUT,
     pluginVersion: '0.1.1',
+    theme: 'dark',
+    /** Plugin-manager listings are local reads; tests opt into a marketplace installation. */
+    pluginInstalled: false,
+    pluginRoot: '',
+    pluginInstalledVersion: '0.1.1',
+    pluginInstallPath: undefined as string | undefined,
+    pluginScope: 'user' as 'user' | 'project' | 'local' | 'managed',
+    pluginMarketplace: { name: 'zed-industries', source: 'github', repo: 'zed-industries/delta-claude' } as Record<string, unknown>,
+    pluginReleaseVersion: '0.1.2',
+    pluginHttpStatus: 200,
+    pluginManifest: undefined as string | undefined,
+    pluginHttpCalls: [] as string[],
+    pluginMarketplaceRefreshes: [] as string[][],
+    pluginMarketplaceFailure: undefined as string | undefined,
+    pluginUpdateCalls: [] as { argv: string[]; cwd?: string; timeoutMs?: number }[],
+    pluginUpdateFailure: undefined as string | undefined,
+    claudeMissing: false,
+    pluginUpdateDebug: [] as string[],
+    holdPluginHttp: undefined as Promise<void> | undefined,
+    holdPluginUpdate: undefined as Promise<void> | undefined,
+    reloadFailure: undefined as string | undefined,
+    reloadResponse: undefined as string | undefined,
     cliIntegrations: [] as { operation: string; integration?: string; commandForm?: string }[],
     surfaces: ['terminal'] as ('terminal' | 'desktop')[],
     builtins: ['clear', 'cd'],
@@ -832,6 +854,7 @@ export function fakeThreads(hostOn: On, options: {
   // harmless when the running kit does not know the event.
   try { on('store.keys', () => ({ value: [...fake.store.keys()] })) } catch {}
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.attach', ($, e) => ({ clientId: e.clientId }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: fake.session }))
   on('session.cwd', () => ({ value: fake.cwd }))
@@ -871,12 +894,15 @@ export function fakeThreads(hostOn: On, options: {
       await fake.endSession?.(fake.session)
       fake.session = `${fake.session}-fresh`
     } else if (e.command === 'cd' && !fake.refuseCd) fake.cwd = e.args
-    else if (!['clear', 'cd'].includes(e.command)) throw new Error(`Unexpected fixture session command ${e.command}`)
+    else if (e.command === 'reload-plugins') {
+      if (fake.reloadFailure) throw new Error(fake.reloadFailure)
+      if (fake.reloadResponse !== undefined) return { text: fake.reloadResponse }
+    } else if (!['clear', 'cd'].includes(e.command)) throw new Error(`Unexpected fixture session command ${e.command}`)
     return {}
   })
   // The settings menu's rows, of which the band reads the theme for its status bar's shade.
   on('config.list', () => {
-    const theme: ConfigRow = { key: 'theme', label: 'Theme', kind: 'choice', value: 'dark',
+    const theme: ConfigRow = { key: 'theme', label: 'Theme', kind: 'choice', value: fake.theme,
       provider: { plugin: 'engine', tier: 'core' }, isLocked: false }
     return { value: [theme] }
   })
@@ -892,7 +918,7 @@ export function fakeThreads(hostOn: On, options: {
   })
   on('session.compact', () => ({ messages: [{ role: 'user', text: 'Compacted summary', toolUses: [] }] }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('ui.invalidate', () => { fake.invalidates++; return { value: undefined } })
+  on('ui.invalidate', ($, e, next) => { fake.invalidates++; return next(e) })
   // The host draws these sites itself when the plugin passes them on unchanged.
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', props: {}, children: ['the band'] }))
   on('ui.render', { component: 'CommandOutput' }, ($, e) =>
@@ -912,6 +938,7 @@ export function fakeThreads(hostOn: On, options: {
     }
     const row = /^Adding a row to Claude's context: (.*)$/s.exec(e.text)
     if (e.to === 'debug' && e.text.startsWith('Delta update check:')) fake.updateDebug.push(e.text)
+    if (e.to === 'debug' && e.text.startsWith('Delta plugin update check:')) fake.pluginUpdateDebug.push(e.text)
     if (e.to !== 'debug') fake.logs.push(e.text)
     else {
       fake.debugLogs.push(e.text)
@@ -981,8 +1008,10 @@ export function fakeThreads(hostOn: On, options: {
     return { value: undefined }
   })
   on('fs.read', ($, e) => {
+    if (e.path.replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json'))
+      fake.pluginRoot = e.path.slice(0, -'/.claude-plugin/plugin.json'.length)
     const value = fake.files.get(e.path) ??
-      (e.path.replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ version: fake.pluginVersion }) : undefined)
+      (e.path.replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ name: 'delta', version: fake.pluginVersion }) : undefined)
     if (value === undefined) throw new Error(`Missing fixture file: ${e.path}`)
     return { value }
   })
@@ -1012,6 +1041,14 @@ export function fakeThreads(hostOn: On, options: {
       ...within(fake.worktreeDirectories.keys()).map((name) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
       ...within(fake.links.keys()).map((name) => ({ name, kind: 'other' as const, size: 0, mtimeMs: 0, isLink: true })),
     ] }
+  })
+  on('http.fetch', async ($, e) => {
+    if (!/^https:\/\/raw\.githubusercontent\.com\/zed-industries\/delta-claude\/(main|develop)\/\.claude-plugin\/plugin\.json$/.test(e.url))
+      throw new Error(`Unexpected fixture HTTP request: ${e.url}`)
+    fake.pluginHttpCalls.push(e.url)
+    await fake.holdPluginHttp
+    return { value: { status: fake.pluginHttpStatus, ok: fake.pluginHttpStatus === 200, headers: {},
+      text: fake.pluginManifest ?? JSON.stringify({ name: 'delta', version: fake.pluginReleaseVersion }) } }
   })
   /** Delta's telemetry counts each integration's commands, so every Delta command the plugin runs says it is Claude Code's. */
   const expectLabelled = (argv: readonly string[], env: Record<string, string> | undefined) => {
@@ -1051,6 +1088,29 @@ export function fakeThreads(hostOn: On, options: {
       const limit = 4 * 1024 * 1024
       return { value: { exitCode, stdout: new TextDecoder().decode(bytes.subarray(0, limit)), stderr,
         isStdoutTruncated: bytes.length > limit, isStderrTruncated: false } }
+    }
+    if (argv[0] === 'claude' && fake.claudeMissing) return output('', 127, 'claude: command not found')
+    if (argv[0] === 'claude' && argv.slice(1).join(' ') === 'plugin list --json')
+      return output(JSON.stringify(fake.pluginInstalled ? [{
+        id: 'delta@zed-industries', enabled: true, scope: fake.pluginScope,
+        version: fake.pluginInstalledVersion, installPath: fake.pluginInstallPath ?? fake.pluginRoot,
+        ...['project', 'local'].includes(fake.pluginScope) ? { projectPath: fake.root ?? fake.cwd } : {},
+      }] : []))
+    if (argv[0] === 'claude' && argv.slice(1).join(' ') === 'plugin marketplace list --json')
+      return output(JSON.stringify([fake.pluginMarketplace]))
+    if (argv[0] === 'claude' && argv[1] === 'plugin' && argv[2] === 'marketplace' && argv[3] === 'update') {
+      fake.pluginMarketplaceRefreshes.push(argv)
+      if (fake.pluginMarketplaceFailure) return output('', 1, fake.pluginMarketplaceFailure)
+      return output(JSON.stringify({ command: 'marketplace-update', outcome: 'ok', marketplace: 'zed-industries',
+        message: 'Refreshed marketplace.' }))
+    }
+    if (argv[0] === 'claude' && argv[1] === 'plugin' && argv[2] === 'update') {
+      fake.pluginUpdateCalls.push({ argv, cwd: e.init?.cwd, timeoutMs: e.init?.timeoutMs })
+      await fake.holdPluginUpdate
+      if (fake.pluginUpdateFailure) return output('', 1, fake.pluginUpdateFailure)
+      fake.pluginInstalledVersion = fake.pluginReleaseVersion
+      return output(JSON.stringify({ command: 'update', outcome: 'ok', pluginId: 'delta@zed-industries',
+        message: `Delta plugin ${fake.pluginInstalledVersion} is installed.` }))
     }
     if (argv[0] === 'where.exe') return output(`${WINDOWS_DELTA}\r\n`)
     if (argv[0] === 'sh') {

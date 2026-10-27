@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import {
-  bandWidth, firstNames, formatSeconds, personColor, personKey, renderBand, shortLink, statusCurrentTurn,
+  bandWidth, firstNames, formatSeconds, personColor, personKey, pluginUpdateRow, renderBand, shortLink, statusCurrentTurn,
   type StatusSegment, statusSpinnerRunning, type StatusState, toolRowParts,
 } from './status'
 import { cliFixture } from '../testing/cli-fixtures'
@@ -12,6 +12,32 @@ const WIDE = { columns: 120, terminal: true }
 const text = (segments: StatusSegment[] | undefined) => (segments ?? []).map((segment) => segment.text).join('')
 const live: StatusState = { connection: 'live', turn: { state: 'idle' }, link: LINK }
 const people = [{ id: 'u-maya', name: 'Maya Rodriguez' }, { id: 'u-sam', name: 'Sam Lee' }, { id: 'u-ada', name: 'Ada' }]
+
+test('a plugin update and its bracketed buttons fit one row, including long prerelease versions', () => {
+  for (const version of ['0.1.25', '0.1.27-preview.20261027.123456789+abcdef0123456789']) {
+    for (const ready of [false, true]) {
+      for (let columns = 12; columns <= 160; columns++) {
+        // The status band reserves one cell of padding on each side on the terminal.
+        const row = pluginUpdateRow(version, ready, columns - 2)
+        if (!row) continue
+        const controls = [`[ ${row.action} ]`, ...row.later ? ['[ Later ]'] : [], ...row.mute ? ['[ Mute ]'] : []]
+        const text = `${ready ? '✓' : '↑'} ${row.prefix}${row.version} ${controls.join(' ')}`
+        expect([...text].length + 2).toBeLessThanOrEqual(columns)
+        expect(row.summaryColumns).toBe(2 + row.prefix.length + row.version.length)
+        expect(text).not.toContain('\n')
+      }
+    }
+  }
+  expect(pluginUpdateRow('0.1.25', false, 78)).toMatchObject({
+    prefix: 'Plugin ', version: '0.1.25', action: 'Update', later: true, mute: true,
+  })
+  expect(pluginUpdateRow('0.1.25', true, 38)).toMatchObject({
+    prefix: '', version: '0.1.25', action: 'Reload', later: true, mute: true,
+  })
+  expect(pluginUpdateRow('0.1.25', false, 30)).toMatchObject({ later: true, mute: false })
+  expect(pluginUpdateRow('0.1.25', false, 22)).toMatchObject({ later: false, mute: false })
+  expect(pluginUpdateRow('0.1.25', false, 12)).toBeUndefined()
+})
 
 test('the turn status names who started it, and the band animates only for someone else', () => {
   expect(statusCurrentTurn({})).toEqual({ state: 'idle' })

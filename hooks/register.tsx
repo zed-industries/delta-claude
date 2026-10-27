@@ -12,6 +12,7 @@ import type { Host } from './core/host'
 import { withQuestionHints } from './setup/interaction'
 import { releaseOnEnd } from './sharing/join'
 import { admitPrompt } from './recording/prompt'
+import { pluginSurfaceAttached, startPluginUpdates, stopPluginUpdates } from './plugin-update/updates'
 import { showAnswer, shownItemId } from './watch/row-delivery'
 import { drawEcho, drawRow } from './watch/rows'
 import {
@@ -60,6 +61,7 @@ function hostOf($: EngineInterface): Host {
     },
     clock: {
       after: (ms, run) => $.clock.after(ms, run),
+      every: (ms, run) => $.clock.every(ms, run),
       now: () => $.clock.now(),
       sleep: (ms, options) => $.clock.sleep(ms, options),
     },
@@ -74,6 +76,7 @@ function hostOf($: EngineInterface): Host {
     env: {
       claudeCodeRemote: () => $.env.get('CLAUDE_CODE_REMOTE'),
       claudeConfigDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
+      disableNonessentialTraffic: () => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'),
       home: () => $.env.get('HOME'),
       os: () => $.env.get('OS'),
       userProfile: () => $.env.get('USERPROFILE'),
@@ -84,6 +87,9 @@ function hostOf($: EngineInterface): Host {
       read: (path) => $.fs.read(path),
       stat: (path, options) => $.fs.stat(path, options),
       write: (path, text) => $.fs.write(path, text),
+    },
+    http: {
+      fetch: (url, init) => $.http.fetch(url, init),
     },
     plugin: {
       name: $.plugin.name,
@@ -136,6 +142,13 @@ function hostOf($: EngineInterface): Host {
 }
 
 export function register(on: On) {
+  on('session.attach', async ($, e, next) => {
+    const host = hostOf($)
+    const result = await next(e)
+    if (e.surface === 'desktop') pluginSurfaceAttached(host, await $.session.id())
+    return result
+  }).catch(async ($, e, next) => { await logHookFailure($, 'session.attach', next.error); return next(e) })
+
   on('prompt.submit', ($, e, next) => {
     const host = hostOf($)
     return admitPrompt(host, e, next)
@@ -188,6 +201,7 @@ export function register(on: On) {
   on('session.end', async ($, e, next) => {
     const host = hostOf($)
     const session = e.sessionId
+    stopPluginUpdates(host, session)
     await forgetSessionStart(host, session, e.reason)
     cancelRequestsOf(session, e.reason)
     forgetSubagents(session)
@@ -225,6 +239,7 @@ export function register(on: On) {
     const result = await next(e)
     $.clock.after(0, () => { void installationUpdates.check(installUpdateHost(host)) })
     const session = await $.session.id()
+    startPluginUpdates(host, session)
     try { await activate(host, session) }
     catch (error) { await report(host, error) }
     // Claude delivers the first prompt only after this hook returns, so a session started for a
@@ -272,6 +287,13 @@ export function register(on: On) {
     const host = hostOf($)
     return runDeltaCommand(host, `update ${e.args.trim()}`.trim(), 'dedicated_command')
   }).catch(async ($, e, next) => { await logHookFailure($, '/delta-update', next.error); return next(e) })
+  on('command.run', { command: 'delta-plugin-update' }, async ($, e) => {
+    const host = hostOf($)
+    return runDeltaCommand(host, `plugin-update ${e.args.trim()}`.trim(), 'dedicated_command')
+  }).catch(async ($, _e, next) => {
+    await logHookFailure($, '/delta-plugin-update', next.error)
+    return { text: 'Delta could not complete the plugin update command. Retry /delta-plugin-update.' }
+  })
   on('command.run', { command: 'delta-org' }, async ($, e) => {
     const host = hostOf($)
     return e.args.trim()

@@ -14,6 +14,7 @@ import { attachWorktree, beginRestoreCheckout, checkoutNeedsMount, mountCheckout
 import { beginRestore, claimHandoff, pendingHandoff, startParticipation } from '../sharing/join'
 import { hasInteractiveSurface } from '../sharing/lifecycle'
 import { listOrganizations, organizationName } from './organizations'
+import { startPluginUpdates } from '../plugin-update/updates'
 import { policyPath, type ProjectPolicy, readProjectPolicy, recordsAutomatically } from './project-policy'
 import {
   activation, type AutoUpload, type Binding, boundDirectory, drawnRowKey, isPaused, key, ledgerKey, load, pauseCheckout,
@@ -218,6 +219,7 @@ export async function noticeSession(host: Host, session?: string) {
   if (startedSession !== undefined && (session === undefined || session === startedSession)) return
   const id = session ?? await host.session.id()
   if (id === endedSession) return
+  startPluginUpdates(host, id)
   const running = noticing.get(id)
   if (running) {
     await running

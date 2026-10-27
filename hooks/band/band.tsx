@@ -1,12 +1,13 @@
 /**
  * The band above the prompt: what it says about the watched thread, a running share, join or
- * installation update, sync reminders, and its spinner, reconnect and copied-link timers.
+ * installation update, plugin releases, sync reminders, and its spinner, reconnect and copied-link timers.
  */
 import type { RenderSurface, TextProps, Timer } from 'claude-code'
 import { conversationWebLink, itemAuthor, THOUGHT_KIND, toolCallParts } from '../watch/conversation'
 import {
   currentOrganizationId, isPersonalOrganizationId, loadOrganizationDirectory, organizationName,
 } from '../setup/organizations'
+import { drawPluginUpdateNotice } from './plugin-update'
 import {
   activation, type Binding, type HookEvent, type HookNext, report, requests, sessions,
 } from '../core/session-state'
@@ -365,10 +366,10 @@ export function authorColor(item: WatchItem): string {
 }
 
 /**
- * The band above the prompt: the connection, the thread's link to click or copy, and who is here or
- * whose agent is working. It draws only while a Delta conversation is active, yields to a survey,
- * and takes at most the band's rows. Draining the queued message rows here also gives them the hook
- * context their own command needs.
+ * The band above the prompt: sync status, the thread's link and people, and an optional plugin update
+ * row inside the same surface. It yields to a survey and takes at most the band's rows; remote agent
+ * activity sits above the shaded status rows. Draining queued message rows here also gives them the
+ * hook context their own command needs.
  */
 export async function drawBand(
   host: Host,
@@ -376,14 +377,22 @@ export async function drawBand(
   next: HookNext<'ui.render', { component: 'AbovePrompt' }>,
 ) {
   await drainMessages(host)
-  if (!statusShown() || e.props.hasSurvey) return next(e)
+  if (e.props.hasSurvey) return next(e)
   const maxRows = Math.max(0, e.props.maxRows)
   if (maxRows === 0) return next(e)
-  // This draw shows the current frame, so the animation may ask for the next.
-  syncSpinner(host)
   const terminal = e.surface === 'terminal'
   const columns = Math.max(0, e.props.bodyColumns)
-  const band = renderBand(await statusView(host), { columns, terminal, rows: maxRows })
+  let update = maxRows >= 2 ? await drawPluginUpdateNotice(host, e, columns - (terminal ? 2 : 0)) : null
+  if (!statusShown() && !update) return next(e)
+  // This draw shows the current frame, so the animation may ask for the next.
+  syncSpinner(host)
+  const state = await statusView(host)
+  let band = renderBand(state, { columns, terminal, rows: maxRows })
+  // A failure's explanation outranks an optional release notice. Everything else lays out in the
+  // remaining rows, so adding the notice cannot push an activity or a wrapped link past the band.
+  if (band.detail && maxRows < 3) update = null
+  const statusRows = maxRows - (update ? 1 : 0)
+  if (update) band = renderBand(state, { columns, terminal, rows: statusRows })
   const { Box, Text, Link, Button } = host.ui.resolve(e)
   const spans = (segments: StatusSegment[]) =>
     segments.map((segment, index) => <Text key={String(index)} {...segmentProps(segment)}>{segment.text}</Text>)
@@ -431,8 +440,9 @@ export async function drawBand(
       </Box>
       {band.right.length ? <Text wrap="truncate-end">{spans(band.right)}</Text> : null}
     </Box>,
+    update,
     link && ownRow ? <Text key="link">{'  '}{link}</Text> : null,
-    band.detail && maxRows >= 2 ? <Text key="detail" wrap="truncate-end">{'  '}{spans(band.detail)}</Text> : null,
+    band.detail && statusRows >= 2 ? <Text key="detail" wrap="truncate-end">{'  '}{spans(band.detail)}</Text> : null,
   ].filter((part) => part !== null)
   // Another participant's working agent reads like Claude's own working line: unshaded, above the
   // band, where its finished calls then land in the transcript.
