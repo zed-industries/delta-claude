@@ -12,7 +12,7 @@ import type { Host } from './core/host'
 import { withQuestionHints } from './setup/interaction'
 import { releaseOnEnd } from './sharing/join'
 import { admitPrompt } from './recording/prompt'
-import { pluginSurfaceAttached, startPluginUpdates, stopPluginUpdates } from './plugin-update/updates'
+import { recheckPluginUpdates, startPluginUpdates, stopPluginUpdates } from './plugin-update/updates'
 import { showAnswer, shownItemId } from './watch/row-delivery'
 import { drawEcho, drawRow } from './watch/rows'
 import {
@@ -145,7 +145,7 @@ export function register(on: On) {
   on('session.attach', async ($, e, next) => {
     const host = hostOf($)
     const result = await next(e)
-    if (e.surface === 'desktop') pluginSurfaceAttached(host, await $.session.id())
+    if (e.surface === 'desktop') recheckPluginUpdates(host, await $.session.id())
     return result
   }).catch(async ($, e, next) => { await logHookFailure($, 'session.attach', next.error); return next(e) })
 

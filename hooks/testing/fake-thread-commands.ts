@@ -359,7 +359,6 @@ export function fakeThreads(hostOn: On, options: {
     session,
     cwd: CHECKOUT,
     pluginVersion: '0.1.1',
-    theme: 'dark',
     /** Plugin-manager listings are local reads; tests opt into a marketplace installation. */
     pluginInstalled: false,
     pluginRoot: '',
@@ -902,7 +901,7 @@ export function fakeThreads(hostOn: On, options: {
   })
   // The settings menu's rows, of which the band reads the theme for its status bar's shade.
   on('config.list', () => {
-    const theme: ConfigRow = { key: 'theme', label: 'Theme', kind: 'choice', value: fake.theme,
+    const theme: ConfigRow = { key: 'theme', label: 'Theme', kind: 'choice', value: 'dark',
       provider: { plugin: 'engine', tier: 'core' }, isLocked: false }
     return { value: [theme] }
   })

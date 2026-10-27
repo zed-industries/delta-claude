@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise plugin updates in an isolated terminal, or prepare a macOS Desktop sandbox.
+"""Exercise plugin updates in an isolated terminal.
 
 Requires macOS, Linux, or WSL, Git and Claude Code. Uses a disposable Git marketplace and configuration,
 redirects that marketplace's GitHub clone URL to the local fixture, and makes no model requests.
@@ -7,7 +7,6 @@ No installed user plugins, settings, credentials or Delta sessions are changed.
 """
 
 import argparse
-import contextlib
 import importlib.util
 import json
 import os
@@ -42,29 +41,10 @@ def main():
     parser.add_argument("--claude", default=shutil.which("claude"), help="Claude executable to exercise")
     parser.add_argument("--notifications", action="store_true",
                         help="Also check the real startup notification against the public GitHub release manifest")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--manual", action="store_true",
-                      help="Open an isolated terminal for hands-on checks; includes --notifications and needs a TTY")
-    mode.add_argument("--desktop", action="store_true",
-                      help="Prepare a retained macOS Desktop sandbox and print launch steps; does not open or quit Desktop")
-    parser.add_argument("--desktop-app", default="/Applications/Claude.app", help="Claude Desktop .app bundle")
-    parser.add_argument("--directory", help="New directory for --desktop; otherwise create a retained temporary directory")
     args = parser.parse_args()
     if not args.claude:
         parser.error("Claude Code is not on PATH")
-    if args.manual and (not sys.stdin.isatty() or not sys.stdout.isatty()):
-        parser.error("--manual needs a terminal; run it directly, not through a pipe")
-    if args.desktop and sys.platform != "darwin":
-        parser.error("--desktop currently supports macOS")
-    if args.directory and not args.desktop:
-        parser.error("--directory is only for --desktop")
-    desktop = None
-    if args.desktop:
-        spec = importlib.util.spec_from_file_location("desktop_probe", Path(__file__).with_name("plugin-update-desktop.py"))
-        desktop = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(desktop)
-        desktop.app_executable(args.desktop_app)
-    notifications = args.notifications or args.manual or args.desktop
+    notifications = args.notifications
     release_version = "0.0.2"
     if notifications:
         # The notification reads the real public manifest. Give the local release that same version,
@@ -81,18 +61,7 @@ def main():
             raise AssertionError("The public release manifest has no usable fixture version")
     claude = str(Path(args.claude).resolve())
     plugin = Path(__file__).resolve().parent.parent
-    if args.desktop:
-        if args.directory:
-            retained = Path(args.directory).expanduser().resolve()
-            retained.mkdir(mode=0o700)  # Never reuse or overwrite an existing directory.
-        else:
-            # Desktop may keep using this after this command or the calling agent turn ends.
-            retained = Path(tempfile.mkdtemp(prefix="delta-plugin-desktop-")).resolve()
-        directory_context = contextlib.nullcontext(str(retained))
-        print(f"Retained Desktop sandbox: {retained}", flush=True)
-    else:
-        directory_context = tempfile.TemporaryDirectory(prefix="delta-plugin-update-", dir=os.environ.get("DELTA_SCRATCH_DIR"))
-    with directory_context as directory:
+    with tempfile.TemporaryDirectory(prefix="delta-plugin-update-", dir=os.environ.get("DELTA_SCRATCH_DIR")) as directory:
         root = Path(directory).resolve()
         config = root / "config"
         config.mkdir()
@@ -153,7 +122,6 @@ printf '%s\\n' '{"schema_version":1,"status":"up_to_date","current_version":"0.0
             "GIT_CONFIG_KEY_2": f"url.{(root / 'no-other-marketplaces').as_uri()}/.insteadOf",
             "GIT_CONFIG_VALUE_2": "https://github.com/",
         })
-        descriptor = desktop.prepare(root, fixture, claude, args.desktop_app, release_version) if desktop else None
 
         def run(*argv, cwd=fixture):
             result = subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True, timeout=60)
@@ -170,8 +138,6 @@ printf '%s\\n' '{"schema_version":1,"status":"up_to_date","current_version":"0.0
         run("git", "init", str(project))
         print(run("claude", "plugin", "marketplace", "add", "zed-industries/delta-claude#main", "--json", cwd=project))
         print(run("claude", "plugin", "install", "delta@zed-industries", "--json", cwd=project))
-        if desktop:
-            desktop.disable_auto_update(descriptor)
         # Exercise manual updating with notifications off as well as the native auto-updater off.
         # Only an explicit marketplace refresh may fetch the local fixture; no run sends a model prompt.
         if not notifications:
@@ -187,69 +153,10 @@ printf '%s\\n' '{"schema_version":1,"status":"up_to_date","current_version":"0.0
         run("git", "commit", "-m", "Release fixture update")
         before, after = root / "loaded-0.0.1.json", root / f"loaded-{release_version}.json"
         before.unlink(missing_ok=True)
-        if args.desktop:
-            control = f"python3 {shlex.quote(str(root / 'desktop.py'))}"
-            instructions = f"""
-DESKTOP SANDBOX PREPARED — no Desktop app was opened or stopped.
-
-1. Finish active work and quit Claude Desktop with Cmd+Q.
-2. In Terminal, launch it with this sandbox's environment:
-   {control} launch
-3. Start a NEW Code → Local session in Desktop and select:
-   {project}
-   Leave Worktree OFF. Launching Desktop does not change an existing session's folder.
-   Do not resume a session for your normal repository. Use the Code tab, not its integrated terminal, Cowork, or Cloud.
-4. Wait for the update notice, or run /delta-plugin-update check.
-   Confirm the running version is 0.0.1, then try Update, Later and Mute or /delta-plugin-update.
-   Installed fixture: 0.0.1; available fixture: {release_version}.
-   Both contain this branch's code. The release check reads GitHub; installation fetches the local fixture.
-   Desktop's watcher may activate the update while idle; the plugin cannot force a Desktop reload.
-   If it remains inactive, expect restart guidance after 15 seconds and open a new Code session in this project.
-   After activation, /delta-plugin-update check should report that the running plugin is current.
-
-Desktop must bundle Claude Code 2.1.303 or newer (/status).
-There is no test-only unlock command or prompt interception; this exercises the production flow.
-After changing this checkout's test helper, prepare a NEW sandbox; old launch commands use old code.
-
-Use only the test plugin's commands, not /delta-share, /delta-setup or the plugin browser's updater.
-Desktop uses its regular app profile and sign-in. Ordinary prompts may use your plan; this is
-plugin-state isolation, not a VM or an isolated Desktop account. The Delta CLI is a test stub.
-
-To return to normal: close the test Code session, quit Desktop, then reopen it normally from the Dock.
-The launcher changes no shell profile or Desktop preference. After quitting Desktop, archive the
-test session and delete this sandbox folder when you no longer need its diagnostics:
-{root}
-"""
-            (root / "DESKTOP-TEST.txt").write_text(instructions)
-            print(instructions, flush=True)
-            return
         arguments = [
             "claude", "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--setting-sources", "user", "--debug-file", str(root / "debug.log"),
         ]
-        if args.manual:
-            print(f"""
-Isolated test directory: {root}
-Installed fixture: 0.0.1; available fixture: {release_version}
-The installed code is this feature checkout with test version numbers, not production code.
-The release check reads GitHub; every marketplace Git fetch stays in the local fixture.
-Native auto-update is OFF. Your normal Claude configuration, plugin cache and Delta are untouched.
-
-Accept trust for the disposable project, then wait for the update notice.
-Try the Update, Later, and Mute buttons in the status band, or /delta-plugin-update check.
-Use /plugin list to inspect the installed version. Updating should reload in this same session.
-Exit with /exit; this script then offers to restart using the same isolated preferences.
-Only slash commands are useful here: model requests and real Delta operations are unavailable.
-The one-hour check interval and 24-hour snooze are unchanged.
-""", flush=True)
-            while True:
-                subprocess.run(arguments, cwd=project, env=env, check=True)
-                if after.exists():
-                    print(f"The updated fixture {release_version} loaded.")
-                answer = input("Enter to reopen this sandbox; q to finish and delete only this sandbox: ")
-                if answer.strip().lower() == "q":
-                    break
-            return
         try:
             transition.interactive(arguments, project, env, "/delta-plugin-update", after,
                                    ready=notification_marker if notifications else before, timeout=75)
@@ -267,7 +174,7 @@ The one-hour check interval and 24-hour snooze are unchanged.
         assert updated["pluginRoot"].endswith("/" + release_version), updated
         if notifications:
             notice = json.loads(notification_marker.read_text())
-            assert notice["version"] == release_version and notice["runningVersion"] == "0.0.1", notice
+            assert notice["version"] == release_version and not notice["ready"], notice
             print("PASS: startup discovered the public release and offered the update with native auto-update disabled")
         print(f"PASS: native marketplace update loaded {release_version} immediately in the same Claude session and directory")
 

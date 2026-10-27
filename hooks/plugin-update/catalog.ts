@@ -11,23 +11,17 @@ export const CHECK_INTERVAL_MS = 60 * 60 * 1000
 export const REMINDER_INTERVAL_MS = 24 * CHECK_INTERVAL_MS
 export const ACTIVATION_WAIT_MS = 15_000
 
-export type Installation = {
+type Installation = {
   scope: 'user' | 'project' | 'local' | 'managed'
   version: string
   installPath: string
 }
 export type UpdateTarget = Installation & { branch: 'main' | 'develop'; runningVersion: string }
 
-/** Strict semver, including prereleases; build metadata does not change precedence. */
-function versionParts(version: string): { numbers: number[]; prerelease: string[] } | undefined {
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version)
-  if (!match) return
-  const numbers = match.slice(1, 4).map(Number)
-  const prerelease = match[4]?.split('.') ?? []
-  if (!numbers.every(Number.isSafeInteger) ||
-      prerelease.some((part) => /^\d+$/.test(part) && (part.length > 1 && part[0] === '0' || !Number.isSafeInteger(Number(part)))))
-    return
-  return { numbers, prerelease }
+/** `x.y.z`, as every plugin.json release uses. */
+function versionParts(version: string): number[] | undefined {
+  const parts = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(version)?.slice(1).map(Number)
+  return parts?.every(Number.isSafeInteger) ? parts : undefined
 }
 
 /** Undefined for an unknown version, rather than guessing an order or recommending a downgrade. */
@@ -35,18 +29,7 @@ export function compareVersions(left: string, right: string): number | undefined
   const a = versionParts(left), b = versionParts(right)
   if (!a || !b) return
   for (let index = 0; index < 3; index++) {
-    if (a.numbers[index] !== b.numbers[index]) return a.numbers[index]! > b.numbers[index]! ? 1 : -1
-  }
-  if (!a.prerelease.length || !b.prerelease.length)
-    return Number(!a.prerelease.length) - Number(!b.prerelease.length)
-  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index++) {
-    const x = a.prerelease[index], y = b.prerelease[index]
-    if (x === y) continue
-    if (x === undefined || y === undefined) return x === undefined ? -1 : 1
-    const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y)
-    if (xn && yn) return Number(x) > Number(y) ? 1 : -1
-    if (xn !== yn) return xn ? -1 : 1
-    return x > y ? 1 : -1
+    if (a[index] !== b[index]) return a[index]! > b[index]! ? 1 : -1
   }
   return 0
 }
@@ -112,13 +95,12 @@ export function manifestUrl(branch: UpdateTarget['branch']): string {
   return `https://raw.githubusercontent.com/zed-industries/delta-claude/${branch}/.claude-plugin/plugin.json`
 }
 
-export type CachedRelease = { checkedAt: number; claim: string; version?: string }
+type CachedRelease = { checkedAt: number; version?: string }
 
 export function cachedRelease(value: unknown): CachedRelease | undefined {
   if (!isJsonObject(value) || typeof value.checkedAt !== 'number' || !Number.isFinite(value.checkedAt) ||
-      typeof value.claim !== 'string' ||
       (value.version !== undefined && (typeof value.version !== 'string' || !versionParts(value.version)))) return
-  return { checkedAt: value.checkedAt, claim: value.claim, ...value.version ? { version: value.version } : {} }
+  return { checkedAt: value.checkedAt, ...value.version ? { version: value.version } : {} }
 }
 
 /** A future timestamp is not a permanent throttle after the machine's clock moves backwards. */
