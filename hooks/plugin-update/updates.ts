@@ -13,7 +13,7 @@ import { requests, stateFor } from '../core/session-state'
 import { errorText } from '../core/text'
 import {
   ACTIVATION_WAIT_MS, answersFor, branchFrom, type Check, CHECK_INTERVAL_MS, checkFrom, compareVersions, installationFrom,
-  manifestUrl, manifestVersion, MARKETPLACE, PLUGIN_ID, recentlyChecked, REMINDER_INTERVAL_MS, reminderIsSnoozed,
+  listingFrom, manifestUrl, manifestVersion, MARKETPLACE, PLUGIN_ID, recentlyChecked, REMINDER_INTERVAL_MS, reminderIsSnoozed,
   updateMessage, type UpdateTarget,
 } from './catalog'
 
@@ -66,8 +66,7 @@ async function readList(host: Host, argv: string[], cwd: string): Promise<unknow
   const result = await runClaude(host, argv, cwd, 10_000)
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Claude Code could not read installed plugins.')
   if (result.isStdoutTruncated || result.isStderrTruncated) throw new Error('Claude Code truncated its plugin listing.')
-  const value: unknown = JSON.parse(result.stdout)
-  return value
+  return listingFrom(result.stdout)
 }
 
 async function runClaude(host: Host, argv: string[], cwd: string, timeoutMs: number) {

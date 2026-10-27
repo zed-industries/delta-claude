@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import {
   answersFor, branchFrom, CHECK_INTERVAL_MS, checkFrom, compareVersions, installationFrom, manifestUrl, manifestVersion,
-  recentlyChecked, REMINDER_INTERVAL_MS, reminderIsSnoozed, updateMessage,
+  listingFrom, recentlyChecked, REMINDER_INTERVAL_MS, reminderIsSnoozed, updateMessage,
 } from './catalog'
 
 test('versions compare numerically, and an unknown version has no order', () => {
@@ -70,6 +70,16 @@ test('persisted throttles expire, survive clock changes, and snooze only the ann
   expect(reminderIsSnoozed(reminder, '1.2.4', 0)).toBe(false)
   expect(reminderIsSnoozed(reminder, '1.2.3', REMINDER_INTERVAL_MS)).toBe(false)
   expect(reminderIsSnoozed(reminder, '1.2.3', -1)).toBe(false)
+})
+
+test('a listing is read whether pretty-printed or not, past any notice around it', () => {
+  const entries = [{ id: 'delta@zed-industries', tags: ['a'] }, { id: 'other@x' }]
+  for (const stdout of [
+    JSON.stringify(entries), JSON.stringify(entries, null, 2), `${JSON.stringify(entries, null, 2)}\n`,
+    `[warn] A newer Claude Code is available.\n${JSON.stringify(entries, null, 2)}\nDone.\n`,
+  ]) expect(listingFrom(stdout)).toEqual(entries)
+  expect(listingFrom('[]')).toEqual([])
+  for (const stdout of ['', 'Not JSON', '[warn] only a notice']) expect(() => listingFrom(stdout)).toThrow()
 })
 
 test('native update results must identify the operation and success, and the last line carries JSON', () => {

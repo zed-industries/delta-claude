@@ -140,6 +140,19 @@ export function reminderIsSnoozed(value: unknown, version: string, now: number):
     value.until > now && value.until <= now + REMINDER_INTERVAL_MS
 }
 
+/**
+ * A `--json` listing: one array, pretty-printed over many lines or on one. A notice Claude Code prints
+ * before or after it, such as `[warn] …`, is not part of it.
+ */
+export function listingFrom(stdout: string): unknown {
+  const lines = stdout.split(/\r?\n/)
+  const start = lines.findIndex((line) => /^\[\s*($|[{\]])/.test(line))
+  const end = lines.findLastIndex((line) => /\]\s*$/.test(line))
+  if (start < 0 || end < start) throw new Error('Claude Code returned an unreadable plugin listing.')
+  const value: unknown = JSON.parse(lines.slice(start, end + 1).join('\n'))
+  return value
+}
+
 /** --json writes its result last; earlier lines can describe a refused marketplace command. */
 export function updateMessage(stdout: string, command: 'update' | 'marketplace-update' = 'update'): string {
   const value: unknown = JSON.parse(stdout.trim().split(/\r?\n/).at(-1) ?? '')
