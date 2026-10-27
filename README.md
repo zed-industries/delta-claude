@@ -53,64 +53,35 @@ manager. Older CLIs that lack the update command point to [delta.dev](https://de
 
 ### Plugin updates
 
-The Claude Code plugin checks for new releases in the background at startup and
-hourly in interactive terminal and Desktop sessions. These checks are read-only
-and work even when the marketplace's native auto-update setting is off. They
-read the published manifest from GitHub, use a shared one-hour cache, and never
-block your work when the network is unavailable.
+At startup and hourly, the plugin checks GitHub for a newer release of itself,
+even when the marketplace's auto-update is off. When there is one, the status
+band offers **Update**, **Later** (24 hours) and **Mute**; nothing installs
+without your action. In a terminal, updating reloads plugins right away
+(`/reload-plugins --force`, which reloads every enabled plugin). Desktop may
+apply the update when the session is idle; otherwise start a new Code session.
 
-When an update is available, a compact row inside the status band offers **Update**,
-**Later** (24 hours), and **Mute** (turn off update notifications). Notifications are on
-by default; your choice persists across repositories and sessions. They never
-install anything without your action. If Claude Code already downloaded an
-update, the notice turns green and offers **Reload** in a terminal or **Details**
-with activation guidance in Desktop. On very narrow
-terminals, secondary buttons give way before the update action; the commands
-below always remain available.
+- `/delta-plugin-update` updates the plugin; `/delta-plugin-update check` only
+  checks.
+- `/delta-plugin-update notifications off` (or `on`) turns the background checks
+  and notices off.
 
-- `/delta-plugin-update` updates the plugin and requests activation where supported.
-- `/delta-plugin-update check` checks manually without installing.
-- `/delta-plugin-update notifications off` stops background checks and notices.
-  Use `notifications on` to enable them again.
+Both also work as `/delta plugin-update …`, and the `/delta` menu offers them
+under **More actions**. One check an hour is shared by every session.
 
-These also work as `/delta plugin-update …`. The `/delta` menu's **More actions**
-includes the plugin updater and the separate Delta app/CLI updater.
+Installs follow the marketplace branch they were added from (`main`, or
+`develop` with `#develop`); local copies, other sources and other refs are left
+alone. Checks need a standalone `claude` CLI (2.1.303 or newer) on PATH, and
+don't run in headless sessions or when
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set.
 
-Discovery and installation use Claude Code's terminal CLI, so a standalone
-`claude` (2.1.303 or newer) must be on PATH. Desktop's bundled engine is not a
-substitute: Desktop-only users need to install the terminal CLI and restart
-Desktop so it can find it. Organization policy still applies.
-
-In a terminal, an update immediately requests `/reload-plugins --force` without
-another confirmation. This reloads all enabled plugins, not just Delta, and a
-change to MCP tools can invalidate the prompt cache. A returned command message
-does not count as proof that the new version loaded.
-
-Desktop cannot run that interactive slash command. Its own watcher may apply an
-installed update when the session is idle, but feature gates and managed MCP policy
-can disable that behavior. If the old plugin is still running after 15 seconds,
-it reports that activation is pending and tells you to start a new Code session.
-It does not bypass policy or promise an immediate Desktop reload.
-Within a plugin host, app/CLI updates and plugin installation/activation run one
-at a time. This does not control reloads initiated externally by Claude Code.
-
-Normal Zed marketplace installs follow `main`; installs added with `#develop`
-follow `develop`. Local development copies, other marketplace sources, and refs
-other than `main` and `develop` are left unchanged. Background checks do not run
-in headless sessions or when `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is nonempty.
-Manual commands remain available when notifications are off.
-The 24-hour reminder cooldown is shared across sessions, including restarts.
-
-If you installed an older plugin without this updater, refresh the marketplace
-before updating from your shell; otherwise a stale catalog can report “already latest”:
+If your installed plugin predates the updater, refresh the marketplace and update
+once from your shell. For a project or local installation, run it from that
+project with `--scope project` or `--scope local`. Then run `/reload-plugins`, or
+start a new Desktop Code session.
 
 ```sh
 claude plugin marketplace update zed-industries && claude plugin update delta@zed-industries --scope user
 ```
-
-For project or local installations, run this from the relevant project and replace
-`--scope user` with `--scope project` or `--scope local`. Then run `/reload-plugins`
-in terminal Claude Code, or start a new Desktop Code session.
 
 ## Usage
 
@@ -192,95 +163,13 @@ npx --yes --package typescript@7.0.2 tsc -p . --verbatimModuleSyntax
 python3 scripts/check-cli-setup.py
 ```
 
-On macOS, Linux, or WSL, exercise the real plugin install → update → immediate
-reload workflow without changing your installed plugins or making model requests:
+On macOS, Linux, or WSL, exercise the real plugin install, update and
+same-session reload against a disposable local marketplace, without changing
+your installed plugins. Add `--notifications` to also check the startup notice
+against GitHub's public release manifest:
 
 ```sh
 python3 scripts/check-plugin-update.py
-```
-
-The check creates a disposable Git marketplace and Claude configuration, redirects
-the marketplace's GitHub clone URL to that local fixture, and verifies that the
-new version loads in the same session and directory. Pass `--claude <executable>`
-to check another Claude Code version.
-
-To include the startup notification and its real read of GitHub's public release
-manifest, run `python3 scripts/check-plugin-update.py --notifications`. The local
-fixture uses that release's version number, but still installs only code from
-this checkout. This mode needs network access; the default check does not.
-
-For hands-on testing in your own terminal:
-
-```sh
-python3 scripts/check-plugin-update.py --manual
-```
-
-Accept trust for the disposable project and wait for the update notice. Try the
-notice's buttons, `/delta-plugin-update check`, and the notification preference.
-After `/exit`, press Enter to reopen the same isolated configuration and verify
-that your preference or snooze persists; enter `q` to remove only that sandbox.
-Run the script again for a fresh scenario. The script does not change the one-hour
-check interval or 24-hour snooze. Use only slash commands: model requests and real
-Delta operations are unavailable. Neither this mode nor the automated check
-tests a live shared Delta session.
-
-For hands-on testing in **Claude Desktop's Code tab on macOS**:
-
-```sh
-python3 scripts/check-plugin-update.py --desktop
-```
-
-This prepares a fresh, retained sandbox without opening or quitting Desktop or
-starting a terminal Claude session. It prints the project path and exact launch
-command; the instructions are also saved in `DESKTOP-TEST.txt`
-inside the sandbox. Use `--desktop-app /path/to/Claude.app` for a nonstandard app
-location, or `--directory /path/to/a-new-folder` to choose the sandbox location.
-The directory must not already exist.
-
-1. Finish active work and quit Claude Desktop with **Cmd+Q**.
-2. Run the printed `desktop.py launch` command. It refuses to launch while that
-   app is running and never stops existing sessions. Keep that terminal open.
-3. Start a **new Code → Local session**, select the printed project directory,
-   and leave **Worktree off**. Launching Desktop does not change an existing
-   session's folder: do not resume one for your normal repository. Do not use
-   Cowork, Cloud, or the integrated terminal.
-4. Wait for the update notice, or run `/delta-plugin-update check`. Confirm the
-   running fixture version is `0.0.1`, then try **Update**, **Later**, and **Mute**.
-   After updating, allow Desktop to apply it while idle. If it does not, expect
-   new-session guidance after 15 seconds and open a new Code session in the same
-   sandbox project. Run `/delta-plugin-update check` again to inspect the running
-   version. Same-session activation proves Desktop's watcher worked, not that
-   the plugin can force a Desktop reload.
-
-There is no test-only unlock command, update gate, or prompt interception.
-Desktop must bundle Claude Code 2.1.303 or newer (`/status`).
-After changing the test helper, prepare a **new sandbox**; an old launcher still
-loads the old copied plugin.
-
-Native auto-update is disabled. Both version labels contain this checkout's code;
-the available version number comes from the public GitHub manifest, while plugin
-installation fetches only the local fixture. Plugin subprocesses use the isolated
-config/cache, Git redirection, and stub Delta CLI even if Desktop replaces `PATH`
-with its login-shell environment. For persistence checks, close and reopen the local Code session
-in the same sandbox; prepare a **new** sandbox for an independent scenario.
-
-This isolates **plugin state, not the Desktop account or app profile**. Desktop
-uses its normal sign-in; ordinary model prompts can use your plan, and the test
-session may appear in its sidebar. Stick to the test commands. Do not use
-`/delta-share`, `/delta-setup`, or the plugin browser's updater. Managed restrictions
-still apply; the helper does not bypass them.
-
-To return to normal, close the test session, quit Desktop, and reopen it normally
-from the Dock—not through the launcher. Archive the test session if desired.
-After quitting the test app, delete the printed sandbox directory when no longer
-needed. No shell profile, Desktop preference, or normal plugin installation needs
-restoring. The sandbox is intentionally **not** deleted when preparation finishes.
-
-Test the launcher, subprocess isolation, and production hook paths without opening Desktop or
-using the network (also run by CI):
-
-```sh
-python3 scripts/check-plugin-update-desktop.py
 ```
 
 Run the shell setup check on macOS, Linux, or WSL. On Windows, also exercise the

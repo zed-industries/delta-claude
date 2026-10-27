@@ -97,12 +97,11 @@ export class InstallationUpdates {
     if (!release) return installation?.kind === 'plugin'
       ? 'A Delta plugin update or activation is in progress. Wait for its result before running /delta-update.'
       : 'A Delta installation update is already in progress. Wait for its result.'
-    let pendingInstaller: Promise<unknown> | undefined
     this.revision++
     try {
       await host.log('Updating Delta installation…', 'transcript')
       host.progress({ phase: 'checking' })
-      const result = await this.run(host, false, form, (completion) => { pendingInstaller = completion })
+      const result = await this.run(host, false, form)
       switch (result.status) {
         case 'updated': return result.restartRequired
           ? `Updated Delta to ${result.latestVersion}. Windows reports that a restart is required to finish the installation; restart Windows, then Claude Code.`
@@ -123,19 +122,13 @@ export class InstallationUpdates {
         return 'Delta was not updated because it is running agent work, such as a turn or a terminal. Nothing was stopped. Retry /delta-update once that work finishes.'
       return `Delta installation update failed: ${errorText(error)}`
     } finally {
-      const finish = () => { try { host.progress(undefined) } finally { release() } }
-      if (pendingInstaller) {
-        // A Windows helper left running after the deadline must not be killed by a plugin reload.
-        host.progress({ action: 'Delta installer is still running; let it finish.' })
-        // The old environment can disappear during shutdown; releasing remains unconditional.
-        void pendingInstaller.then(finish, finish).catch(() => {})
-      } else finish()
+      host.progress(undefined)
+      release()
     }
   }
 
   private async run(
     host: UpdateHost, check: boolean, form?: CommandForm,
-    onInstallerTimeout?: (completion: Promise<unknown>) => void,
   ): Promise<Exclude<UpdateResult, { status: 'install_ready' }>> {
     const env = { DELTA_CLI_INTEGRATION: 'claude_code', ...form ? { DELTA_CLI_COMMAND_FORM: form } : {} }
     const result = await withDeadline(host, check ? 10_000 : 600_000,
@@ -173,7 +166,7 @@ export class InstallationUpdates {
       'The Delta installer is still running after 10 minutes; it may be waiting for you to approve a Windows prompt. Let it finish, then run `delta update --check` before retrying /delta-update.',
       async (live) => parseOutput(await stream(host, result.installArgv, env, live), (failed) =>
         `The Delta installer helper exited with code ${failed.exitCode}. Run \`delta update --check\` before retrying /delta-update.`),
-      { leaveRunning: true, onTimeout: onInstallerTimeout })
+      { leaveRunning: true })
     if (installed.status !== 'updated' || installed.restartRequired === undefined)
       throw new Error(`Unexpected Delta update response. ${MANUAL_UPDATE}`)
     return installed
@@ -186,27 +179,22 @@ type Live = { ensure(): void; track(process: ReturnType<UpdateHost['spawn']>): v
 /** Runs one step against a deadline, stopping the process it started when it ends unless `leaveRunning`. */
 async function withDeadline<T>(
   host: UpdateHost, timeoutMs: number, timeoutText: string, step: (live: Live) => Promise<T>,
-  { leaveRunning = false, onTimeout }: {
-    leaveRunning?: boolean; onTimeout?: (completion: Promise<unknown>) => void
-  } = {},
+  { leaveRunning = false } = {},
 ): Promise<T> {
   let expired = false
   let process: ReturnType<UpdateHost['spawn']> | undefined
   let timer: ReturnType<UpdateHost['after']> | undefined
-  let completion: Promise<T>
   const deadline = new Promise<never>((_, reject) => {
     timer = host.after(timeoutMs, () => {
       expired = true
-      if (leaveRunning) onTimeout?.(completion)
       reject(new Error(timeoutText))
     })
   })
   const live: Live = {
-    ensure: () => { if (expired && !leaveRunning) throw new Error('Delta update deadline expired') },
+    ensure: () => { if (expired) throw new Error('Delta update deadline expired') },
     track: (started) => { process = started },
   }
-  completion = step(live)
-  try { return await Promise.race([completion, deadline]) }
+  try { return await Promise.race([step(live), deadline]) }
   finally {
     timer?.cancel()
     if (!leaveRunning) await process?.return?.({ code: null, signal: 'SIGTERM' })
@@ -224,35 +212,24 @@ async function stream(
   const process = host.spawn({ argv, env })
   live.track(process)
   let stdout = '', stderr = '', pending = ''
-  let failure: { error: unknown } | undefined
   while (true) {
     const piece = await process.next()
     live.ensure()
     if (piece.done) {
-      if (failure) throw failure.error
       if (pending.trim()) await report(host, pending)
       return { stdout, stderr, exitCode: piece.value.code, isStdoutTruncated: false, isStderrTruncated: false }
     }
-    // Keep draining a live installer even after a transport/reporting failure. In particular, a
-    // Windows helper left running past its deadline must keep the installer slot until it exits.
-    if (failure) continue
     if (piece.value.stream === 'stdout') stdout += piece.value.text
     else {
       stderr += piece.value.text
       pending += piece.value.text
     }
-    if (stdout.length + stderr.length > 1024 * 1024) {
-      failure = { error: new Error('Delta update output exceeded the transport limit. Check the installation before retrying.') }
-      stdout = stderr = pending = ''
-      continue
-    }
+    if (stdout.length + stderr.length > 1024 * 1024)
+      throw new Error('Delta update output exceeded the transport limit. Check the installation before retrying.')
     const lines = pending.split(/\r?\n/)
     pending = lines.pop()!
     for (const line of lines) {
-      if (line.trim()) {
-        try { await report(host, line) }
-        catch (error) { failure = { error }; stdout = stderr = pending = ''; break }
-      }
+      if (line.trim()) await report(host, line)
     }
   }
 }

@@ -12,35 +12,34 @@ import { samePath } from '../core/paths'
 import { requests, stateFor } from '../core/session-state'
 import { errorText } from '../core/text'
 import {
-  ACTIVATION_WAIT_MS, branchFrom, cachedRelease, CHECK_INTERVAL_MS, compareVersions, installationFrom, manifestUrl, manifestVersion,
-  MARKETPLACE, PLUGIN_ID, recentlyChecked, REMINDER_INTERVAL_MS, reminderIsSnoozed, updateMessage, type UpdateTarget,
+  ACTIVATION_WAIT_MS, answersFor, branchFrom, type Check, CHECK_INTERVAL_MS, checkFrom, compareVersions, installationFrom,
+  manifestUrl, manifestVersion, MARKETPLACE, PLUGIN_ID, recentlyChecked, REMINDER_INTERVAL_MS, reminderIsSnoozed,
+  updateMessage, type UpdateTarget,
 } from './catalog'
 
 const NOTIFICATIONS = 'plugin-update:notifications'
+const CHECK = 'plugin-update:check'
 const PLUGIN_UPDATE_USAGE = 'Usage: /delta-plugin-update [check | notifications on | notifications off]. Updates this Claude Code plugin; terminals request a reload, while Desktop may need a new session. /delta-update updates the Delta app and CLI instead.'
 const UNSUPPORTED = 'This copy of Delta is not installed from the Zed Industries marketplace on main or develop. Local copies and pinned or other marketplace sources are left unchanged.'
 const APP_UPDATE_BUSY = 'A Delta installation update is still running. Let it finish before updating or activating the Claude Code plugin.'
 const RESTART_ADVICE = 'The updated Delta plugin is not active in this session yet. Start a new Claude Code session to apply it.'
 
-type Observer = { session: string; timer?: Timer; first?: Timer; checking: boolean; revision: number }
+type Observer = { session: string; timer?: Timer; first?: Timer; checking: boolean }
 const observers = new Map<string, Observer>()
+const watchdogs = new Map<string, Timer>()
 let runningVersion: string | undefined
-type Activation = {
-  session: string; cwd: string; release(): void; queued?: Timer; watchdog?: Timer; running: boolean; detail?: string
-}
-const activations = new Map<string, Activation>()
 
 /** Each session gets one timer, including the first activity after /clear or /resume. */
 export function startPluginUpdates(host: Host, session: string) {
   if (observers.has(session)) return
-  const observer: Observer = { session, checking: false, revision: 0 }
+  const observer: Observer = { session, checking: false }
   observers.set(session, observer)
   observer.first = host.clock.after(0, () => { void checkInBackground(host, observer) })
   observer.timer = host.clock.every(CHECK_INTERVAL_MS, () => { void checkInBackground(host, observer) })
 }
 
-/** A Desktop client can attach after startup's check saw no interactive surface. */
-export function pluginSurfaceAttached(host: Host, session: string) {
+/** Check now: a Desktop client can attach after startup's check saw no interactive surface. */
+export function recheckPluginUpdates(host: Host, session: string) {
   startPluginUpdates(host, session)
   const observer = observers.get(session)!
   observer.first?.cancel()
@@ -52,8 +51,8 @@ export function stopPluginUpdates(host: Host, session: string) {
   observer?.timer?.cancel()
   observer?.first?.cancel()
   observers.delete(session)
-  const activation = activations.get(session)
-  if (activation) finishActivation(activation)
+  watchdogs.get(session)?.cancel()
+  watchdogs.delete(session)
   clearPluginUpdateNotice(host, session)
 }
 
@@ -108,71 +107,63 @@ async function fetchVersion(host: Host, target: UpdateTarget): Promise<string> {
 }
 
 /**
- * Persist a throttle before requesting the release, including on failures. Store writes are atomic,
- * not compare-and-set: simultaneous processes can both fetch. Checking the claim discards a response
- * when another process has already claimed the interval; this is not an interprocess lock.
- * One observer never overlaps its own checks, and only the native installer changes installed files.
+ * Which installation this copy is and the newest release on its branch, checked at most hourly
+ * across every session: a session reuses another's check when {@link answersFor} says it holds, and
+ * runs neither claude nor a request. The check is recorded before it runs, so a failure also waits
+ * an hour and keeps the release already known; two sessions starting at once both run it.
  */
-async function availableVersion(host: Host, target: UpdateTarget, session: string, force: boolean) {
-  // Native auto-update already did the download. Offer activation without needing the network.
-  if (compareVersions(target.version, target.runningVersion) === 1) return target.version
-  const key = `plugin-update:release:${target.branch}`
+async function hourlyCheck(host: Host, force: boolean): Promise<Check> {
   const now = await host.clock.now()
-  const cached = cachedRelease(await host.store.get(key))
-  if (!force && cached && recentlyChecked(cached.checkedAt, now)) return cached.version
-  const claim = `${session}:${now}:${Math.random()}`
-  await host.store.set(key, { checkedAt: now, claim, ...cached?.version ? { version: cached.version } : {} })
-  const version = await fetchVersion(host, target)
-  if (cachedRelease(await host.store.get(key))?.claim !== claim) return
-  await host.store.set(key, { checkedAt: now, claim, version })
-  return version
+  const root = host.plugin.root, project = await host.session.root()
+  const stored = checkFrom(await host.store.get(CHECK))
+  const previous = stored && answersFor(stored, root, project) ? stored : undefined
+  if (!force && previous && recentlyChecked(previous.checkedAt, now)) return previous
+  await host.store.set(CHECK, { ...previous, checkedAt: now, root, project })
+  const target = await targetFor(host, await host.session.cwd(), project)
+  // Native auto-update already did the download. Offer activation without needing the network.
+  const version = !target ? undefined
+    : compareVersions(target.version, target.runningVersion) === 1 ? target.version : await fetchVersion(host, target)
+  const check = { checkedAt: now, root, project, ...target ? { target } : {}, ...version ? { version } : {} }
+  await host.store.set(CHECK, check)
+  return check
 }
 
 async function checkInBackground(host: Host, observer: Observer) {
-  if (observer.checking || installation?.kind === 'plugin') return
+  if (observer.checking) return
   observer.checking = true
-  const revision = observer.revision
-  const current = () => observers.get(observer.session) === observer && observer.revision === revision && installation?.kind !== 'plugin'
+  // A check that outlives its session, the person's opt-out or an installation shows nothing.
+  const current = async () => observers.get(observer.session) === observer && installation?.kind !== 'plugin' &&
+    await host.store.get(NOTIFICATIONS) !== false
   try {
-    if (!hasInteractiveSurface(await host.session.surfaces()) ||
-        !!await host.env.disableNonessentialTraffic() ||
-        await host.store.get(NOTIFICATIONS) === false) {
-      if (current()) clearPluginUpdateNotice(host, observer.session)
+    const surfaces = await host.session.surfaces()
+    if (!hasInteractiveSurface(surfaces) || !!await host.env.disableNonessentialTraffic() || !await current()) {
+      clearPluginUpdateNotice(host, observer.session)
       return
     }
-    const cwd = await host.session.cwd()
-    const target = await targetFor(host, cwd, await host.session.root())
-    if (!current() || !target) return
-    const version = await availableVersion(host, target, observer.session, false)
-    if (!current() || await host.session.id() !== observer.session || !samePath(cwd, await host.session.cwd()) ||
-        await host.store.get(NOTIFICATIONS) === false) return
-    // An in-flight or failed check is not evidence that an existing notice is obsolete.
-    if (!version) return
+    const { target, version } = await hourlyCheck(host, false)
+    // A failed check is not evidence that an existing notice is obsolete.
+    if (!target || !version || !await current()) return
     if (compareVersions(version, target.runningVersion) !== 1) {
       clearPluginUpdateNotice(host, observer.session)
       return
     }
     const key = `plugin-update:reminder:${target.branch}`
     const now = await host.clock.now()
-    const snoozed = reminderIsSnoozed(await host.store.get(key), version, now)
-    if (!current()) return
     const ready = compareVersions(target.version, target.runningVersion) === 1
-    const notice = { session: observer.session, branch: target.branch,
-      runningVersion: target.runningVersion, version, ready }
-    if (snoozed) {
+    const terminal = surfaces.includes('terminal')
+    const notice = { session: observer.session, branch: target.branch, version, ready, terminal }
+    if (reminderIsSnoozed(await host.store.get(key), version, now)) {
       showPluginUpdateNotice(host, notice, true)
       return
     }
     await host.store.set(key, { version, until: now + REMINDER_INTERVAL_MS })
-    if (!current()) return
     showPluginUpdateNotice(host, notice)
-    const terminal = (await host.session.surfaces()).includes('terminal')
     await host.ui.log(ready
       ? `Delta's Claude Code plugin ${version} is installed and ready. ${terminal ? 'Run /delta-plugin-update to request a reload.' : 'Desktop may apply it when idle; otherwise start a new Claude Code session.'}`
       : `Delta's Claude Code plugin ${version} is available (running: ${target.runningVersion}). Run /delta-plugin-update to update, or /delta-plugin-update notifications off to stop these notices.`,
     { to: 'transcript' })
   } catch (error) {
-    if (current()) await debugFailure(host, error)
+    if (observers.get(observer.session) === observer) await debugFailure(host, error)
   } finally { observer.checking = false }
 }
 
@@ -187,68 +178,39 @@ export async function snoozePluginUpdate(
   clearPluginUpdateNotice(host, session)
 }
 
-function finishActivation(activation: Activation) {
-  activation.queued?.cancel()
-  activation.watchdog?.cancel()
-  if (activations.get(activation.session) === activation) activations.delete(activation.session)
-  activation.release()
-}
-
 /**
- * A returned command result (including refusal text) is not proof of activation. Successful reloads
- * unload this environment and cancel its timers. Only a surviving watchdog reports a pending update.
- * Desktop cannot run the interactive reload command; its own optional watcher may apply the install.
+ * Takes over `release`. A returned command result (including refusal text) is not proof of activation:
+ * a successful reload unloads this environment and its timers, so only a surviving watchdog reports a
+ * pending update. Desktop cannot run the interactive reload command; its own optional watcher may
+ * apply the install.
  */
 function activateInstalled(
-  host: Host, session: string, cwd: string, terminal: boolean, target: UpdateTarget, version: string, release: () => void,
+  host: Host, session: string, terminal: boolean, branch: UpdateTarget['branch'], version: string, release: () => void,
 ) {
-  const previous = activations.get(session)
-  if (previous) finishActivation(previous)
-  const activation: Activation = { session, cwd, release, running: false }
-  activations.set(session, activation)
-  activation.watchdog = host.clock.after(ACTIVATION_WAIT_MS, () => {
-    activation.watchdog = undefined
+  watchdogs.get(session)?.cancel()
+  let response: string | undefined
+  watchdogs.set(session, host.clock.after(ACTIVATION_WAIT_MS, () => {
+    watchdogs.delete(session)
     void (async () => {
-      try {
-        if (await host.session.id() !== session || !samePath(cwd, await host.session.cwd())) return
-        const notifications = await host.store.get(NOTIFICATIONS) !== false
-        if (activations.get(session) !== activation) return
-        if (notifications) showPluginUpdateNotice(host, {
-          session, branch: target.branch, runningVersion: target.runningVersion, version, ready: true,
-        })
-        await host.ui.log(`${RESTART_ADVICE}${terminal ? ' In a terminal, you can also retry /reload-plugins.' : ''}${
-          activation.detail ? ` Reload response: ${activation.detail}` : ''
-        }`, { to: 'transcript' })
-      } finally {
-        // Keep the installer slot while a terminal command is still queued in the native host.
-        if (!activation.running) finishActivation(activation)
-        host.ui.invalidate()
-      }
+      if (await host.store.get(NOTIFICATIONS) !== false)
+        showPluginUpdateNotice(host, { session, branch, version, ready: true, terminal })
+      await host.ui.log(`${RESTART_ADVICE}${terminal ? ' In a terminal, you can also retry /reload-plugins.' : ''}${
+        response ? ` Reload response: ${response}` : ''
+      }`, { to: 'transcript' })
     })().catch((error) => debugFailure(host, error))
-  })
-  if (terminal) {
-    // Outside the update hook: command.run cannot queue a command from a hook it waits on.
-    activation.queued = host.clock.after(0, () => {
-      activation.running = true
-      void (async () => {
-        if (await host.session.id() !== session || !samePath(cwd, await host.session.cwd())) return
-        if (requests.join || requests.share || stateFor(session).currentTurnId) {
-          activation.detail = 'A Claude turn, Delta share, or join is in progress.'
-          return
-        }
-        const result = await host.command.run({ command: 'reload-plugins', args: '--force' })
-        activation.detail = result.text
-      })().catch((error) => { activation.detail = errorText(error) }).finally(() => {
-        activation.running = false
-        // Never log from this continuation: even a successful reload can reject it as unloaded.
-        activation.release()
-        if (!activation.watchdog) finishActivation(activation)
-      })
-    })
+  }))
+  if (!terminal) {
+    release()
+    return 'Desktop may apply it automatically when idle. If this session does not refresh, start a new Claude Code session to apply it.'
   }
-  return terminal
-    ? 'Requesting a plugin reload now.'
-    : 'Desktop may apply it automatically when idle. If this session does not refresh, start a new Claude Code session to apply it.'
+  // Outside the update hook: command.run cannot queue a command from a hook it waits on. Never log
+  // from this continuation: even a successful reload can reject it as unloaded.
+  host.clock.after(0, () => {
+    void host.command.run({ command: 'reload-plugins', args: '--force' })
+      .then((result) => { response = result.text }, (error) => { response = errorText(error) })
+      .finally(release)
+  })
+  return 'Requesting a plugin reload now.'
 }
 
 /** Refresh the catalog explicitly before installing: the update command can read a cached catalog. */
@@ -264,60 +226,45 @@ async function runNativeUpdate(host: Host, command: 'marketplace-update' | 'upda
   return updateMessage(result.stdout, command)
 }
 
-/** All entry points, including the notice and /delta menu, use the same explicit-update path. */
+/** All entry points, including the notice and /delta, use the same explicit-update path. */
 export async function pluginUpdateCommand(host: Host, args: string): Promise<{ text?: string }> {
   const session = await host.session.id()
   try {
     if (args === 'notifications on' || args === 'notifications off') {
       const enabled = args === 'notifications on'
       await host.store.set(NOTIFICATIONS, enabled)
-      const observer = observers.get(session)
-      if (observer) observer.revision++
       clearPluginUpdateNotice(host, session)
-      if (enabled) {
-        startPluginUpdates(host, session)
-        const current = observers.get(session)!
-        host.clock.after(0, () => { void checkInBackground(host, current) })
-      }
+      if (enabled) recheckPluginUpdates(host, session)
       return { text: `Delta plugin update notifications are ${enabled ? 'on' : 'off'}. You can always run /delta-plugin-update to update manually.` }
     }
     if (args !== '' && args !== 'check') return { text: PLUGIN_UPDATE_USAGE }
-    const active = installation
-    if (active?.kind === 'app') return { text: APP_UPDATE_BUSY }
-    if (active?.kind === 'plugin') return { text: 'A Delta plugin update or activation is already in progress.' }
-    if (args === '' && (requests.join || requests.share || stateFor(session).currentTurnId))
-      return { text: 'Wait for the current Claude turn, Delta share, or join to finish, then run /delta-plugin-update.' }
-    const cwd = await host.session.cwd()
-    const project = await host.session.root()
-    const target = await targetFor(host, cwd, project)
-    if (!target) return { text: UNSUPPORTED }
     if (args === 'check') {
-      const version = await availableVersion(host, target, session, true)
-      if (!version) return { text: 'Another session checked for updates. Retry /delta-plugin-update check.' }
-      return { text: compareVersions(version, target.runningVersion) === 1
+      const { target, version } = await hourlyCheck(host, true)
+      if (!target) return { text: UNSUPPORTED }
+      return { text: version && compareVersions(version, target.runningVersion) === 1
         ? `Delta plugin ${version} is ${compareVersions(target.version, target.runningVersion) === 1 ? 'installed and ready to apply' : 'available'} (running: ${target.runningVersion}). Run /delta-plugin-update for the next step.`
         : `Delta's Claude Code plugin ${target.runningVersion} is up to date on ${target.branch}.` }
     }
-    // Recheck after discovery: another explicit invocation or session transition may have won.
-    if (await host.session.id() !== session || !samePath(cwd, await host.session.cwd()))
-      return { text: 'The session or folder changed. Run /delta-plugin-update in the current session.' }
-    const terminal = (await host.session.surfaces()).includes('terminal')
+    if (requests.join || requests.share || stateFor(session).currentTurnId)
+      return { text: 'Wait for the current Claude turn, Delta share, or join to finish, then run /delta-plugin-update.' }
+    const cwd = await host.session.cwd()
+    const project = await host.session.root()
     const release = claimInstallation('plugin')
     if (!release) return { text: installation?.kind === 'app' ? APP_UPDATE_BUSY : 'A Delta plugin update or activation is already in progress.' }
-    let activating = false
+    let handedOff = false
     try {
-      for (const observer of observers.values()) observer.revision++
+      const target = await targetFor(host, cwd, project)
+      if (!target) return { text: UNSUPPORTED }
       clearPluginUpdateNotice(host, session)
-      if (compareVersions(target.version, target.runningVersion) === 1) {
-        if (!terminal) return { text: `Delta plugin ${target.version} is already installed. ${RESTART_ADVICE}` }
-        const message = activateInstalled(host, session, cwd, terminal, target, target.version, release)
-        activating = true
-        return { text: `Delta plugin ${target.version} is already installed. ${message}` }
+      const terminal = (await host.session.surfaces()).includes('terminal')
+      const activate = (version: string) => {
+        handedOff = true
+        return activateInstalled(host, session, terminal, target.branch, version, release)
       }
+      if (compareVersions(target.version, target.runningVersion) === 1)
+        return { text: `Delta plugin ${target.version} is already installed. ${terminal ? activate(target.version) : RESTART_ADVICE}` }
       await host.ui.log("Updating Delta's Claude Code plugin…", { to: 'transcript' })
       await runNativeUpdate(host, 'marketplace-update', target, cwd)
-      if (await host.session.id() !== session || !samePath(cwd, await host.session.cwd()))
-        return { text: 'The session or folder changed. Run /delta-plugin-update in the current session.' }
       const message = await runNativeUpdate(host, 'update', target, cwd)
       const installed = installationFrom(
         await readList(host, ['claude', 'plugin', 'list', '--json'], cwd),
@@ -325,16 +272,13 @@ export async function pluginUpdateCommand(host: Host, args: string): Promise<{ t
       )
       if (!installed || installed.scope !== target.scope)
         throw new Error('The updated installation could not be verified. Check /plugin before retrying.')
-      await host.store.delete(`plugin-update:release:${target.branch}`)
-      if (compareVersions(installed.version, target.runningVersion) === 1) {
-        if (await host.session.id() !== session || !samePath(cwd, await host.session.cwd()))
-          return { text: `Installed Delta plugin ${installed.version}. The session or folder changed; run /delta-plugin-update there to reload, or start a new session.` }
-        const message = activateInstalled(host, session, cwd, terminal, target, installed.version, release)
-        activating = true
-        return { text: `Updated Delta's Claude Code plugin to ${installed.version}. ${message}` }
-      }
-      return { text: message }
-    } finally { if (!activating) release() }
+      await host.store.delete(CHECK)
+      if (compareVersions(installed.version, target.runningVersion) !== 1) return { text: message }
+      // A reload would apply the other session's or folder's installation scope.
+      if (await host.session.id() !== session || !samePath(cwd, await host.session.cwd()))
+        return { text: `Installed Delta plugin ${installed.version}. The session or folder changed; run /delta-plugin-update there to reload, or start a new session.` }
+      return { text: `Updated Delta's Claude Code plugin to ${installed.version}. ${activate(installed.version)}` }
+    } finally { if (!handedOff) release() }
   } catch (error) {
     return { text: `Delta plugin ${args === 'check' ? 'update check' : 'update'} failed: ${errorText(error)}` }
   }

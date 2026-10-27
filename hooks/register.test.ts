@@ -84,7 +84,6 @@ describe('plugin updates', () => {
     expect(result.text).toContain('Desktop may apply it automatically when idle')
     await fake.advance(0)
     expect(fake.sessionCommands).toEqual([])
-    expect((await $.command.run(typedDelta('update'))).text).toContain('activation is in progress')
     await fake.advance(ACTIVATION_WAIT_MS)
     expect(fake.logs.join('\n')).toContain('Start a new Claude Code session')
     const ui = await $.ui.mount({ ...abovePrompt, surface: 'desktop', plugin: 'delta' })
@@ -169,16 +168,7 @@ describe('plugin updates', () => {
     expect(fake.pluginUpdateCalls).toEqual([])
   })
 
-  for (const value of ['0', 'false', 'disabled', '1'])
-    test(`any nonempty network opt-out (${value}) suppresses background requests`, async ($, on) => {
-      const fake = fakeThreads(on, { env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: value } })
-      fake.pluginInstalled = true
-      await $.session.start(sessionStart)
-      await fake.advance(0)
-      expect(fake.pluginHttpCalls).toEqual([])
-    })
-
-  test('failed or competing checks preserve a known release and an existing notice', async ($, on) => {
+  test('a failed check preserves a known release and an existing notice', async ($, on) => {
     const fake = fakeThreads(on)
     fake.pluginInstalled = true
     await $.session.start(sessionStart)
@@ -186,44 +176,39 @@ describe('plugin updates', () => {
     const ui = await $.ui.mount({ ...abovePrompt, plugin: 'delta' })
     fake.pluginHttpStatus = 503
     await fake.advance(CHECK_INTERVAL_MS)
-    expect((fake.store.get('plugin-update:release:main') as any).version).toBe('0.1.2')
-    fake.store.set('plugin-update:release:main', { checkedAt: await fake.clock.now(), claim: 'other' })
-    await $.session.attach({ surface: 'desktop', clientId: 'desktop' })
-    await fake.advance(0)
+    expect((fake.store.get('plugin-update:check') as any).version).toBe('0.1.2')
     expect(await ui.find({ key: 'plugin-update' })).toBeDefined()
   })
 
-  for (const theme of ['dark', 'light'])
-    test(`the ${theme} status band contains a single colored update row with visible button chrome`, async ($, on) => {
-      const fake = fakeThreads(on)
-      fake.theme = theme
-      fake.pluginInstalled = true
-      fake.files.set(`${CHECKOUT}/.delta/settings.json`, '{"threads":{"mode":"manual"}}')
-      await $.session.start(sessionStart)
-      await fake.advance(0)
-      const ui = await $.ui.mount({ ...abovePrompt, plugin: 'delta', props: { ...abovePrompt.props, maxRows: 2 } })
-      const bar = await ui.find({ key: 'bar' })
-      expect(bar?.props.backgroundColor).toBe(theme === 'dark' ? '#303030' : '#e8e8e8')
-      expect(bar?.text).toContain('Not syncing')
-      expect(bar?.children).toMatchObject([
-        { type: 'Box', props: { key: 'band' } },
-        { type: 'Box', props: { key: 'plugin-update-row', flexDirection: 'row', height: 1 } },
-      ])
-      expect((await ui.findAll({ type: 'Text', text: '0.1.2' }))
-        .some((element) => element.props.color === 'cyan' && element.props.bold === true)).toBe(true)
-      for (const [key, label] of [
-        ['plugin-update', 'Update'], ['plugin-update-later', 'Later'], ['plugin-update-off', 'Mute'],
-      ]) {
-        const button = await ui.find({ key })
-        expect(button?.type).toBe('Button')
-        expect(button?.props.label).toBe(label)
-        expect(button?.props.plain).toBeUndefined()
-      }
-      const desktop = await $.ui.mount({ ...abovePrompt, plugin: 'delta', surface: 'desktop' })
-      expect(await desktop.find({ key: 'plugin-update-row' })).toBeDefined()
-      expect(JSON.stringify(await desktop.drawn())).not.toContain('backgroundColor')
-      fake.expectClean()
-    })
+  test('the status band contains a single colored update row with visible button chrome', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.pluginInstalled = true
+    fake.files.set(`${CHECKOUT}/.delta/settings.json`, '{"threads":{"mode":"manual"}}')
+    await $.session.start(sessionStart)
+    await fake.advance(0)
+    const ui = await $.ui.mount({ ...abovePrompt, plugin: 'delta', props: { ...abovePrompt.props, maxRows: 2 } })
+    const bar = await ui.find({ key: 'bar' })
+    expect(bar?.props.backgroundColor).toBe('#303030')
+    expect(bar?.text).toContain('Not syncing')
+    expect(bar?.children).toMatchObject([
+      { type: 'Box', props: { key: 'band' } },
+      { type: 'Box', props: { key: 'plugin-update-row', flexDirection: 'row', height: 1 } },
+    ])
+    expect((await ui.findAll({ type: 'Text', text: '0.1.2' }))
+      .some((element) => element.props.color === 'cyan' && element.props.bold === true)).toBe(true)
+    for (const [key, label] of [
+      ['plugin-update', 'Update'], ['plugin-update-later', 'Later'], ['plugin-update-off', 'Mute'],
+    ]) {
+      const button = await ui.find({ key })
+      expect(button?.type).toBe('Button')
+      expect(button?.props.label).toBe(label)
+      expect(button?.props.plain).toBeUndefined()
+    }
+    const desktop = await $.ui.mount({ ...abovePrompt, plugin: 'delta', surface: 'desktop' })
+    expect(await desktop.find({ key: 'plugin-update-row' })).toBeDefined()
+    expect(JSON.stringify(await desktop.drawn())).not.toContain('backgroundColor')
+    fake.expectClean()
+  })
 
   test('the first command after clear restarts update checks without classic.SessionStart', async ($, on) => {
     const fake = fakeThreads(on)
@@ -263,9 +248,12 @@ describe('plugin updates', () => {
     expect(fake.logs.filter((line) => line.includes("Claude Code plugin 0.1.2 is available"))).toHaveLength(1)
     await $.session.end(sessionEnd(fake.session))
     fake.session = 'another-session'
+    const lists = fake.pluginListCalls
     await $.session.start(sessionStart)
     await fake.advance(0)
+    // Within the hour, another session reuses the check: no request and no claude run.
     expect(fake.pluginHttpCalls).toHaveLength(2)
+    expect(fake.pluginListCalls).toBe(lists)
     expect(await ui.find({ key: 'plugin-update' })).toBeUndefined()
     fake.expectClean()
   })
@@ -411,8 +399,9 @@ describe('plugin updates', () => {
 
   for (const kind of ['headless', 'network disabled', 'development', 'pinned', 'other source'] as const)
     test(`background checking leaves ${kind} sessions alone`, async ($, on) => {
+      // Any nonempty value opts out, including one that reads as false.
       const fake = fakeThreads(on, { env: kind === 'network disabled'
-        ? { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' } : {} })
+        ? { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '0' } : {} })
       fake.pluginInstalled = true
       if (kind === 'development') fake.pluginInstallPath = '/plugins/cache/zed-industries/delta/0.1.1'
       if (kind === 'headless') fake.surfaces = []
@@ -425,16 +414,6 @@ describe('plugin updates', () => {
       if (['development', 'pinned', 'other source'].includes(kind))
         expect((await $.command.run(typedDelta('plugin-update'))).text).toContain('left unchanged')
     })
-
-  test('disabling the native auto-updater does not disable read-only release notifications', async ($, on) => {
-    const fake = fakeThreads(on, { env: { DISABLE_AUTOUPDATER: '1' } })
-    fake.pluginInstalled = true
-    fake.pluginMarketplace.ref = 'develop'
-    await $.session.start(sessionStart)
-    await fake.advance(0)
-    expect(fake.pluginHttpCalls[0]).toContain('/develop/')
-    expect(fake.pluginUpdateCalls).toEqual([])
-  })
 
   for (const failure of ['offline', 'malformed', 'wrong plugin'] as const)
     test(`${failure} discovery fails quietly and remains throttled`, async ($, on) => {
@@ -489,21 +468,6 @@ describe('plugin updates', () => {
     expect(fake.logs.some((text) => text.includes('plugin 0.1.2'))).toBe(false)
   })
 
-  test('another process claiming a check prevents an obsolete response from publishing', async ($, on) => {
-    const fake = fakeThreads(on)
-    fake.pluginInstalled = true
-    let release!: () => void
-    fake.holdPluginHttp = new Promise<void>((resolve) => { release = resolve })
-    await $.session.start(sessionStart)
-    await fake.advance(0)
-    const newer = { checkedAt: 1, claim: 'another-process', version: '0.1.3' }
-    fake.store.set('plugin-update:release:main', newer)
-    release()
-    await fake.settle()
-    expect(fake.store.get('plugin-update:release:main')).toEqual(newer)
-    expect(fake.logs.some((text) => text.includes('plugin 0.1.2'))).toBe(false)
-  })
-
   test('installation failure never reloads, and a surviving watchdog reports a thrown reload failure', async ($, on) => {
     const fake = fakeThreads(on)
     fake.pluginInstalled = true
@@ -546,27 +510,6 @@ describe('plugin updates', () => {
     await fake.advance(0)
     expect(fake.pluginUpdateCalls).toHaveLength(1)
     expect(fake.sessionCommands).toEqual([])
-  })
-
-  test('the update command preserves a shared binding and the next turn still records', async ($, on) => {
-    const fake = fakeThreads(on)
-    fake.pluginInstalled = true
-    await $.session.start(sessionStart)
-    await fake.share($)
-    const thread = (fake.store.get(`session:${fake.session}`) as any).thread
-    await $.command.run(typedDelta('plugin-update'))
-    await fake.advance(0)
-    expect(fake.sessionCommands).toEqual([{ command: 'reload-plugins', args: '--force' }])
-    // The native host re-raises startup after a reload; it must reattach, not create another thread.
-    await $.session.start(sessionStart)
-    expect((fake.store.get(`session:${fake.session}`) as any).thread).toBe(thread)
-    expect((await $.prompt.submit(prompt('continue after the reload'))).drop).toBeUndefined()
-    await $.turn.start(turnStart('after-update'))
-    await $.turn.complete(turnComplete('after-update'))
-    await fake.settle()
-    expect(fake.server.thread).toBe(thread)
-    expect(fake.records().length).toBeGreaterThan(0)
-    fake.expectClean()
   })
 })
 

@@ -13,9 +13,10 @@ import { errorText } from '../core/text'
 type Notice = {
   session: string
   branch: 'main' | 'develop'
-  runningVersion: string
   version: string
   ready: boolean
+  /** Whether a terminal can run the reload, rather than a Desktop client waiting for its own. */
+  terminal: boolean
 }
 let notice: Notice | undefined
 
@@ -51,7 +52,7 @@ export async function drawPluginUpdateNotice(
   if (!shown || e.props.isWorking || installation ||
       requests.join || requests.share || isAskingOwnQuestion() || await host.session.id() !== shown.session)
     return null
-  const row = pluginUpdateRow(shown.version, shown.ready, columns, (await host.session.surfaces()).includes('terminal'))
+  const row = pluginUpdateRow(shown.version, shown.ready, columns, shown.terminal)
   if (!row) return null
   const { Box, Text, Button } = host.ui.resolve(e)
   const color = shown.ready ? 'green' : 'cyan'
@@ -70,6 +71,7 @@ export async function drawPluginUpdateNotice(
       </Button>
       {row.later ? <Button key="plugin-update-later" dimColor label="Later"
         onPress={() => {
+          if (notice !== shown) return
           void snoozePluginUpdate(host, shown.session, shown.branch, shown.version)
             .catch((error) => reportNoticeFailure(host, error))
         }} /> : null}
