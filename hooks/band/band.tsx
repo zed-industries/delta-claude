@@ -1,6 +1,6 @@
 /**
- * The band above the prompt: what it says about the watched thread, a running share or join, sync
- * reminders, and its spinner, reconnect and copied-link timers.
+ * The band above the prompt: what it says about the watched thread, a running share, join or
+ * installation update, sync reminders, and its spinner, reconnect and copied-link timers.
  */
 import type { RenderSurface, TextProps, Timer } from 'claude-code'
 import { conversationWebLink, itemAuthor, THOUGHT_KIND, toolCallParts } from '../watch/conversation'
@@ -14,6 +14,7 @@ import {
   copyText, personColor, personKey, renderBand, SPINNER_FRAMES, type StatusSegment, statusSpinnerRunning,
   type StatusState,
 } from './status'
+import type { UpdateStep } from '../cli/install-update'
 import type { WatchItem } from '../cli/thread-commands'
 import { feed, presence, watchStatus, watchedSession, type RemoteTurn } from '../watch/watch'
 import { drainMessages } from '../watch/rows'
@@ -31,10 +32,15 @@ export type Progress = { text: string; tone: ProgressTone; step?: [number, numbe
  */
 const bandState: {
   progress?: Progress
+  /** The running installation update's latest step; a share's or join's line takes its place. */
+  update?: UpdateStep
   /** Clears a finished operation's line; cancelled on teardown and by the next operation. */
   progressTimer?: Timer
-  /** The animation's frame and redraw timer, live only while a live watch has a running turn. */
-  spinner?: { frame: number; timer: Timer }
+  /**
+   * The animation's frame, live only while an operation or another participant's turn runs, and the
+   * timer for its next frame, which is pending until that frame is drawn.
+   */
+  spinner?: { frame: number; timer?: Timer }
   /** The link was just copied; the timer clears the confirmation. */
   copiedTimer?: Timer
 } = {}
@@ -71,17 +77,23 @@ export function clearDoneNotice() {
   bandState.progress = undefined
 }
 
-/** Run the band's redraw timer only while a live watch has a running turn, or an operation runs. */
+/**
+ * Animate the band only while a live watch has a running turn, or an operation runs. Each frame is
+ * asked for once the last one was drawn, so time that passes with nothing drawn, as in a test that
+ * moves the clock minutes on, costs one frame rather than one per interval.
+ */
 export function syncSpinner($: Runtime) {
   if (!spinnerRunning()) return stopSpinner()
-  if (bandState.spinner) return
-  const timer = $.clock.every(SPINNER_INTERVAL_MS, () => {
-    const spinner = bandState.spinner
-    if (!spinner || spinner.timer !== timer) return
+  const spinner = bandState.spinner ?? { frame: 0 }
+  bandState.spinner = spinner
+  if (spinner.timer) return
+  const timer = $.clock.after(SPINNER_INTERVAL_MS, () => {
+    if (bandState.spinner !== spinner || spinner.timer !== timer) return
+    spinner.timer = undefined
     spinner.frame = (spinner.frame + 1) % SPINNER_FRAMES.length
     $.ui.invalidate('ui.render')
   })
-  bandState.spinner = { frame: 0, timer }
+  spinner.timer = timer
 }
 
 /** A running share or join animates wherever it runs; a turn animates only on a live watch. */
@@ -90,7 +102,7 @@ function spinnerRunning() {
 }
 
 function stopSpinner() {
-  bandState.spinner?.timer.cancel()
+  bandState.spinner?.timer?.cancel()
   bandState.spinner = undefined
 }
 
@@ -117,6 +129,13 @@ export function finishProgress($: Runtime, text: string, tone: 'done' | 'error')
   bandState.progressTimer = timer
 }
 
+/** Show the installation update's latest step in place, or drop its line once it ends (undefined). */
+export function showUpdateProgress($: Runtime, step: UpdateStep | undefined) {
+  bandState.update = step
+  syncSpinner($)
+  $.ui.invalidate('ui.render')
+}
+
 /** Drop an operation's band line, as a torn-down session does. */
 export function clearProgress($: Runtime) {
   bandState.progressTimer?.cancel()
@@ -131,7 +150,7 @@ export function clearProgress($: Runtime) {
  * reminder of a session Delta does not sync.
  */
 function statusShown(): boolean {
-  return !!watchedSession() || !!bandState.progress || !!watchStatus().error || !!activeReminder()
+  return !!watchedSession() || !!currentProgress() || !!watchStatus().error || !!activeReminder()
 }
 
 /** How the band reminds a session Delta does not sync, by the checkout's setting. */
@@ -267,10 +286,15 @@ function uploadProgress(binding: Binding | undefined): StatusState['progress'] {
   return { text: upload?.state === 'queued' ? 'Waiting to sync…' : 'Syncing to DeltaDB…', tone: 'active' }
 }
 
-/** The operation the band draws: a share, join, or activation step, else an automatic session's upload. */
+/**
+ * The operation the band draws: a share, join, or activation step, else an installation update, else
+ * an automatic session's upload.
+ */
 function currentProgress(): StatusState['progress'] {
   const session = watchedSession()
-  return bandState.progress ?? uploadProgress(session ? sessions.get(session)?.binding : undefined)
+  return bandState.progress ??
+    (bandState.update ? { text: 'Updating Delta', tone: 'active', update: bandState.update } : undefined) ??
+    uploadProgress(session ? sessions.get(session)?.binding : undefined)
 }
 
 /**
@@ -354,6 +378,8 @@ export async function drawBand(
   if (!statusShown() || e.props.hasSurvey) return next(e)
   const maxRows = Math.max(0, e.props.maxRows)
   if (maxRows === 0) return next(e)
+  // This draw shows the current frame, so the animation may ask for the next.
+  syncSpinner($)
   const terminal = e.surface === 'terminal'
   const columns = Math.max(0, e.props.bodyColumns)
   const band = renderBand(await statusView($), { columns, terminal, rows: maxRows })

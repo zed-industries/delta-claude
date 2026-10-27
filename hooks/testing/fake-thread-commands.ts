@@ -87,9 +87,13 @@ export const UPDATE_HELPER = 'C:\\Updates\\cli-update-1\\delta-update-helper.exe
 export const UPDATE_HELPER_ARGV = [
   UPDATE_HELPER, '--internal-windows-update-install', 'C:\\Delta\\delta-app.exe', 'C:\\Updates\\cli-update-1', '1.1.0',
 ]
-/** What the helper prints once its checks pass and the installer starts. */
-export const UPDATE_HELPER_PROGRESS =
-  'Installing Delta; no sessions will be relaunched. Approve the Windows installer prompt if one appears.'
+/** What the helper asks of the person once the installer starts. */
+export const UPDATE_HELPER_APPROVAL = 'Approve the Windows installer prompt if one appears.'
+
+/** One `delta update --json` progress line, as the CLI writes it to stderr. */
+function progressEvent(fields: { phase: string; version?: string; percent?: number }): string {
+  return `${JSON.stringify({ schema_version: 1, type: 'progress', ...fields })}\n`
+}
 
 /** The fixture has one virtual root; Windows hosts qualify its slash-led paths with a drive. */
 function fixturePath(path: string): string {
@@ -544,7 +548,7 @@ export function fakeThreads(hostOn: On, options: {
     helperStopped: false,
     updateCanInstall: true,
     updateMessage: 'Update test',
-    updateFailure: undefined as undefined | 'old-cli' | 'network' | 'app-running' | 'malformed',
+    updateFailure: undefined as undefined | 'old-cli' | 'network' | 'app-running' | 'app-working' | 'malformed' | 'crash',
     holdUpdate: undefined as Promise<void> | undefined,
     holdCliSetup: undefined as ((install: boolean) => Promise<void> | undefined) | undefined,
     holdCliResolution: undefined as (() => Promise<void> | undefined) | undefined,
@@ -583,6 +587,8 @@ export function fakeThreads(hostOn: On, options: {
     aborts: [] as string[],
     statuses: [] as (string | undefined)[],
     logs: [] as string[],
+    /** Every line the plugin wrote to the debug log alone. */
+    debugLogs: [] as string[],
     /** Every `AskUserQuestion` the plugin asked, and the answer it receives. */
     answerQuestion: undefined as ((question: any) => unknown) | undefined,
     questions: [] as any[],
@@ -907,7 +913,10 @@ export function fakeThreads(hostOn: On, options: {
     const row = /^Adding a row to Claude's context: (.*)$/s.exec(e.text)
     if (e.to === 'debug' && e.text.startsWith('Delta update check:')) fake.updateDebug.push(e.text)
     if (e.to !== 'debug') fake.logs.push(e.text)
-    else if (row) fake.rows.push(row[1]!)
+    else {
+      fake.debugLogs.push(e.text)
+      if (row) fake.rows.push(row[1]!)
+    }
     const shared = e.to === 'debug' ? /^Delta share link: (.*)$/.exec(e.text) : null
     if (shared) for (const resolve of linkWaiters.splice(0)) resolve(shared[1]!)
     if (e.to !== 'debug') {
@@ -1014,6 +1023,13 @@ export function fakeThreads(hostOn: On, options: {
     await fake.holdUpdate
     if (fake.updateFailure === 'old-cli')
       return { stdout: '', exitCode: 2, stderr: "error: unrecognized subcommand 'update'" }
+    if (fake.updateFailure === 'crash')
+      return { stdout: '', exitCode: 101, stderr: "thread 'main' panicked at src/main.rs:1:1:\nboom\n" }
+    if (fake.updateFailure === 'app-working')
+      return { stdout: JSON.stringify({ error: {
+        code: 'app_working', retryable: true,
+        message: 'Delta is running agent work, such as a turn or a terminal. Nothing was stopped; run `delta update` again once it finishes.',
+      } }), exitCode: 2, stderr: '' }
     if (fake.updateFailure === 'network' || fake.updateFailure === 'app-running')
       return { stdout: JSON.stringify({ error: {
         code: fake.updateFailure === 'network' ? 'network_error' : 'app_running',
@@ -1296,12 +1312,15 @@ export function fakeThreads(hostOn: On, options: {
       fake.installUpdates.push({ argv: [...e.argv], env: e.env })
       const outcome = fake.helperOutcome
       if (outcome === 'crash') return { value: { code: 3221225477, signal: null } }
+      yield { stream: 'stderr', text: progressEvent({ phase: 'preparing', version: '1.1.0' }) }
       if (typeof outcome === 'object') {
         yield { stream: 'stderr', text: `delta: ${outcome.message}\n` }
         yield { stream: 'stdout', text: JSON.stringify({ error: { ...outcome, retryable: false } }) }
         return { value: { code: 2, signal: null } }
       }
-      yield { stream: 'stderr', text: `${UPDATE_HELPER_PROGRESS}\n` }
+      yield { stream: 'stderr', text: progressEvent({ phase: 'installing', version: '1.1.0' }) + JSON.stringify({
+        schema_version: 1, type: 'action_required', action: 'approve_installer', message: UPDATE_HELPER_APPROVAL,
+      }) + '\n' }
       if (fake.holdHelper && !await Promise.race([fake.holdHelper.then(() => true), new Promise<false>((resolve) => {
         next.signal.addEventListener('abort', () => resolve(false), { once: true })
       })])) {
@@ -1317,8 +1336,12 @@ export function fakeThreads(hostOn: On, options: {
     }
     if ((e.argv[0] === '/selected/delta' || e.argv[0] === WINDOWS_DELTA) && e.argv[1] === 'update') {
       fake.installUpdates.push({ argv: [...e.argv], env: e.env })
-      yield { stream: 'stderr', text: 'Downloading Delta: ' }
-      yield { stream: 'stderr', text: '25%\nPreparing Delta update...\n' }
+      yield { stream: 'stderr', text: progressEvent({ phase: 'checking' }) }
+      // An event can arrive in pieces, as any stderr text can.
+      const downloading = progressEvent({ phase: 'downloading', version: '1.1.0', percent: 25 })
+      yield { stream: 'stderr', text: downloading.slice(0, 20) }
+      yield { stream: 'stderr', text: downloading.slice(20) }
+      yield { stream: 'stderr', text: progressEvent({ phase: 'downloading', version: '1.1.0', percent: 45 }) }
       const result = await Promise.race([updateOutput(e.argv), new Promise<undefined>((resolve) => {
         next.signal.addEventListener('abort', () => resolve(undefined), { once: true })
       })])

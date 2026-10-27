@@ -1,8 +1,8 @@
 import { expect, test as kitTest, tier } from 'claude-code/testing'
-import { parseInstallUpdate } from './install-update'
+import { parseInstallUpdate, parseProgressEvent } from './install-update'
 import {
-  fakeThreads, prompt, sessionStart, testsWithHeldClockWait, typedDelta, UPDATE_HELPER_ARGV, UPDATE_HELPER_PROGRESS,
-  WINDOWS_DELTA,
+  drawBandText, fakeThreads, prompt, sessionStart, testsWithHeldClockWait, typedDelta, UPDATE_HELPER_APPROVAL,
+  UPDATE_HELPER_ARGV, WINDOWS_DELTA,
 } from '../testing/fake-thread-commands'
 
 tier('user')
@@ -54,11 +54,18 @@ for (const command of ['delta-update', 'delta'] as const)
     const updating = $.command.run({
       ...typedDelta(command === 'delta' ? 'update' : ''), command,
     })
-    await fake.settleUntil(() => fake.logs.includes('Preparing Delta update...'))
-    expect(fake.logs).toContain('Downloading Delta: 25%')
+    // The band draws the CLI's latest event in place of the last; the transcript only says it started.
+    await fake.settleUntil(() => fake.debugLogs.some((text) => text.includes('"percent":45')))
+    await fake.settle()
+    const band = await drawBandText($)
+    expect(band).toContain('Downloading 1.1.0')
+    expect(band).toContain(' 45%')
+    expect(band).not.toContain('25%')
+    expect(fake.logs.filter((text) => text.includes('Delta'))).toEqual(['Updating Delta installation…'])
     release()
     const result = await updating
     expect(result.text).toContain('Updated Delta to 1.1.0')
+    expect(await drawBandText($)).not.toContain('Downloading')
     const updates = fake.installUpdates.filter((entry) => !entry.argv.includes('--check'))
     expect(updates.map((entry) => entry.argv)).toEqual([['/selected/delta', 'update', '--json']])
     expect(updates[0]!.env).toMatchObject({
@@ -89,7 +96,8 @@ test('on Windows the plugin runs the installer once the CLI exits and reports ea
   const cli = [WINDOWS_DELTA, 'update', '--download-only', '--json']
   expect(fake.installUpdates.filter((entry) => !entry.argv.includes('--check')).map((entry) => entry.argv))
     .toEqual(Object.keys(WINDOWS_OUTCOMES).flatMap(() => [cli, UPDATE_HELPER_ARGV]))
-  expect(fake.logs).toContain(UPDATE_HELPER_PROGRESS)
+  // Each started installer asks for approval once, in full; a refused or crashed one never got that far.
+  expect(fake.logs.filter((text) => text === UPDATE_HELPER_APPROVAL)).toHaveLength(3)
   fake.expectClean()
 })
 
@@ -109,7 +117,14 @@ test('a Windows installer still running at the deadline is left to finish', asyn
   fake.holdHelper = new Promise<void>((resolve) => { release = resolve })
   await $.session.start(sessionStart)
   const updating = $.command.run(typedDelta('update'))
-  await fake.settleUntil(() => fake.logs.includes(UPDATE_HELPER_PROGRESS))
+  await fake.settleUntil(() => fake.logs.includes(UPDATE_HELPER_APPROVAL))
+  // The band keeps a short state and goes on animating while the installer waits on the person.
+  const waiting = await drawBandText($)
+  expect(waiting).toContain('Waiting for installer approval')
+  await fake.advance(120)
+  const next = await drawBandText($)
+  expect(next).toContain('Waiting for installer approval')
+  expect(next).not.toBe(waiting)
   await fake.advance(600_000)
   expect((await updating).text).toBe('Delta installation update failed: The Delta installer is still running after 10 minutes; it may be waiting for you to approve a Windows prompt. Let it finish, then run `delta update --check` before retrying /delta-update.')
   expect(fake.helperStopped).toBe(false)
@@ -135,7 +150,7 @@ test('a stalled explicit update times out and allows a later retry', async ($, o
   let release!: () => void
   fake.holdUpdate = new Promise<void>((resolve) => { release = resolve })
   const updating = $.command.run(typedDelta('update'))
-  await fake.settleUntil(() => fake.logs.includes('Preparing Delta update...'))
+  await fake.settleUntil(() => fake.debugLogs.some((text) => text.includes('"percent":45')))
   await fake.advance(600_000)
   expect((await updating).text).toContain('update timed out')
   release()
@@ -144,7 +159,18 @@ test('a stalled explicit update times out and allows a later retry', async ($, o
   fake.expectClean()
 })
 
-for (const failure of ['old-cli', 'network', 'app-running', 'malformed'] as const)
+/** What each failure's answer must say for the person to act on it. */
+const FAILURE_ADVICE = {
+  'old-cli': 'https://delta.dev',
+  network: 'Check network access.',
+  'app-running': 'Quit Delta and retry.',
+  // The CLI's own advice names `delta update`; the plugin's names its own command.
+  'app-working': 'Retry /delta-update once that work finishes.',
+  malformed: 'https://delta.dev',
+  crash: 'exited with code 101 without reporting a result',
+} as const
+
+for (const [failure, advice] of Object.entries(FAILURE_ADVICE) as [keyof typeof FAILURE_ADVICE, string][])
   test(`${failure} update failures stay actionable and do not block sharing`, async ($, on) => {
     const fake = fakeThreads(on)
     fake.updateFailure = failure
@@ -152,11 +178,29 @@ for (const failure of ['old-cli', 'network', 'app-running', 'malformed'] as cons
     await fake.advance(0)
     await fake.settleUntil(() => [...fake.logs, ...fake.updateDebug].some((text) => text.startsWith('Delta update check:')))
     const result = await $.command.run(typedDelta('update'))
-    expect(result.text).toContain(failure === 'old-cli' || failure === 'malformed'
-      ? 'https://delta.dev' : failure === 'network' ? 'Check network access.' : 'Quit Delta and retry.')
+    expect(result.text).toContain(advice)
+    expect(result.text).not.toMatch(/panicked|`delta update` again/)
     expect(await fake.share($)).toContain('https://delta.dev/join/')
     fake.expectClean()
   })
+
+test('progress events are read by schema; other lines and unknown events are not progress', () => {
+  expect(parseProgressEvent('{"schema_version":1,"type":"progress","phase":"downloading","version":"1.1","percent":45}'))
+    .toEqual({ type: 'progress', phase: 'downloading', version: '1.1', percent: 45 })
+  expect(parseProgressEvent('{"schema_version":1,"type":"progress","phase":"checking"}'))
+    .toEqual({ type: 'progress', phase: 'checking' })
+  expect(parseProgressEvent('{"schema_version":1,"type":"action_required","action":"approve_installer","message":"Approve it."}'))
+    .toEqual({ type: 'action_required', action: 'approve_installer', message: 'Approve it.' })
+  for (const line of [
+    'delta: Delta is running agent work.', '{not json',
+    '{"schema_version":2,"type":"progress","phase":"checking"}',
+    '{"schema_version":1,"type":"progress","phase":"verifying"}',
+    '{"schema_version":1,"type":"progress","phase":"downloading","percent":101}',
+    '{"schema_version":1,"type":"progress","phase":"downloading","version":""}',
+    '{"schema_version":1,"type":"action_required","action":"approve_installer"}',
+  ])
+    expect(parseProgressEvent(line)).toBeUndefined()
+})
 
 test('update replies require the negotiated schema and typed version fields', () => {
   const result = { schema_version: 1, status: 'update_available', current_version: '1.0',

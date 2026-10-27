@@ -1,7 +1,8 @@
 import type { EngineInterface } from 'claude-code'
 import { DeltaCli } from './cli'
 import { errorText } from '../core/text'
-import { commandErrorFromEnvelope } from './thread-commands'
+import { isJsonObject, isNonEmptyString, isOneOf, isSafeInteger } from '../core/json'
+import { commandErrorFromEnvelope, DeltaCommandError } from './thread-commands'
 
 export type UpdateHost = {
   run: EngineInterface['process']['run']
@@ -10,7 +11,18 @@ export type UpdateHost = {
   exists(path: string): Promise<boolean>
   after: EngineInterface['clock']['after']
   log(text: string, to: 'transcript' | 'debug'): Promise<void>
+  /** Shows the running update's latest step in place of the last, or clears it (undefined). */
+  progress(step: UpdateStep | undefined): void
 }
+const UPDATE_PHASES = ['checking', 'downloading', 'preparing', 'installing'] as const
+/** What a running update is doing: the step the CLI last reported, or the action it is waiting on the person for. */
+export type UpdateStep =
+  | { phase: typeof UPDATE_PHASES[number]; version?: string; percent?: number }
+  | { action: string }
+/** One stderr line of `delta update --json`. */
+type ProgressEvent =
+  | { type: 'progress'; phase: typeof UPDATE_PHASES[number]; version?: string; percent?: number }
+  | { type: 'action_required'; action: string; message: string }
 type CommandForm = 'dedicated_command' | 'delta_subcommand'
 type UpdateResult = { canInstall: boolean } & (
   | { status: 'update_available'; currentVersion: string; latestVersion: string; message: string }
@@ -86,6 +98,7 @@ export class InstallationUpdates {
     this.revision++
     try {
       await host.log('Updating Delta installation…', 'transcript')
+      host.progress({ phase: 'checking' })
       const result = await this.run(host, false, form)
       switch (result.status) {
         case 'updated': return result.restartRequired
@@ -102,8 +115,12 @@ export class InstallationUpdates {
     } catch (error) {
       // The person reads the failure in the command's answer below; the debug copy is best effort.
       await host.log(`Delta installation update failed: ${String(error)}`, 'debug').catch(() => {})
+      // The CLI's own advice for this refusal names its terminal command, not this one.
+      if (error instanceof DeltaCommandError && error.code === 'app_working')
+        return 'Delta was not updated because it is running agent work, such as a turn or a terminal. Nothing was stopped. Retry /delta-update once that work finishes.'
       return `Delta installation update failed: ${errorText(error)}`
     } finally {
+      host.progress(undefined)
       this.updating = false
     }
   }
@@ -130,8 +147,9 @@ export class InstallationUpdates {
         const output = check ? await run(argv) : await stream(host, argv, env, live)
         if (output.exitCode !== 0 && /(?:unrecognized|unknown|unexpected|invalid).*(?:subcommand|argument|update|--check|--json)/i.test(output.stderr))
           throw new UnsupportedUpdateCommandError(`This Delta CLI does not support installation updates. ${MANUAL_UPDATE}`)
-        const result = parseOutput(output, (failed) =>
-          `${failed.stderr.trim() || `Delta exited with code ${failed.exitCode}`}. Retry /delta-update.`)
+        // Without a typed error the CLI crashed or was stopped; its stderr is a backtrace or progress, not advice.
+        const result = parseOutput(output, (failed) => `Delta ${failed.exitCode === null ? 'was stopped'
+          : `exited with code ${failed.exitCode}`} without reporting a result. Run \`delta update\` in a terminal to see why, then retry /delta-update.`)
         if (check && (result.status === 'updated' || result.status === 'install_ready'))
           throw new Error('Unexpected installation change reported by a read-only update check.')
         if (result.status === 'install_ready' && !windows)
@@ -181,7 +199,10 @@ async function withDeadline<T>(
   }
 }
 
-/** Runs `argv`, showing its stderr progress in the transcript line by line as it arrives. */
+/**
+ * Runs `argv`, showing each step its stderr reports in place of the last as it arrives; the debug log
+ * keeps every line.
+ */
 async function stream(
   host: UpdateHost, argv: string[], env: Record<string, string>, live: Live,
 ): Promise<CommandOutput> {
@@ -193,7 +214,7 @@ async function stream(
     const piece = await process.next()
     live.ensure()
     if (piece.done) {
-      if (pending.trim()) await host.log(pending.trim(), 'transcript')
+      if (pending.trim()) await report(host, pending)
       return { stdout, stderr, exitCode: piece.value.code, isStdoutTruncated: false, isStderrTruncated: false }
     }
     if (piece.value.stream === 'stdout') stdout += piece.value.text
@@ -206,9 +227,44 @@ async function stream(
     const lines = pending.split(/\r?\n/)
     pending = lines.pop()!
     for (const line of lines) {
-      if (line.trim()) await host.log(line.trim(), 'transcript')
+      if (line.trim()) await report(host, line)
     }
   }
+}
+
+/**
+ * Shows a progress event in the band, and an action the person must take in the transcript in full,
+ * where the band would truncate it. Other lines, such as a failure the result repeats, are only logged.
+ */
+async function report(host: UpdateHost, line: string) {
+  const text = line.trim()
+  await host.log(text, 'debug')
+  const event = parseProgressEvent(text)
+  if (event?.type === 'progress') {
+    const { type: _, ...step } = event
+    host.progress(step)
+  } else if (event?.type === 'action_required') {
+    await host.log(event.message, 'transcript')
+    host.progress({ action: event.action })
+  }
+}
+
+/** Reads one stderr line as a progress event; undefined for any other line or an event this plugin does not know. */
+export function parseProgressEvent(line: string): ProgressEvent | undefined {
+  if (!line.startsWith('{')) return
+  let value: unknown
+  try { value = JSON.parse(line) } catch { return }
+  if (!isJsonObject(value) || value.schema_version !== 1) return
+  if (value.type === 'progress' && isOneOf(value.phase, UPDATE_PHASES) &&
+      (value.version === undefined || isNonEmptyString(value.version)) &&
+      (value.percent === undefined || isSafeInteger(value.percent) && value.percent >= 0 && value.percent <= 100))
+    return {
+      type: 'progress', phase: value.phase,
+      ...value.version !== undefined ? { version: value.version } : {},
+      ...value.percent !== undefined ? { percent: value.percent } : {},
+    }
+  if (value.type === 'action_required' && isNonEmptyString(value.action) && isNonEmptyString(value.message))
+    return { type: 'action_required', action: value.action, message: value.message }
 }
 
 /** The update response on stdout. A nonzero exit without a typed envelope is described by `failure`. */

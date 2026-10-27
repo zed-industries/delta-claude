@@ -2,7 +2,7 @@
  * The `/delta` command and its dedicated forms: parsing, the menu, and running each action.
  */
 import { activate, noticeSession, refreshReminder } from './activation'
-import { setProgress } from '../band/band'
+import { setProgress, showUpdateProgress } from '../band/band'
 import { type CommandForm, orgCommand } from '../cli/delta-cli'
 import { chooseDeltaAction, type MenuStart } from './delta-menu'
 import { InstallationUpdates, type UpdateHost } from '../cli/install-update'
@@ -82,6 +82,7 @@ export function installUpdateHost($: Runtime): UpdateHost {
     exists: (path) => $.fs.exists(path),
     after: (milliseconds, callback) => $.clock.after(milliseconds, callback),
     log: async (text, to) => { await $.ui.log(text, { to }) },
+    progress: (text) => showUpdateProgress($, text),
   }
 }
 

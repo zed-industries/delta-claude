@@ -68,6 +68,22 @@ test('a running share shows its step and the link only once it can be followed',
   expect(renderBand({ ...live, copied: true }, WIDE).link?.copy).toEqual({ label: 'copy link', copied: true })
 })
 
+test('a running installation update draws its step from data and promises no link', () => {
+  const version = '0.22.0-trunk.20261026.2'
+  const updating = (update: NonNullable<NonNullable<StatusState['progress']>['update']>): StatusState =>
+    ({ connection: 'stopped', turn: { state: 'idle' }, progress: { text: 'Updating Delta', tone: 'active', update } })
+  const downloading = updating({ phase: 'downloading', version, percent: 45 })
+  const band = renderBand(downloading, WIDE)
+  expect(text(band.label)).toBe(' Delta · Updating')
+  expect(text(band.right)).toBe(`⠋ Downloading ${version} ▰▰▰▰▱▱▱▱ 45%`)
+  expect(band.link).toBeUndefined()
+  // Narrowing drops the bar, then the version; the percent stays.
+  expect(text(renderBand(downloading, { columns: 70, terminal: true }).right)).toBe(`⠋ Downloading ${version} 45%`)
+  expect(text(renderBand(downloading, { columns: 40, terminal: true }).right)).toBe('⠋ Downloading 45%')
+  expect(text(renderBand(updating({ phase: 'preparing', version }), WIDE).right)).toBe(`⠋ Preparing ${version}…`)
+  expect(text(renderBand(updating({ action: 'approve_installer' }), WIDE).right)).toBe('⠋ Waiting for installer approval')
+})
+
 test('the roster lists first names in their own colors, with +N past three and arrivals highlighted', () => {
   const band = renderBand({ ...live, people: [...people.slice(0, 2), { ...people[2]!, arriving: true }] }, WIDE)
   expect(text(band.right)).toBe('Maya, Sam, Ada')

@@ -3,6 +3,7 @@
  * the turn it reports, the people and children it lists, and the rows it lays out. `band.tsx` draws it.
  */
 import { conversationText, itemAuthor, middleTruncate, toolCallParts } from '../watch/conversation'
+import type { UpdateStep } from '../cli/install-update'
 import type { ThreadTurn, WatchChild, WatchEvent, WatchItem } from '../cli/thread-commands'
 
 export type TurnStatus =
@@ -23,7 +24,11 @@ export type StatusState = {
   reconnecting?: boolean
   turn: TurnStatus
   error?: string
-  progress?: { text: string; tone: 'active' | 'done' | 'error'; step?: [number, number] }
+  /**
+   * A running operation. An installation `update` draws its own step in place of `text` and publishes
+   * no link, so the band promises none.
+   */
+  progress?: { text: string; tone: 'active' | 'done' | 'error'; step?: [number, number]; update?: UpdateStep }
   spinner?: { frame: number }
   deliveryPause?: string
   retryReason?: string
@@ -123,7 +128,10 @@ export function statusCurrentTurn(state: {
   return state.producerTurn?.status === 'running' ? { state: 'own' } : { state: 'idle' }
 }
 
-/** The band animates a running share or join, and another participant's turn; Claude already animates this session's own. */
+/**
+ * The band animates a running share, join or installation update, and another participant's turn;
+ * Claude already animates this session's own.
+ */
 export function statusSpinnerRunning(state: Pick<StatusState, 'progress' | 'connection' | 'turn' | 'children'>): boolean {
   return state.progress?.tone === 'active' ||
     (state.connection === 'live' && (state.turn.state === 'remote' || state.turn.state === 'starting' ||
@@ -231,6 +239,31 @@ export function formatSeconds(seconds: number): string {
   return whole < 60 ? `${whole}s` : `${Math.floor(whole / 60)}m ${whole % 60}s`
 }
 
+const UPDATE_BAR_CELLS = 8
+
+/**
+ * A running installation update's step: what it is doing to which version, and a download's bar and
+ * percent. The bar gives way first, then the version. An action the person must take shows as a short
+ * state; the transcript holds its whole message.
+ */
+function updateStep(step: UpdateStep, frame: string, give: { bar: boolean; version: boolean }): StatusSegment[] {
+  const spinner = { text: `${frame} `, color: 'yellow' }
+  if ('action' in step) return [spinner, {
+    text: step.action === 'approve_installer' ? 'Waiting for installer approval' : 'Waiting for you',
+    color: 'yellow', bold: true,
+  }]
+  const version = give.version && step.version ? ` ${step.version}` : ''
+  const doing = ({
+    checking: 'Checking for updates', downloading: 'Downloading', preparing: 'Preparing', installing: 'Installing',
+  } as const)[step.phase]
+  if (step.phase !== 'downloading' || step.percent === undefined)
+    return [spinner, { text: `${doing}${version}…`, color: 'yellow' }]
+  const filled = Math.round(step.percent / 100 * UPDATE_BAR_CELLS)
+  return [spinner, { text: `${doing}${version}`, color: 'yellow' },
+    ...give.bar ? [{ text: ` ${'▰'.repeat(filled)}${'▱'.repeat(UPDATE_BAR_CELLS - filled)}`, color: 'yellow' }] : [],
+    { text: ` ${step.percent}%`, color: 'yellow' }]
+}
+
 const textWidth = (text: string) => [...text].length
 const width = (segments: readonly StatusSegment[]) => segments.reduce((sum, { text }) => sum + textWidth(text), 0)
 
@@ -292,7 +325,8 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     live: { text: '●', color: 'green' }, quiet: { text: '○', dim: true },
   } as const)[tone]
   const label: StatusSegment[] = [{ text: ' Delta', dim: true },
-    ...state.recording ? [{ text: ' · ', dim: true }, { text: 'Syncing' }]
+    ...running?.update ? [{ text: ' · ', dim: true }, { text: 'Updating' }]
+      : state.recording ? [{ text: ' · ', dim: true }, { text: 'Syncing' }]
       : state.reminder ? [{ text: ' · ', dim: true }, { text: state.reminder.text }, { text: `  ${state.reminder.command}`, dim: true }]
       : []]
   const detail = failure ? [{ text: failure, color: 'red' }]
@@ -300,7 +334,8 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
   const frame = SPINNER_FRAMES[state.spinner?.frame ?? 0]!
   // A link is followable once published; while a share or join still runs it is shown, not offered.
   const href = running ? undefined : state.link
-  const linkText = state.link ? (layout.terminal ? state.link : shortLink(state.link)) : running ? 'link appears when ready' : undefined
+  const linkText = state.link ? (layout.terminal ? state.link : shortLink(state.link))
+    : running && !running.update ? 'link appears when ready' : undefined
   const turn = state.turn
   const owner = (turn.state === 'remote' || turn.state === 'starting') && state.connection !== 'stopped' && !state.reconnecting
     ? turn : undefined
@@ -350,6 +385,7 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     return [spinner, who, separator, { text: middleTruncate(doing.text, room), ...doing.tool ? { bold: true } : {} }, time]
   }
   const right = (give: GiveWay): StatusSegment[] => {
+    if (running?.update) return updateStep(running.update, frame, { bar: !give.initials, version: !give.alone })
     if (running) return [{ text: `${frame} ${running.text}`, color: 'yellow' },
       ...running.step ? [{ text: ` ${running.step.join('/')}`, dim: true }] : []]
     if (progress?.tone === 'done') return [{ text: `✔ ${progress.text}`, color: 'green' }]
