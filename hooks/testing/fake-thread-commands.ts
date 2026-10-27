@@ -370,6 +370,7 @@ export function fakeThreads(hostOn: On, options: {
     pluginHttpStatus: 200,
     pluginManifest: undefined as string | undefined,
     pluginHttpCalls: [] as string[],
+    pluginListCalls: 0,
     pluginMarketplaceRefreshes: [] as string[][],
     pluginMarketplaceFailure: undefined as string | undefined,
     pluginUpdateCalls: [] as { argv: string[]; cwd?: string; timeoutMs?: number }[],
@@ -1089,12 +1090,14 @@ export function fakeThreads(hostOn: On, options: {
         isStdoutTruncated: bytes.length > limit, isStderrTruncated: false } }
     }
     if (argv[0] === 'claude' && fake.claudeMissing) return output('', 127, 'claude: command not found')
-    if (argv[0] === 'claude' && argv.slice(1).join(' ') === 'plugin list --json')
+    if (argv[0] === 'claude' && argv.slice(1).join(' ') === 'plugin list --json') {
+      fake.pluginListCalls++
       return output(JSON.stringify(fake.pluginInstalled ? [{
         id: 'delta@zed-industries', enabled: true, scope: fake.pluginScope,
         version: fake.pluginInstalledVersion, installPath: fake.pluginInstallPath ?? fake.pluginRoot,
         ...['project', 'local'].includes(fake.pluginScope) ? { projectPath: fake.root ?? fake.cwd } : {},
       }] : []))
+    }
     if (argv[0] === 'claude' && argv.slice(1).join(' ') === 'plugin marketplace list --json')
       return output(JSON.stringify([fake.pluginMarketplace]))
     if (argv[0] === 'claude' && argv[1] === 'plugin' && argv[2] === 'marketplace' && argv[3] === 'update') {

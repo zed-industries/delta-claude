@@ -176,7 +176,7 @@ describe('plugin updates', () => {
     const ui = await $.ui.mount({ ...abovePrompt, plugin: 'delta' })
     fake.pluginHttpStatus = 503
     await fake.advance(CHECK_INTERVAL_MS)
-    expect((fake.store.get('plugin-update:release:main') as any).version).toBe('0.1.2')
+    expect((fake.store.get('plugin-update:check') as any).version).toBe('0.1.2')
     expect(await ui.find({ key: 'plugin-update' })).toBeDefined()
   })
 
@@ -248,9 +248,12 @@ describe('plugin updates', () => {
     expect(fake.logs.filter((line) => line.includes("Claude Code plugin 0.1.2 is available"))).toHaveLength(1)
     await $.session.end(sessionEnd(fake.session))
     fake.session = 'another-session'
+    const lists = fake.pluginListCalls
     await $.session.start(sessionStart)
     await fake.advance(0)
+    // Within the hour, another session reuses the check: no request and no claude run.
     expect(fake.pluginHttpCalls).toHaveLength(2)
+    expect(fake.pluginListCalls).toBe(lists)
     expect(await ui.find({ key: 'plugin-update' })).toBeUndefined()
     fake.expectClean()
   })

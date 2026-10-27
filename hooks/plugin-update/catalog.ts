@@ -11,12 +11,15 @@ export const CHECK_INTERVAL_MS = 60 * 60 * 1000
 export const REMINDER_INTERVAL_MS = 24 * CHECK_INTERVAL_MS
 export const ACTIVATION_WAIT_MS = 15_000
 
+const SCOPES = ['user', 'project', 'local', 'managed'] as const
+const BRANCHES = ['main', 'develop'] as const
+
 type Installation = {
-  scope: 'user' | 'project' | 'local' | 'managed'
+  scope: typeof SCOPES[number]
   version: string
   installPath: string
 }
-export type UpdateTarget = Installation & { branch: 'main' | 'develop'; runningVersion: string }
+export type UpdateTarget = Installation & { branch: typeof BRANCHES[number]; runningVersion: string }
 
 /** `x.y.z`, as every plugin.json release uses. */
 function versionParts(version: string): number[] | undefined {
@@ -60,8 +63,7 @@ export function installationFrom(
   value: unknown, runningRoot: string, runningVersion: string, project: string,
 ): Installation | undefined {
   if (!Array.isArray(value)) throw new Error('Claude Code returned an unreadable plugin list.')
-  const scopes = ['local', 'project', 'user', 'managed'] as const
-  for (const scope of scopes) {
+  for (const scope of ['local', 'project', 'user', 'managed'] as const) {
     for (const entry of value) {
       if (!isJsonObject(entry) || entry.id !== PLUGIN_ID || entry.enabled !== true || entry.scope !== scope ||
           !isNonEmptyString(entry.installPath) || !isNonEmptyString(entry.version)) continue
@@ -95,12 +97,37 @@ export function manifestUrl(branch: UpdateTarget['branch']): string {
   return `https://raw.githubusercontent.com/zed-industries/delta-claude/${branch}/.claude-plugin/plugin.json`
 }
 
-type CachedRelease = { checkedAt: number; version?: string }
+/**
+ * The hourly check every session shares: the installation of the copy running from `root`, and the
+ * newest release on its branch. Without a target, that copy is not one this updater follows.
+ */
+export type Check = { checkedAt: number; root: string; project: string; target?: UpdateTarget; version?: string }
 
-export function cachedRelease(value: unknown): CachedRelease | undefined {
+export function checkFrom(value: unknown): Check | undefined {
   if (!isJsonObject(value) || typeof value.checkedAt !== 'number' || !Number.isFinite(value.checkedAt) ||
+      !isNonEmptyString(value.root) || typeof value.project !== 'string' ||
       (value.version !== undefined && (typeof value.version !== 'string' || !versionParts(value.version)))) return
-  return { checkedAt: value.checkedAt, ...value.version ? { version: value.version } : {} }
+  const check = {
+    checkedAt: value.checkedAt, root: value.root, project: value.project, ...value.version ? { version: value.version } : {},
+  }
+  const target = value.target
+  if (target === undefined) return check
+  if (!isJsonObject(target) || !isOneOf(target.scope, SCOPES) || !isOneOf(target.branch, BRANCHES) ||
+      !isNonEmptyString(target.version) || !isNonEmptyString(target.installPath) ||
+      !isNonEmptyString(target.runningVersion)) return
+  return { ...check, target: {
+    scope: target.scope, branch: target.branch, version: target.version,
+    installPath: target.installPath, runningVersion: target.runningVersion,
+  } }
+}
+
+/**
+ * Another session's check holds for the same running copy and, unless that copy is installed for
+ * every project, the same project.
+ */
+export function answersFor(check: Check, root: string, project: string): boolean {
+  return samePath(check.root, root) &&
+    (check.target?.scope === 'user' || check.target?.scope === 'managed' || samePath(check.project, project))
 }
 
 /** A future timestamp is not a permanent throttle after the machine's clock moves backwards. */

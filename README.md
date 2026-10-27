@@ -65,6 +65,9 @@ apply the update when the session is idle; otherwise start a new Code session.
 - `/delta-plugin-update notifications off` (or `on`) turns the background checks
   and notices off.
 
+Both also work as `/delta plugin-update …`, and the `/delta` menu offers them
+under **More actions**. One check an hour is shared by every session.
+
 Installs follow the marketplace branch they were added from (`main`, or
 `develop` with `#develop`); local copies, other sources and other refs are left
 alone. Checks need a standalone `claude` CLI (2.1.303 or newer) on PATH, and

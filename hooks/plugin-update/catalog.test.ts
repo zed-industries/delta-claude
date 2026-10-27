@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import {
-  branchFrom, cachedRelease, CHECK_INTERVAL_MS, compareVersions, installationFrom, manifestUrl, manifestVersion,
+  answersFor, branchFrom, CHECK_INTERVAL_MS, checkFrom, compareVersions, installationFrom, manifestUrl, manifestVersion,
   recentlyChecked, REMINDER_INTERVAL_MS, reminderIsSnoozed, updateMessage,
 } from './catalog'
 
@@ -52,9 +52,19 @@ test('persisted throttles expire, survive clock changes, and snooze only the ann
   expect(recentlyChecked(0, CHECK_INTERVAL_MS - 1)).toBe(true)
   expect(recentlyChecked(0, CHECK_INTERVAL_MS)).toBe(false)
   expect(recentlyChecked(100, 0)).toBe(false)
-  expect(cachedRelease({ checkedAt: 1, version: '1.2.3' })?.version).toBe('1.2.3')
-  for (const value of [null, { checkedAt: NaN }, { checkedAt: 1, version: {} }])
-    expect(cachedRelease(value)).toBeUndefined()
+  const target = { scope: 'user', branch: 'main', version: '1.2.2', installPath: '/cache/1.2.2', runningVersion: '1.2.2' } as const
+  const check = { checkedAt: 1, root: '/cache/1.2.2', project: '/repo', target, version: '1.2.3' }
+  expect(checkFrom(check)).toEqual(check)
+  expect(checkFrom({ ...check, target: undefined })).toEqual({ ...check, target: undefined })
+  for (const value of [null, { ...check, checkedAt: NaN }, { ...check, version: {} }, { ...check, root: '' },
+    { ...check, target: { ...target, branch: 'v1' } }, { ...check, target: { ...target, scope: 'global' } }])
+    expect(checkFrom(value)).toBeUndefined()
+  // A user installation's check holds in every project; a project's, or a copy this updater skips, only in its own.
+  expect(answersFor(check, '/cache/1.2.2', '/other')).toBe(true)
+  expect(answersFor(check, '/cache/1.2.3', '/repo')).toBe(false)
+  expect(answersFor({ ...check, target: { ...target, scope: 'project' } }, '/cache/1.2.2', '/other')).toBe(false)
+  expect(answersFor({ ...check, target: undefined }, '/cache/1.2.2', '/other')).toBe(false)
+  expect(answersFor({ ...check, target: undefined }, '/cache/1.2.2', '/repo')).toBe(true)
   const reminder = { version: '1.2.3', until: REMINDER_INTERVAL_MS }
   expect(reminderIsSnoozed(reminder, '1.2.3', 0)).toBe(true)
   expect(reminderIsSnoozed(reminder, '1.2.4', 0)).toBe(false)

@@ -12,11 +12,13 @@ import { samePath } from '../core/paths'
 import { requests, stateFor } from '../core/session-state'
 import { errorText } from '../core/text'
 import {
-  ACTIVATION_WAIT_MS, branchFrom, cachedRelease, CHECK_INTERVAL_MS, compareVersions, installationFrom, manifestUrl, manifestVersion,
-  MARKETPLACE, PLUGIN_ID, recentlyChecked, REMINDER_INTERVAL_MS, reminderIsSnoozed, updateMessage, type UpdateTarget,
+  ACTIVATION_WAIT_MS, answersFor, branchFrom, type Check, CHECK_INTERVAL_MS, checkFrom, compareVersions, installationFrom,
+  manifestUrl, manifestVersion, MARKETPLACE, PLUGIN_ID, recentlyChecked, REMINDER_INTERVAL_MS, reminderIsSnoozed,
+  updateMessage, type UpdateTarget,
 } from './catalog'
 
 const NOTIFICATIONS = 'plugin-update:notifications'
+const CHECK = 'plugin-update:check'
 const PLUGIN_UPDATE_USAGE = 'Usage: /delta-plugin-update [check | notifications on | notifications off]. Updates this Claude Code plugin; terminals request a reload, while Desktop may need a new session. /delta-update updates the Delta app and CLI instead.'
 const UNSUPPORTED = 'This copy of Delta is not installed from the Zed Industries marketplace on main or develop. Local copies and pinned or other marketplace sources are left unchanged.'
 const APP_UPDATE_BUSY = 'A Delta installation update is still running. Let it finish before updating or activating the Claude Code plugin.'
@@ -105,20 +107,25 @@ async function fetchVersion(host: Host, target: UpdateTarget): Promise<string> {
 }
 
 /**
- * The newest release, through a cache every session shares for an hour. The check is recorded before
- * the request, so a failure also waits an hour; two processes checking at once both fetch.
+ * Which installation this copy is and the newest release on its branch, checked at most hourly
+ * across every session: a session reuses another's check when {@link answersFor} says it holds, and
+ * runs neither claude nor a request. The check is recorded before it runs, so a failure also waits
+ * an hour and keeps the release already known; two sessions starting at once both run it.
  */
-async function availableVersion(host: Host, target: UpdateTarget, force: boolean) {
-  // Native auto-update already did the download. Offer activation without needing the network.
-  if (compareVersions(target.version, target.runningVersion) === 1) return target.version
-  const key = `plugin-update:release:${target.branch}`
+async function hourlyCheck(host: Host, force: boolean): Promise<Check> {
   const now = await host.clock.now()
-  const cached = cachedRelease(await host.store.get(key))
-  if (!force && cached && recentlyChecked(cached.checkedAt, now)) return cached.version
-  await host.store.set(key, { checkedAt: now, ...cached?.version ? { version: cached.version } : {} })
-  const version = await fetchVersion(host, target)
-  await host.store.set(key, { checkedAt: now, version })
-  return version
+  const root = host.plugin.root, project = await host.session.root()
+  const stored = checkFrom(await host.store.get(CHECK))
+  const previous = stored && answersFor(stored, root, project) ? stored : undefined
+  if (!force && previous && recentlyChecked(previous.checkedAt, now)) return previous
+  await host.store.set(CHECK, { ...previous, checkedAt: now, root, project })
+  const target = await targetFor(host, await host.session.cwd(), project)
+  // Native auto-update already did the download. Offer activation without needing the network.
+  const version = !target ? undefined
+    : compareVersions(target.version, target.runningVersion) === 1 ? target.version : await fetchVersion(host, target)
+  const check = { checkedAt: now, root, project, ...target ? { target } : {}, ...version ? { version } : {} }
+  await host.store.set(CHECK, check)
+  return check
 }
 
 async function checkInBackground(host: Host, observer: Observer) {
@@ -133,8 +140,7 @@ async function checkInBackground(host: Host, observer: Observer) {
       clearPluginUpdateNotice(host, observer.session)
       return
     }
-    const target = await targetFor(host, await host.session.cwd(), await host.session.root())
-    const version = target && await availableVersion(host, target, false)
+    const { target, version } = await hourlyCheck(host, false)
     // A failed check is not evidence that an existing notice is obsolete.
     if (!target || !version || !await current()) return
     if (compareVersions(version, target.runningVersion) !== 1) {
@@ -232,18 +238,17 @@ export async function pluginUpdateCommand(host: Host, args: string): Promise<{ t
       return { text: `Delta plugin update notifications are ${enabled ? 'on' : 'off'}. You can always run /delta-plugin-update to update manually.` }
     }
     if (args !== '' && args !== 'check') return { text: PLUGIN_UPDATE_USAGE }
-    const cwd = await host.session.cwd()
-    const project = await host.session.root()
     if (args === 'check') {
-      const target = await targetFor(host, cwd, project)
+      const { target, version } = await hourlyCheck(host, true)
       if (!target) return { text: UNSUPPORTED }
-      const version = await availableVersion(host, target, true)
       return { text: version && compareVersions(version, target.runningVersion) === 1
         ? `Delta plugin ${version} is ${compareVersions(target.version, target.runningVersion) === 1 ? 'installed and ready to apply' : 'available'} (running: ${target.runningVersion}). Run /delta-plugin-update for the next step.`
         : `Delta's Claude Code plugin ${target.runningVersion} is up to date on ${target.branch}.` }
     }
     if (requests.join || requests.share || stateFor(session).currentTurnId)
       return { text: 'Wait for the current Claude turn, Delta share, or join to finish, then run /delta-plugin-update.' }
+    const cwd = await host.session.cwd()
+    const project = await host.session.root()
     const release = claimInstallation('plugin')
     if (!release) return { text: installation?.kind === 'app' ? APP_UPDATE_BUSY : 'A Delta plugin update or activation is already in progress.' }
     let handedOff = false
@@ -267,7 +272,7 @@ export async function pluginUpdateCommand(host: Host, args: string): Promise<{ t
       )
       if (!installed || installed.scope !== target.scope)
         throw new Error('The updated installation could not be verified. Check /plugin before retrying.')
-      await host.store.delete(`plugin-update:release:${target.branch}`)
+      await host.store.delete(CHECK)
       if (compareVersions(installed.version, target.runningVersion) !== 1) return { text: message }
       // A reload would apply the other session's or folder's installation scope.
       if (await host.session.id() !== session || !samePath(cwd, await host.session.cwd()))
