@@ -368,7 +368,6 @@ export function fakeThreads(hostOn: On, options: {
     pluginMarketplace: { name: 'zed-industries', source: 'github', repo: 'zed-industries/delta-claude' } as Record<string, unknown>,
     pluginReleaseVersion: '0.1.2',
     pluginHttpStatus: 200,
-    pluginManifest: undefined as string | undefined,
     pluginHttpCalls: [] as string[],
     pluginListCalls: 0,
     pluginMarketplaceRefreshes: [] as string[][],
@@ -1048,7 +1047,7 @@ export function fakeThreads(hostOn: On, options: {
     fake.pluginHttpCalls.push(e.url)
     await fake.holdPluginHttp
     return { value: { status: fake.pluginHttpStatus, ok: fake.pluginHttpStatus === 200, headers: {},
-      text: fake.pluginManifest ?? JSON.stringify({ name: 'delta', version: fake.pluginReleaseVersion }) } }
+      text: JSON.stringify({ name: 'delta', version: fake.pluginReleaseVersion }) } }
   })
   /** Delta's telemetry counts each integration's commands, so every Delta command the plugin runs says it is Claude Code's. */
   const expectLabelled = (argv: readonly string[], env: Record<string, string> | undefined) => {

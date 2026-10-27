@@ -397,7 +397,8 @@ describe('plugin updates', () => {
     expect(await ui.find({ key: 'plugin-update-row' })).toBeDefined()
   })
 
-  for (const kind of ['headless', 'network disabled', 'development', 'pinned', 'other source'] as const)
+  // catalog.test.ts covers each source and pin this updater skips; one stands for them here.
+  for (const kind of ['headless', 'network disabled', 'development'] as const)
     test(`background checking leaves ${kind} sessions alone`, async ($, on) => {
       // Any nonempty value opts out, including one that reads as false.
       const fake = fakeThreads(on, { env: kind === 'network disabled'
@@ -405,32 +406,29 @@ describe('plugin updates', () => {
       fake.pluginInstalled = true
       if (kind === 'development') fake.pluginInstallPath = '/plugins/cache/zed-industries/delta/0.1.1'
       if (kind === 'headless') fake.surfaces = []
-      if (kind === 'pinned') fake.pluginMarketplace.ref = 'v0.1.1'
-      if (kind === 'other source') fake.pluginMarketplace.repo = 'someone/delta-claude'
       await $.session.start(sessionStart)
       await fake.advance(0)
       expect(fake.pluginHttpCalls).toEqual([])
       expect(fake.pluginUpdateCalls).toEqual([])
-      if (['development', 'pinned', 'other source'].includes(kind))
+      if (kind === 'development')
         expect((await $.command.run(typedDelta('plugin-update'))).text).toContain('left unchanged')
     })
 
-  for (const failure of ['offline', 'malformed', 'wrong plugin'] as const)
-    test(`${failure} discovery fails quietly and remains throttled`, async ($, on) => {
-      const fake = fakeThreads(on)
-      fake.pluginInstalled = true
-      if (failure === 'offline') fake.pluginHttpStatus = 503
-      else fake.pluginManifest = failure === 'malformed' ? '{}' : '{"name":"someone-else","version":"99.0.0"}'
-      await $.session.start(sessionStart)
-      await fake.advance(0)
-      expect(fake.pluginUpdateDebug).toHaveLength(1)
-      expect(fake.logs.some((text) => text.includes('plugin update check'))).toBe(false)
-      expect((await $.prompt.submit(prompt('keep working'))).drop).toBeUndefined()
-      await $.session.start(sessionStart)
-      await fake.advance(0)
-      expect(fake.pluginHttpCalls).toHaveLength(1)
-      expect(fake.pluginUpdateCalls).toEqual([])
-    })
+  // catalog.test.ts covers a malformed or foreign manifest; a failed request stands for them here.
+  test('failed discovery stays quiet and remains throttled', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.pluginInstalled = true
+    fake.pluginHttpStatus = 503
+    await $.session.start(sessionStart)
+    await fake.advance(0)
+    expect(fake.pluginUpdateDebug).toHaveLength(1)
+    expect(fake.logs.some((text) => text.includes('plugin update check'))).toBe(false)
+    expect((await $.prompt.submit(prompt('keep working'))).drop).toBeUndefined()
+    await $.session.start(sessionStart)
+    await fake.advance(0)
+    expect(fake.pluginHttpCalls).toHaveLength(1)
+    expect(fake.pluginUpdateCalls).toEqual([])
+  })
 
   test('a slow check times out, cannot install or notify late, and never overlaps its own timer', async ($, on) => {
     const fake = fakeThreads(on)

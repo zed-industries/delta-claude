@@ -1,7 +1,7 @@
 {
   "name": "delta",
   "displayName": "Delta for Claude Code",
-  "version": "0.1.28",
+  "version": "0.1.26",
   "description": "Make Claude Code multiplayer. Collaborate on shared conversations and code, powered by DeltaDB.",
   "author": {
     "name": "Zed Industries"
