@@ -4,7 +4,7 @@
 import { authStatus, orgCreate, orgList } from '../cli/delta-cli'
 import { setupEnv } from './interaction'
 import { policyPath, readProjectPolicy } from './project-policy'
-import type { Runtime } from '../core/session-state'
+import type { Host } from '../core/host'
 import { isPersonalOrganization, type Organization } from './setup'
 
 /**
@@ -24,24 +24,24 @@ export function isPersonalOrganizationId(id: string): boolean {
 }
 
 /** Create a team organization through the CLI and remember its name for the band. */
-export async function createOrganization($: Runtime, name: string): Promise<Organization> {
-  const created = await orgCreate($, name)
+export async function createOrganization(host: Host, name: string): Promise<Organization> {
+  const created = await orgCreate(host, name)
   organizationNames.set(created.id, created.name)
   return created
 }
 
 /** The account's organizations from `delta --json org list`, remembering their names for the band. */
-export async function listOrganizations($: Runtime, timeoutMs?: number): Promise<Organization[]> {
-  const organizations = await orgList($, timeoutMs)
+export async function listOrganizations(host: Host, timeoutMs?: number): Promise<Organization[]> {
+  const organizations = await orgList(host, timeoutMs)
   for (const organization of organizations) organizationNames.set(organization.id, organization.name)
   currentOrganizationId = (organizations.find((organization) => organization.current) ?? organizations[0])?.id
   return organizations
 }
 
-export function loadOrganizationDirectory($: Runtime): Promise<void> {
+export function loadOrganizationDirectory(host: Host): Promise<void> {
   organizationDirectory ??= (async () => {
     const [organizations, login] = await Promise.all([
-      listOrganizations($), authStatus($).then((status) => status.login, () => undefined),
+      listOrganizations(host), authStatus(host).then((status) => status.login, () => undefined),
     ])
     personalIds = new Set(organizations.filter((org) => isPersonalOrganization(org, login)).map((org) => org.id))
   })().catch(() => undefined)
@@ -54,7 +54,7 @@ export function organizationName(id: string | undefined): string | undefined {
 }
 
 /** The organization a checkout's `.delta/settings.json` names, in any mode; undefined when it names none or can't be read. */
-export async function savedOrganization($: Runtime, root: string): Promise<string | undefined> {
-  try { return readProjectPolicy(await setupEnv($).readFile(policyPath(root))).policy.organization }
+export async function savedOrganization(host: Host, root: string): Promise<string | undefined> {
+  try { return readProjectPolicy(await setupEnv(host).readFile(policyPath(root))).policy.organization }
   catch { return undefined }
 }

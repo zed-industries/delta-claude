@@ -14,7 +14,8 @@ import {
 } from './command-outcomes'
 import { readCommandStream, readMountReady } from './command-reader'
 import { isJsonObject, type JsonObject } from '../core/json'
-import { type Runtime, stillActive } from '../core/session-state'
+import { stillActive } from '../core/session-state'
+import type { Host } from '../core/host'
 import { claudeInteraction } from '../setup/interaction'
 import {
   createdOrganizationFrom, type InviteResult, inviteResultsFrom, type Organization, organizationsFrom,
@@ -70,14 +71,14 @@ export function forgetContract(session: string) {
  * The Delta CLI's executable. Given `install`, a missing CLI is installed, with its progress reported
  * through `install`; without it, a missing CLI is an error, so only an explicit command installs.
  */
-export async function resolveCli($: Runtime, install?: (progress: string) => void) {
-  return cli.resolve((argv, init) => $.process.run(argv, { ...init, env: { ...init?.env, ...INTEGRATION_ENV } }),
+export async function resolveCli(host: Host, install?: (progress: string) => void) {
+  return cli.resolve((argv, init) => host.process.run(argv, { ...init, env: { ...init?.env, ...INTEGRATION_ENV } }),
     install !== undefined,
-    install, await $.env.get('OS') === 'Windows_NT'
+    install, await host.env.os() === 'Windows_NT'
       ? {
-        exists: (path) => $.fs.exists(path),
+        exists: (path) => host.fs.exists(path),
         confirmInstall: async () => {
-          const answer = await claudeInteraction($).ask(
+          const answer = await claudeInteraction(host).ask(
             'Delta is not installed. Download and run the official Windows installer? It installs the Delta app and CLI and may ask for Windows administrator permission.',
             { options: ['Install Delta', 'Not now'], header: 'Delta setup' },
           )
@@ -90,20 +91,20 @@ export async function resolveCli($: Runtime, install?: (progress: string) => voi
  * Run `delta --json …args` as Claude Code, reading its output as it streams rather than through
  * process.run's capture limit. `name` names the command in its errors.
  */
-async function readCommand($: Runtime, args: string[], name: string, options: {
+async function readCommand(host: Host, args: string[], name: string, options: {
   signal?: AbortSignal; timeoutMs?: number; env?: Record<string, string>
 } = {}): Promise<string> {
   const { signal = new AbortController().signal, timeoutMs = 120_000, env } = options
   if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
-  let stream: ReturnType<Runtime['process']['spawn']>
+  let stream: ReturnType<Host['process']['spawn']>
   try {
-    const executable = await resolveCli($)
+    const executable = await resolveCli(host)
     if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
-    stream = $.process.spawn({ argv: [executable, '--json', ...args], env: { ...env, ...INTEGRATION_ENV } })
+    stream = host.process.spawn({ argv: [executable, '--json', ...args], env: { ...env, ...INTEGRATION_ENV } })
   }
   catch (error) { throw new DeltaCommandError('process_failed', `${name}: cannot run Delta CLI (${errorText(error)})`) }
   return readCommandStream(stream, name, signal,
-    (milliseconds, deadline) => $.clock.sleep(milliseconds, { signal: deadline }), timeoutMs)
+    (milliseconds, deadline) => host.clock.sleep(milliseconds, { signal: deadline }), timeoutMs)
 }
 
 /**
@@ -112,11 +113,11 @@ async function readCommand($: Runtime, args: string[], name: string, options: {
  * remembered, so updating Delta and retrying re-checks. Nor is an answer that arrives after the
  * session ended or was activated again, even under the same ID, so a resumed session renegotiates.
  */
-export async function requireContract($: Runtime, session: string): Promise<number> {
+export async function requireContract(host: Host, session: string): Promise<number> {
   const verified = contractVerified.get(session)
   if (verified !== undefined) return verified
   const current = stillActive(session)
-  const range = await threadContract($)
+  const range = await threadContract(host)
   const refusal = contractRefusal(range)
   if (refusal) throw new ContractRefusalError(refusal)
   // contractRefusal refuses an undefined range, so the range is defined here.
@@ -131,10 +132,10 @@ export async function requireContract($: Runtime, session: string): Promise<numb
  * and empty stdout are inspected first, so a CLI that predates the subcommand (clap's error on
  * stderr, nonzero exit, no JSON) reads as `undefined` rather than a generic malformed-output failure.
  */
-export async function threadContract($: Runtime): Promise<ThreadContract | undefined> {
+export async function threadContract(host: Host): Promise<ThreadContract | undefined> {
   let result: ProcessRunResult
   try {
-    result = await runJson($, ['thread', 'contract'], { timeoutMs: CONTRACT_TIMEOUT_MS })
+    result = await runJson(host, ['thread', 'contract'], { timeoutMs: CONTRACT_TIMEOUT_MS })
   } catch (error) {
     // The same failure a share or a status read reports when the CLI is missing or cannot start.
     throw new Error(`thread contract: cannot run Delta CLI (${errorText(error)}). Repair the selected Delta CLI and retry.`)
@@ -149,12 +150,12 @@ export async function threadContract($: Runtime): Promise<ThreadContract | undef
  * Run `delta --json …args` as Claude Code with `runJson`, returning its checked JSON answer. `name`
  * names the command in its errors.
  */
-async function command($: Runtime, args: string[], name: string, options: {
+async function command(host: Host, args: string[], name: string, options: {
   check?: () => Promise<void>; timeoutMs?: number; env?: Record<string, string>
 } = {}) {
   let result: ProcessRunResult
   try {
-    result = await runJson($, args, { ...options, timeoutMs: options.timeoutMs ?? 120_000 })
+    result = await runJson(host, args, { ...options, timeoutMs: options.timeoutMs ?? 120_000 })
   } catch (error) {
     throw new Error(`${name}: cannot run Delta CLI (${errorText(error)}). Install the matching new Delta CLI and app, and put delta on PATH.`)
   }
@@ -165,13 +166,13 @@ async function command($: Runtime, args: string[], name: string, options: {
  * Run `delta --json …args` as Claude Code. `check` runs once the CLI is found, before the command;
  * a failure to find the CLI, pass the check or run the command is thrown as it is.
  */
-async function runJson($: Runtime, args: string[], options: {
+async function runJson(host: Host, args: string[], options: {
   timeoutMs: number; stdin?: string; env?: Record<string, string>; check?: () => Promise<void>
 }): Promise<ProcessRunResult> {
   const { timeoutMs, stdin, env, check } = options
-  const executable = await resolveCli($)
+  const executable = await resolveCli(host)
   if (check) await check()
-  return $.process.run([executable, '--json', ...args], {
+  return host.process.run([executable, '--json', ...args], {
     ...stdin !== undefined ? { stdin } : {}, timeoutMs, env: { ...env, ...INTEGRATION_ENV },
   })
 }
@@ -181,13 +182,13 @@ async function runJson($: Runtime, args: string[], options: {
  * `org switch`, or `org invite` into the current organization.
  */
 export async function orgCommand(
-  $: Runtime, request: 'list' | 'current' | { switch: string } | { invite: string[] },
+  host: Host, request: 'list' | 'current' | { switch: string } | { invite: string[] },
 ) {
   const args = typeof request === 'string' ? [request]
     : 'switch' in request ? ['switch', '--', request.switch] : ['invite', '--', ...request.invite]
   try {
-    const executable = await resolveCli($)
-    const result = await $.process.run([executable, 'org', ...args], {
+    const executable = await resolveCli(host)
+    const result = await host.process.run([executable, 'org', ...args], {
       timeoutMs: 120_000, env: { ...INTEGRATION_ENV },
     })
     if (result.isStdoutTruncated || result.isStderrTruncated)
@@ -201,23 +202,23 @@ export async function orgCommand(
 }
 
 /** The account's organizations, from `delta --json org list`. */
-export async function orgList($: Runtime, timeoutMs?: number): Promise<Organization[]> {
-  return organizationsFrom(await command($, ['org', 'list'], 'org list', { timeoutMs }))
+export async function orgList(host: Host, timeoutMs?: number): Promise<Organization[]> {
+  return organizationsFrom(await command(host, ['org', 'list'], 'org list', { timeoutMs }))
 }
 
 /** Create a team organization named `name`. */
-export async function orgCreate($: Runtime, name: string): Promise<Organization> {
-  return createdOrganizationFrom(await command($, ['org', 'create', '--', name], 'org create'))
+export async function orgCreate(host: Host, name: string): Promise<Organization> {
+  return createdOrganizationFrom(await command(host, ['org', 'create', '--', name], 'org create'))
 }
 
 /** Invite `emails` to `organization`, with each address's outcome. */
-export async function orgInvite($: Runtime, organization: string, emails: string[]): Promise<InviteResult[]> {
-  return inviteResultsFrom(await command($, ['org', 'invite', '--org', organization, '--', ...emails], 'org invite'))
+export async function orgInvite(host: Host, organization: string, emails: string[]): Promise<InviteResult[]> {
+  return inviteResultsFrom(await command(host, ['org', 'invite', '--org', organization, '--', ...emails], 'org invite'))
 }
 
 /** The signed-in account's GitHub login, from `delta --json auth status`. */
-export async function authStatus($: Runtime): Promise<{ login: string | undefined }> {
-  const { account } = await command($, ['auth', 'status'], 'auth status')
+export async function authStatus(host: Host): Promise<{ login: string | undefined }> {
+  const { account } = await command(host, ['auth', 'status'], 'auth status')
   return { login: isJsonObject(account) && typeof account.login === 'string' ? account.login : undefined }
 }
 
@@ -226,14 +227,14 @@ export async function authStatus($: Runtime): Promise<{ login: string | undefine
  * organization with that visibility; `parent` makes it a subagent's thread, named and with its
  * parent's worktrees or forks of them. `check` runs once the CLI is found, before the command.
  */
-export async function threadCreate($: Runtime, creation: {
+export async function threadCreate(host: Host, creation: {
   externalId: string
   organization?: { id: string; visibility: 'private' | 'organization' }
   parent?: { reference: string; name: string; worktrees?: 'shared' | 'isolated' }
   check?: () => Promise<void>
 }): Promise<JsonObject & CreationReceipt> {
   const { externalId, organization, parent, check } = creation
-  const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', externalId,
+  const created = await command(host, ['thread', 'create', '--source', 'claude-code', '--external-id', externalId,
     ...organization ? ['--organization', organization.id, '--visibility', organization.visibility] : [],
     ...parent ? ['--parent', parent.reference, '--name', parent.name] : [],
     ...parent?.worktrees ? [`--${parent.worktrees}-worktrees`] : []], 'thread create', { check })
@@ -243,17 +244,17 @@ export async function threadCreate($: Runtime, creation: {
 
 /** Sync diagnostics can exceed process.run's 4 MiB stdout capture limit, so status streams with a bound. */
 export async function threadStatus(
-  $: Runtime, thread: string, session: string, signal = new AbortController().signal,
+  host: Host, thread: string, session: string, signal = new AbortController().signal,
 ) {
-  return parseThreadStatus(await readCommand($, ['thread', 'status', thread,
+  return parseThreadStatus(await readCommand(host, ['thread', 'status', thread,
     '--source', 'claude-code', '--external-id', session], 'thread status', { signal }))
 }
 
 /** Publish `thread` to its organization, returning the link Delta gave it. */
 export async function threadShare(
-  $: Runtime, thread: string, options: { form?: CommandForm; check?: () => Promise<void> } = {},
+  host: Host, thread: string, options: { form?: CommandForm; check?: () => Promise<void> } = {},
 ): Promise<JsonObject & PublicationReceipt> {
-  const shared = await command($, ['thread', 'share', thread, '--visibility', 'organization'], 'thread share',
+  const shared = await command(host, ['thread', 'share', thread, '--visibility', 'organization'], 'thread share',
     { check: options.check, env: commandFormEnv(options.form) })
   validatePublicationReceipt(shared, thread)
   return shared
@@ -261,9 +262,9 @@ export async function threadShare(
 
 /** Invite `emails` to `thread`, which uploads it privately if it is not on the server yet. */
 export async function threadInvite(
-  $: Runtime, thread: string, emails: string[], options: { form?: CommandForm; check?: () => Promise<void> } = {},
+  host: Host, thread: string, emails: string[], options: { form?: CommandForm; check?: () => Promise<void> } = {},
 ): Promise<{ url: string; results: InviteResult[] }> {
-  return threadInvitationsFrom(await command($, ['thread', 'invite', thread, '--', ...emails],
+  return threadInvitationsFrom(await command(host, ['thread', 'invite', thread, '--', ...emails],
     'thread invite', { check: options.check, env: commandFormEnv(options.form) }), thread)
 }
 
@@ -275,7 +276,7 @@ type MountProcess = {
   session: string
   /** `thread:<thread>:<owner>` or `worktree:<session>:<directory>`. */
   key: string
-  stream: ReturnType<Runtime['process']['spawn']>
+  stream: ReturnType<Host['process']['spawn']>
   abort: AbortController
   /** The worktree a `worktree mount` keeps mounted, once it is ready. */
   reference?: string
@@ -300,20 +301,20 @@ async function stopMountProcess(process: MountProcess) {
  * Start a mount command for `session` and wait for its readiness line, leaving it running. It replaces
  * the ready process of the same key. `check` runs once the CLI is found and again once it is ready.
  */
-async function mountCommand<T>($: Runtime, mount: {
+async function mountCommand<T>(host: Host, mount: {
   session: string; key: string; args: string[]; name: string; env?: Record<string, string>
   check?: () => Promise<void>
 }, parseReady: (line: string) => T): Promise<T> {
   const { session, key, args, name, env, check } = mount
-  const executable = await resolveCli($)
+  const executable = await resolveCli(host)
   if (check) await check()
-  const stream = $.process.spawn({ argv: [executable, '--json', ...args], env: { ...env, ...INTEGRATION_ENV } })
+  const stream = host.process.spawn({ argv: [executable, '--json', ...args], env: { ...env, ...INTEGRATION_ENV } })
   const process: MountProcess = { session, key, stream, stopping: false, abort: new AbortController() }
   liveMountProcesses.add(process)
   try {
     // A first mount can materialize large checkouts, which the CLI waits for.
     const { line } = await readMountReady(stream, name, process.abort.signal,
-      (milliseconds, deadline) => $.clock.sleep(milliseconds, { signal: deadline }), MOUNT_TIMEOUT_MS)
+      (milliseconds, deadline) => host.clock.sleep(milliseconds, { signal: deadline }), MOUNT_TIMEOUT_MS)
     const ready = parseReady(line)
     if (check) await check()
     const prior = mountProcesses.get(key)
@@ -330,11 +331,11 @@ async function mountCommand<T>($: Runtime, mount: {
  * Mount every worktree of the thread `locator` names for `owner`, for as long as `session` keeps the
  * command running; `join` reports the mount as a join, run as `form`. `thread` keys the process.
  */
-export async function threadMount($: Runtime, mount: {
+export async function threadMount(host: Host, mount: {
   session: string; thread: string; locator: string; owner: string; join?: boolean; form?: CommandForm
 }): Promise<MountedThread> {
   const { session, thread, locator, owner, join } = mount
-  return mountCommand($, {
+  return mountCommand(host, {
     session, key: `thread:${thread}:${owner}`, name: 'thread mount',
     args: ['thread', 'mount', locator, '--owner', owner, ...join ? ['--join'] : []],
     env: join ? commandFormEnv(mount.form) : {},
@@ -354,21 +355,21 @@ export async function stopThreadMounts(owner: string) {
 }
 
 /** Fork a refused thread's offline changes into a kept thread. */
-export async function threadFork($: Runtime, thread: string): Promise<ForkedThread> {
-  return parseThreadFork((await runRefusalCommand($, 'fork', thread)).stdout)
+export async function threadFork(host: Host, thread: string): Promise<ForkedThread> {
+  return parseThreadFork((await runRefusalCommand(host, 'fork', thread)).stdout)
 }
 
 /** Discard a refused thread's offline changes, so it is the server's view again. */
-export async function threadDiscard($: Runtime, thread: string): Promise<JsonObject> {
-  return checkResult(await runRefusalCommand($, 'discard', thread), 'thread discard')
+export async function threadDiscard(host: Host, thread: string): Promise<JsonObject> {
+  return checkResult(await runRefusalCommand(host, 'discard', thread), 'thread discard')
 }
 
 /** Run one `thread fork` or `thread discard` for a refused thread, failing with a typed error on a broken run. */
-async function runRefusalCommand($: Runtime, kind: 'fork' | 'discard', thread: string): Promise<ProcessRunResult> {
+async function runRefusalCommand(host: Host, kind: 'fork' | 'discard', thread: string): Promise<ProcessRunResult> {
   const args = kind === 'fork' ? ['thread', 'fork', thread] : ['thread', 'discard', thread, '--force']
   let result: ProcessRunResult
   try {
-    result = await runJson($, args, { timeoutMs: 120_000 })
+    result = await runJson(host, args, { timeoutMs: 120_000 })
   } catch (error) { throw new DeltaCommandError('process_failed', `thread ${kind} did not finish (${errorText(error)})`) }
   if (result.isStdoutTruncated || result.isStderrTruncated)
     throw new DeltaCommandError('command_failed', `thread ${kind} output was truncated`)
@@ -381,16 +382,16 @@ async function runRefusalCommand($: Runtime, kind: 'fork' | 'discard', thread: s
  * reads against the records it sent.
  */
 export async function threadAppend(
-  $: Runtime, target: { reference: string; externalId: string; local: boolean }, input: string,
+  host: Host, target: { reference: string; externalId: string; local: boolean }, input: string,
 ): Promise<ProcessRunResult> {
   // Every append names the producer, retries included, so attribution never depends on a live watch.
   const args = ['thread', 'append', target.reference, '--source', 'claude-code', '--external-id', target.externalId,
     ...target.local ? ['--acknowledge', 'local'] : [], '--producer-name', PRODUCER_NAME]
   // A CLI that cannot be found fails as itself; only a run that does not finish is a process failure.
-  await resolveCli($)
+  await resolveCli(host)
   let result: ProcessRunResult
   try {
-    result = await runJson($, args, { stdin: input, timeoutMs: 120_000 })
+    result = await runJson(host, args, { stdin: input, timeoutMs: 120_000 })
   } catch (error) { throw new DeltaCommandError('process_failed', `append did not finish (${errorText(error)})`) }
   if (result.isStdoutTruncated || result.isStderrTruncated)
     throw new DeltaCommandError('command_failed', 'append output was truncated, so no acknowledgment is assumed')
@@ -403,15 +404,15 @@ export async function threadAppend(
  * runs once the CLI is found, and a `false` answer starts nothing and returns undefined.
  */
 export async function threadWatch(
-  $: Runtime, reference: string,
+  host: Host, reference: string,
   options: { externalId?: string; participate?: boolean; proceed?: () => boolean | Promise<boolean> } = {},
-): Promise<ReturnType<Runtime['process']['spawn']> | undefined> {
+): Promise<ReturnType<Host['process']['spawn']> | undefined> {
   const { externalId, participate, proceed } = options
-  const argv = [await resolveCli($), '--json', 'thread', 'watch', reference,
+  const argv = [await resolveCli(host), '--json', 'thread', 'watch', reference,
     ...externalId ? ['--source', 'claude-code', '--external-id', externalId] : [],
     ...participate ? ['--participate', PRODUCER_NAME] : []]
   if (proceed && !await proceed()) return undefined
-  return $.process.spawn({ argv, env: { ...INTEGRATION_ENV } })
+  return host.process.spawn({ argv, env: { ...INTEGRATION_ENV } })
 }
 
 /** The longest `thread watch` line read; a snapshot item arrives whole on one line. */
@@ -423,7 +424,7 @@ const MAX_WATCH_LINE = 16 * 1024 * 1024
  * skipped, and an error event is thrown.
  */
 export async function* watchEvents(
-  stream: ReturnType<Runtime['process']['spawn']>, stderr?: (text: string) => void,
+  stream: ReturnType<Host['process']['spawn']>, stderr?: (text: string) => void,
 ): AsyncGenerator<WatchEvent, ProcessSpawnResult> {
   let pending = ''
   for (;;) {
@@ -447,8 +448,8 @@ export async function* watchEvents(
 }
 
 /** The shell command line that merges the forked thread `reference` into the thread `into`. */
-export async function threadMergeCommandLine($: Runtime, reference: string, into: string): Promise<string> {
-  return `${shellQuote(await resolveCli($))} thread merge ${shellQuote(reference)} --into ${shellQuote(into)}`
+export async function threadMergeCommandLine(host: Host, reference: string, into: string): Promise<string> {
+  return `${shellQuote(await resolveCli(host))} thread merge ${shellQuote(reference)} --into ${shellQuote(into)}`
 }
 
 /** A word for a POSIX shell, quoted unless it is plainly safe as it is. */
@@ -457,24 +458,24 @@ function shellQuote(word: string): string {
 }
 
 /** The references of the local worktrees checked out at `directory`, from `worktree list`. */
-export async function worktreeList($: Runtime, directory: string, check?: () => Promise<void>): Promise<string[]> {
-  return localWorktreesAt(await command($, ['worktree', 'list'], 'worktree list', { check }), directory)
+export async function worktreeList(host: Host, directory: string, check?: () => Promise<void>): Promise<string[]> {
+  return localWorktreesAt(await command(host, ['worktree', 'list'], 'worktree list', { check }), directory)
 }
 
 /** Create a local worktree for the checkout `directory`; nothing is attached or mounted yet. */
 export async function worktreeCreate(
-  $: Runtime, directory: string, check?: () => Promise<void>,
+  host: Host, directory: string, check?: () => Promise<void>,
 ): Promise<JsonObject & WorktreeCreationReceipt> {
-  const created = await command($, ['worktree', 'create', directory], 'worktree create', { check })
+  const created = await command(host, ['worktree', 'create', directory], 'worktree create', { check })
   validateWorktreeCreationReceipt(created)
   return created
 }
 
 /** Make the worktree `reference` a member of `thread`, without mounting it. */
 export async function worktreeAttach(
-  $: Runtime, reference: string, thread: string, check?: () => Promise<void>,
+  host: Host, reference: string, thread: string, check?: () => Promise<void>,
 ): Promise<JsonObject & MembershipReceipt> {
-  const attached = await command($, ['worktree', 'attach', reference, '--thread', thread], 'worktree attach', { check })
+  const attached = await command(host, ['worktree', 'attach', reference, '--thread', thread], 'worktree attach', { check })
   validateWorktreeMembershipReceipt(attached, thread, reference)
   return attached
 }
@@ -483,14 +484,14 @@ export async function worktreeAttach(
  * Keep the existing checkout `directory` synchronized as the worktree `reference` for as long as
  * `session` keeps the command running. A process already running for it is reused.
  */
-export async function worktreeMount($: Runtime, mount: {
+export async function worktreeMount(host: Host, mount: {
   session: string; reference: string; directory: string; check?: () => Promise<void>
 }): Promise<{ reference: string; directory: string }> {
   const { session, reference, directory, check } = mount
   const key = `worktree:${session}:${directory}`
   const existing = mountProcesses.get(key)
   if (existing && !existing.stopping && existing.reference === reference) return { reference, directory }
-  const mounted = await mountCommand($, {
+  const mounted = await mountCommand(host, {
     session, key, name: 'worktree mount', check,
     args: ['worktree', 'mount', reference, directory, '--existing-checkout'],
   }, (line) => {
@@ -521,6 +522,6 @@ export async function stopWorktreeMount(session: string, directory: string): Pro
 }
 
 /** Whether Delta still syncs the checkout `directory`, from a `worktree list` answered within `timeoutMs`. */
-export async function checkoutSyncing($: Runtime, directory: string, timeoutMs: number): Promise<boolean> {
-  return checkoutStillSyncing(await command($, ['worktree', 'list'], 'worktree list', { timeoutMs }), directory)
+export async function checkoutSyncing(host: Host, directory: string, timeoutMs: number): Promise<boolean> {
+  return checkoutStillSyncing(await command(host, ['worktree', 'list'], 'worktree list', { timeoutMs }), directory)
 }

@@ -4,7 +4,7 @@
  * that cannot be told it is also looked up here.
  */
 import type { FsEntry } from 'claude-code'
-import type { Runtime } from './session-state'
+import type { Host } from './host'
 
 /** Claude Code's folder for a working directory under `projects`: each character but a letter or digit is a `-`. */
 export function projectFolder(cwd: string): string {
@@ -17,19 +17,19 @@ export function transcriptCandidate(config: string, cwd: string, session: string
 }
 
 /** Claude Code's configuration folder, or undefined when neither it nor a home folder is set. */
-export async function claudeConfigDir($: Runtime): Promise<string | undefined> {
-  const home = await $.env.get('HOME') ?? await $.env.get('USERPROFILE')
-  return await $.env.get('CLAUDE_CONFIG_DIR') ?? (home ? `${home}/.claude` : undefined)
+export async function claudeConfigDir(host: Host): Promise<string | undefined> {
+  const home = await host.env.home() ?? await host.env.userProfile()
+  return await host.env.claudeConfigDir() ?? (home ? `${home}/.claude` : undefined)
 }
 
 /**
  * Where a session's transcript will be, though Claude Code may not have written it yet: a new session's
  * file appears with its first row. Undefined when the configuration folder cannot be found.
  */
-export async function expectedTranscript($: Runtime, session: string): Promise<string | undefined> {
-  const config = await claudeConfigDir($)
+export async function expectedTranscript(host: Host, session: string): Promise<string | undefined> {
+  const config = await claudeConfigDir(host)
   if (!config) return
-  return transcriptCandidate(config, await $.session.cwd(), session)
+  return transcriptCandidate(config, await host.session.cwd(), session)
 }
 
 /**
@@ -37,18 +37,18 @@ export async function expectedTranscript($: Runtime, session: string): Promise<s
  * of a very long path, so when neither the folder for the working directory nor `current` holds it,
  * every project's folder is searched. Undefined when no folder holds it.
  */
-export async function findTranscript($: Runtime, session: string, current: string | undefined): Promise<string | undefined> {
-  const config = await claudeConfigDir($)
+export async function findTranscript(host: Host, session: string, current: string | undefined): Promise<string | undefined> {
+  const config = await claudeConfigDir(host)
   if (!config) return
-  const expected = transcriptCandidate(config, await $.session.cwd(), session)
+  const expected = transcriptCandidate(config, await host.session.cwd(), session)
   for (const path of current && current !== expected ? [expected, current] : [expected])
-    if (await $.fs.exists(path)) return path
+    if (await host.fs.exists(path)) return path
   let projects: FsEntry[]
-  try { projects = await $.fs.list(`${config}/projects`) }
+  try { projects = await host.fs.list(`${config}/projects`) }
   catch { return }
   for (const project of projects) {
     if (project.kind !== 'dir') continue
     const path = `${config}/projects/${project.name}/${session}.jsonl`
-    if (await $.fs.exists(path)) return path
+    if (await host.fs.exists(path)) return path
   }
 }

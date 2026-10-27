@@ -17,9 +17,10 @@ import { listOrganizations, organizationName } from './organizations'
 import { policyPath, type ProjectPolicy, readProjectPolicy, recordsAutomatically } from './project-policy'
 import {
   activation, type AutoUpload, type Binding, boundDirectory, drawnRowKey, isPaused, key, ledgerKey, load, pauseCheckout,
-  producerOf, rememberTranscriptPath, report, requests, resumeCheckout, type Runtime, save, serial, sessions,
+  producerOf, rememberTranscriptPath, report, requests, resumeCheckout, save, serial, sessions,
   type SessionState, stateFor, stillActive, storedBinding, transcriptPathOf,
 } from '../core/session-state'
+import type { Host } from '../core/host'
 import { offerOnboarding, type OnboardingStore, releaseOnboarding } from './setup'
 import { checkoutRoot, joinedBindingAt } from '../sharing/share'
 import { restoreAbandonedWorktrees, storedChildBinding } from '../subagents/subagents'
@@ -46,19 +47,19 @@ export function activationIncomplete(runtime: SessionState): boolean {
  * A prompt or a resume is an automatic session's repair path: re-run whatever activation steps are
  * missing, using the upload the session already recorded. Every step is idempotent, so this is safe.
  */
-export function retryAutomaticActivation($: Runtime, session: string, runtime: SessionState) {
+export function retryAutomaticActivation(host: Host, session: string, runtime: SessionState) {
   const binding = runtime.binding
   // The activation reports its own failures in the band, and the next prompt retries it.
   if (binding?.autoUpload && !binding.thread && binding.checkout)
-    void activateAutomatically($, session, binding.checkout, binding.autoUpload).catch(() => {})
+    void activateAutomatically(host, session, binding.checkout, binding.autoUpload).catch(() => {})
 }
 
-export async function activate($: Runtime, session: string, isCurrent = () => true) {
+export async function activate(host: Host, session: string, isCurrent = () => true) {
   const epoch = ++activation.epoch
   const ownsActivation = () => epoch === activation.epoch && isCurrent()
   activation.activating = session
   try {
-    const config = await claudeConfigDir($)
+    const config = await claudeConfigDir(host)
     if (!ownsActivation()) return
     if (!config) throw new Error('Cannot locate Claude configuration; set CLAUDE_CONFIG_DIR.')
     pluginData = `${config}/delta-plugin`
@@ -66,72 +67,72 @@ export async function activate($: Runtime, session: string, isCurrent = () => tr
     if (activation.session !== session) await stopConversation()
     if (!ownsActivation()) return
     activation.session = session
-    let binding = await serial(() => load($, session))
+    let binding = await serial(() => load(host, session))
     if (!ownsActivation()) return
     // A session that resumes is live again: drop the end marker so bounded cleanup never removes it.
     if (binding.endedAt !== undefined) {
       const live = { ...binding }
       delete live.endedAt
-      await serial(() => save($, live))
+      await serial(() => save(host, live))
       binding = live
     }
     // A conversation Claude Code moved here from a recording session keeps recording, here.
     if (continuationCandidate(session, binding)) {
-      const parent = await continuedFrom($, session)
+      const parent = await continuedFrom(host, session)
       if (!ownsActivation()) return
-      if (parent) binding = await adoptContinuation($, session, parent.session) ?? binding
+      if (parent) binding = await adoptContinuation(host, session, parent.session) ?? binding
       if (!ownsActivation()) return
     }
     const runtime = stateFor(session)
     runtime.binding = binding
     runtime.captureFailure ??= binding.captureFailure
     if (binding.joinTransition) {
-      await report($, new Error(`The join directory transition is incomplete. Run /delta-join ${binding.joinTransition.locator} to retry the saved mount${binding.directory ? ` at ${binding.directory}` : ''}; prompts remain blocked.`))
+      await report(host, new Error(`The join directory transition is incomplete. Run /delta-join ${binding.joinTransition.locator} to retry the saved mount${binding.directory ? ` at ${binding.directory}` : ''}; prompts remain blocked.`))
       return
     }
     // A session Desktop started in a hand-off's folder joins it before its first prompt.
     if (!binding.snapshot && !binding.joined && !runtime.handoffClaim) {
-      const handoff = await pendingHandoff($, await $.session.cwd())
+      const handoff = await pendingHandoff(host, await host.session.cwd())
       if (!ownsActivation()) return
       if (handoff) {
-        runtime.handoffClaim = claimHandoff($, session, handoff)
+        runtime.handoffClaim = claimHandoff(host, session, handoff)
         return
       }
     }
     endDeliveryFailures(runtime)
-    scheduleOutboxCleanup($, binding)
+    scheduleOutboxCleanup(host, binding)
     // Bounded store retention: entries for sessions that ended long ago are pruned only when they
     // hold nothing a later session would need. It never blocks activation.
-    void pruneStore($).catch(() => {})
+    void pruneStore(host).catch(() => {})
     // An automatic session whose activation never finished, for example because Delta was unreachable
     // when it started, resumes that activation rather than waiting for a thread it does not have yet.
     if (activationIncomplete(runtime)) {
-      retryAutomaticActivation($, session, runtime)
+      retryAutomaticActivation(host, session, runtime)
       return
     }
     // A shared session's own checkout stays synchronized only while this process runs its mount.
     const needsCheckoutMount = checkoutNeedsMount(session, binding)
     if (binding.snapshot && boundDirectory(binding)) {
       pauseCheckout(runtime, 'watcher')
-      try { await requireContract($, session) }
+      try { await requireContract(host, session) }
       catch (error) {
         if (!ownsActivation()) return
         const text = `Delta participation is blocked: ${errorText(error)}`
         // Only an explicit /delta share or /delta join after updating Delta lifts this pause.
         pauseCheckout(runtime, 'delivery', text)
         runtime.joinFailure = text
-        setProgress($, text, 'error')
-        await $.ui.log(text, { to: 'transcript' })
+        setProgress(host, text, 'error')
+        await host.ui.log(text, { to: 'transcript' })
         return
       }
       // A session whose mounts this process has not confirmed is resuming: Claude may be anywhere.
       if (binding.joined && !runtime.mounted) {
-        beginRestore($, session)
+        beginRestore(host, session)
         return
       }
     }
     if (needsCheckoutMount) {
-      beginRestoreCheckout($, session)
+      beginRestoreCheckout(host, session)
       return
     }
     if (binding.snapshot && boundDirectory(binding)) {
@@ -139,35 +140,35 @@ export async function activate($: Runtime, session: string, isCurrent = () => tr
         // Offline recording does not wait for the watcher: start it in the background and let a
         // prompt or the outbox proceed meanwhile.
         resumeCheckout(runtime, 'watcher')
-        void startConversation($, session).catch((error) => { if (ownsActivation()) void report($, error) })
+        void startConversation(host, session).catch((error) => { if (ownsActivation()) void report(host, error) })
       } else {
-        try { await startParticipation($, session, binding, ownsActivation) }
-        catch (error) { if (ownsActivation()) await report($, error) }
+        try { await startParticipation(host, session, binding, ownsActivation) }
+        catch (error) { if (ownsActivation()) await report(host, error) }
       }
       // An automatic session follows Delta's background upload on its own timer, so the link appears
       // even when the watcher never becomes ready.
-      if (ownsActivation() && binding.autoUpload) followUpload($, session)
-      if (ownsActivation() && !isPaused(runtime)) await recoverExecution($, session)
+      if (ownsActivation() && binding.autoUpload) followUpload(host, session)
+      if (ownsActivation() && !isPaused(runtime)) await recoverExecution(host, session)
     }
     if (ownsActivation() && !runtime.captureFailure && binding.thread && binding.pending.length)
-      void drain($, session).catch((error) => report($, error))
+      void drain(host, session).catch((error) => report(host, error))
     if (ownsActivation() && binding.children?.length)
-      void restoreChildren($, session, binding).catch((error) => report($, error))
+      void restoreChildren(host, session, binding).catch((error) => report(host, error))
   } finally {
     if (epoch === activation.epoch) activation.activating = ''
   }
 }
 
 /** Resume the recovery steps activation skipped while it waited for a mount. */
-export async function finishRestoredActivation($: Runtime, session: string, binding: Binding, owns: () => boolean) {
+export async function finishRestoredActivation(host: Host, session: string, binding: Binding, owns: () => boolean) {
   const runtime = stateFor(session)
-  if (binding.autoUpload) followUpload($, session)
-  if (!isPaused(runtime)) await recoverExecution($, session)
+  if (binding.autoUpload) followUpload(host, session)
+  if (!isPaused(runtime)) await recoverExecution(host, session)
   if (!owns()) return
   if (!runtime.captureFailure && binding.pending.length)
-    void drain($, session).catch((error) => report($, error))
+    void drain(host, session).catch((error) => report(host, error))
   if (binding.children?.length)
-    void restoreChildren($, session, binding).catch((error) => report($, error))
+    void restoreChildren(host, session, binding).catch((error) => report(host, error))
 }
 
 /**
@@ -196,11 +197,11 @@ const MAX_TRANSCRIPT_MISSES = 3
  * `session.start` ran for a session, which has been activated by now: work out how it started. A session
  * that ended while the hook ran starts nothing.
  */
-export async function noticeStart($: Runtime, session: string) {
+export async function noticeStart(host: Host, session: string) {
   if (activation.session !== session) return
   // A session started again under the id of one that ended starts anew.
   if (endedSession === session) endedSession = undefined
-  await noticeSession($, session)
+  await noticeSession(host, session)
 }
 
 /**
@@ -213,9 +214,9 @@ export async function noticeStart($: Runtime, session: string) {
  * returns at once once the session has begun. It waits only until the source is known and the boundary
  * open: the rest of the start (`activate`) appends rows of its own, whose hooks call this too.
  */
-export async function noticeSession($: Runtime, session?: string) {
+export async function noticeSession(host: Host, session?: string) {
   if (startedSession !== undefined && (session === undefined || session === startedSession)) return
-  const id = session ?? await $.session.id()
+  const id = session ?? await host.session.id()
   if (id === endedSession) return
   const running = noticing.get(id)
   if (running) {
@@ -226,24 +227,24 @@ export async function noticeSession($: Runtime, session?: string) {
     startedSession = id
     return
   }
-  const deciding = decideStart($, id)
+  const deciding = decideStart(host, id)
   noticing.set(id, deciding)
   let begins: boolean
   try { begins = await deciding } finally { noticing.delete(id) }
-  if (begins) void beginSession($, id).catch((error) => report($, error))
+  if (begins) void beginSession(host, id).catch((error) => report(host, error))
 }
 
 /**
  * Work out how a session started, and open its capture boundary when it is new. Whether its start is
  * still to run: the session a join's `/clear` starts is the join's.
  */
-async function decideStart($: Runtime, session: string): Promise<boolean> {
+async function decideStart(host: Host, session: string): Promise<boolean> {
   const after = successor
   successor = undefined
   let source: string = after === 'join' ? 'clear' : after ?? 'resume'
   if (!after) {
     // A failed read must not take a session that may hold history for a new one, which records from now on.
-    try { source = await $.session.turns() === 0 ? 'startup' : 'resume' } catch {}
+    try { source = await host.session.turns() === 0 ? 'startup' : 'resume' } catch {}
   }
   sessionStarts.set(session, source)
   startedSession = session
@@ -258,14 +259,14 @@ async function decideStart($: Runtime, session: string): Promise<boolean> {
  * recording off the hook's critical path. Only a new session (startup or clear) is recorded
  * automatically; one with history is offered setup and keeps whatever policy it had.
  */
-async function beginSession($: Runtime, session: string) {
+async function beginSession(host: Host, session: string) {
   // A session that ended without its end hook left its isolated subagents' worktrees beside links.
-  void restoreAbandonedWorktrees($).catch((error) => report($, error))
+  void restoreAbandonedWorktrees(host).catch((error) => report(host, error))
   // Claude names a transcript by its working directory and session. A new session's file appears with
   // its first row, and the first turn's end finds it then.
   try {
-    const expected = await expectedTranscript($, session)
-    if (expected && !transcriptPathOf(session) && await $.fs.exists(expected)) rememberTranscriptPath(session, expected)
+    const expected = await expectedTranscript(host, session)
+    if (expected && !transcriptPathOf(session) && await host.fs.exists(expected)) rememberTranscriptPath(session, expected)
   } catch { /* the first turn's end looks for the transcript again */ }
   // A session that ended meanwhile, which forgets its start, starts nothing.
   if (!sessionStarts.has(session)) return
@@ -280,18 +281,18 @@ async function beginSession($: Runtime, session: string) {
   // is activated again, which takes the conversation over now that its start is known.
   let activates = activation.session !== session || !binding
   if (!activates && binding && continuationCandidate(session, binding)) {
-    try { activates = await continuedFrom($, session) !== undefined }
-    catch (error) { await report($, error) }
+    try { activates = await continuedFrom(host, session) !== undefined }
+    catch (error) { await report(host, error) }
   }
   if (activates) {
-    try { await activate($, session) }
-    catch (error) { await report($, error) }
+    try { await activate(host, session) }
+    catch (error) { await report(host, error) }
   }
   // The offer and activation never delay a prompt.
   const midSession = !newSessionFor(session)
-  $.clock.after(0, () => {
+  host.clock.after(0, () => {
     if (midSession && (activation.session !== session || requests.join)) return
-    void startSession($, session, midSession).catch((error) => { void report($, error) })
+    void startSession(host, session, midSession).catch((error) => { void report(host, error) })
   })
 }
 
@@ -299,19 +300,19 @@ async function beginSession($: Runtime, session: string) {
  * Remember where a turn left the transcript and its title. Looking for the file stops after a few
  * misses, as a session that keeps no transcript would otherwise search for it at every turn.
  */
-export async function followTranscript($: Runtime, session: string) {
+export async function followTranscript(host: Host, session: string) {
   if ((transcriptMisses.get(session) ?? 0) >= MAX_TRANSCRIPT_MISSES) return
-  const path = await findTranscript($, session, transcriptPathOf(session))
+  const path = await findTranscript(host, session, transcriptPathOf(session))
   if (!path) {
     transcriptMisses.set(session, (transcriptMisses.get(session) ?? 0) + 1)
     return
   }
-  await rememberTranscript($, session, path)
-  await recordTitle($, session, path)
+  await rememberTranscript(host, session, path)
+  await recordTitle(host, session, path)
 }
 
 /** A session that ended forgets how it started and its open setup offer, and releases its capture boundary. */
-export async function forgetSessionStart($: Runtime, session: string, reason: string) {
+export async function forgetSessionStart(host: Host, session: string, reason: string) {
   sessionStarts.delete(session)
   transcriptMisses.delete(session)
   // Claude starts the session after this one with no `session.start`, so the reason it ended says how.
@@ -323,7 +324,7 @@ export async function forgetSessionStart($: Runtime, session: string, reason: st
   const offer = openOnboarding.get(session)
   openOnboarding.delete(session)
   if (offer) {
-    try { await releaseOnboarding(onboardingStore($), offer) }
+    try { await releaseOnboarding(onboardingStore(host), offer) }
     catch { /* the offer then simply stays consumed, as before */ }
   }
   // A session that ended can never reach its capture boundary; release anything held on it.
@@ -341,13 +342,13 @@ const CONTINUATION_HORIZON_MS = 10 * 60 * 1000
  * opening the agents overview), and the new session starts with a copy under a new ID. The record
  * is undocumented and written on a best-effort basis, so its absence proves nothing.
  */
-async function continuationOf($: Runtime, transcript: string): Promise<string | undefined> {
-  const { size } = await $.fs.stat(transcript)
+async function continuationOf(host: Host, transcript: string): Promise<string | undefined> {
+  const { size } = await host.fs.stat(transcript)
   let text = ''
-  try { await readFrom($, transcript, Math.max(0, size - CONTINUATION_WINDOW_BYTES), (piece) => { text += piece }) }
+  try { await readFrom(host, transcript, Math.max(0, size - CONTINUATION_WINDOW_BYTES), (piece) => { text += piece }) }
   catch {
     if (size > FS_READ_LIMIT) return
-    text = await $.fs.read(transcript) as string
+    text = await host.fs.read(transcript)
   }
   let continuation: string | undefined
   for (const line of text.split('\n')) {
@@ -369,19 +370,19 @@ export function continuationCandidate(session: string, binding: Binding): boolea
 }
 
 /** The recording session whose conversation Claude Code continued as `session`, if any. */
-export async function continuedFrom($: Runtime, session: string): Promise<Binding | undefined> {
+export async function continuedFrom(host: Host, session: string): Promise<Binding | undefined> {
   // A Claude build without `$.store.keys` cannot enumerate the store; the continuation goes unrecorded.
   let keys: string[]
-  try { keys = await $.store.keys() } catch { return }
-  const now = await $.clock.now()
+  try { keys = await host.store.keys() } catch { return }
+  const now = await host.clock.now()
   for (const storeKey of keys) {
     if (!storeKey.startsWith('session:') || storeKey === key(session)) continue
-    const candidate = await storedBinding($, storeKey)
+    const candidate = await storedBinding(host, storeKey)
     if (!candidate?.thread || !candidate.snapshot) continue
     if (candidate.continuedIn === session) return candidate
     if (candidate.continuedIn || !candidate.transcript) continue
     if (candidate.endedAt !== undefined && candidate.endedAt < now - CONTINUATION_HORIZON_MS) continue
-    try { if (await continuationOf($, candidate.transcript) === session) return candidate }
+    try { if (await continuationOf(host, candidate.transcript) === session) return candidate }
     catch { /* an unreadable transcript continues nothing */ }
   }
 }
@@ -392,13 +393,13 @@ export async function continuedFrom($: Runtime, session: string): Promise<Bindin
  * re-mounts the same checkouts under this process. The parent is marked first; from then on it
  * stages and delivers nothing, so the two never write the same sequence.
  */
-export async function adoptContinuation($: Runtime, session: string, parentSession: string): Promise<Binding | undefined> {
+export async function adoptContinuation(host: Host, session: string, parentSession: string): Promise<Binding | undefined> {
   return serial(async () => {
-    const current = await load($, session)
+    const current = await load(host, session)
     if (current.thread || current.snapshot) return
-    const parent = await load($, parentSession)
+    const parent = await load(host, parentSession)
     if (!parent.thread || (parent.continuedIn && parent.continuedIn !== session)) return
-    await save($, { ...parent, continuedIn: session })
+    await save(host, { ...parent, continuedIn: session })
     const adopted: Binding = {
       ...parent, session, producer: producerOf(parent),
       owner: parent.joined ? parent.owner ?? parent.session : parent.owner,
@@ -409,36 +410,36 @@ export async function adoptContinuation($: Runtime, session: string, parentSessi
     // Subagent bindings are stored under the session that ran them, which keeps delivering them.
     delete adopted.children
     // The copied transcript already shows the remote items the parent added for Claude.
-    const ledger = await $.store.get(ledgerKey(parentSession))
-    if (ledger !== undefined && await $.store.get(ledgerKey(session)) === undefined)
-      await $.store.set(ledgerKey(session), ledger)
-    await save($, adopted)
-    await $.ui.log(`Delta: this conversation continued from Claude session ${parentSession}; recording carries on in this session.`, { to: 'debug' })
+    const ledger = await host.store.get(ledgerKey(parentSession))
+    if (ledger !== undefined && await host.store.get(ledgerKey(session)) === undefined)
+      await host.store.set(ledgerKey(session), ledger)
+    await save(host, adopted)
+    await host.ui.log(`Delta: this conversation continued from Claude session ${parentSession}; recording carries on in this session.`, { to: 'debug' })
     return adopted
   })
 }
 
 /** Keep a recording session's transcript path current, since a `/cd` can move the file. */
-export async function rememberTranscript($: Runtime, session: string, transcript: string) {
+export async function rememberTranscript(host: Host, session: string, transcript: string) {
   if (!rememberTranscriptPath(session, transcript)) return
   await serial(async () => {
-    const current = await load($, session)
-    if (current.thread && !current.continuedIn) await save($, current)
+    const current = await load(host, session)
+    if (current.thread && !current.continuedIn) await save(host, current)
   })
 }
 
 /** Whether this session's conversation moved to another session, which now owns its mounts. */
-export async function handedOff($: Runtime, session: string): Promise<boolean> {
-  const binding = await storedBinding($, key(session))
+export async function handedOff(host: Host, session: string): Promise<boolean> {
+  const binding = await storedBinding(host, key(session))
   if (!binding?.thread) return false
   if (binding.continuedIn) return true
   const transcript = transcriptPathOf(session) ?? binding.transcript
   if (!transcript) return false
   let continuation: string | undefined
-  try { continuation = await continuationOf($, transcript) } catch { return false }
+  try { continuation = await continuationOf(host, transcript) } catch { return false }
   if (!continuation || continuation === session) return false
   // Marking here lets the continuation adopt even before its own start finds the record.
-  await serial(async () => save($, { ...await load($, session), continuedIn: continuation }))
+  await serial(async () => save(host, { ...await load(host, session), continuedIn: continuation }))
   return true
 }
 
@@ -482,38 +483,38 @@ export async function captureDecided(session: string): Promise<void> {
  * new one but never auto-activated, since part of it already happened unrecorded.
  * Everything here runs off the startup hook's critical path.
  */
-export async function startSession($: Runtime, session: string, loadedMidSession = false) {
-  const env = setupEnv($)
+export async function startSession(host: Host, session: string, loadedMidSession = false) {
+  const env = setupEnv(host)
   const newSession = newSessionFor(session)
   let root: string
   let policy: ProjectPolicy
   try {
-    try { root = await checkoutRoot($) }
+    try { root = await checkoutRoot(host) }
     // Outside a checkout there is nothing to record or offer.
     catch { return }
     const path = policyPath(root)
     try { policy = readProjectPolicy(await env.readFile(path)).policy }
     catch (error) {
-      await notifyOnce($, `Delta settings at ${path} couldn't be read (${errorText(error)}). Until it's fixed, only sessions you share with /delta-share sync.`)
+      await notifyOnce(host, `Delta settings at ${path} couldn't be read (${errorText(error)}). Until it's fixed, only sessions you share with /delta-share sync.`)
       return
     }
     if (policy.problem)
-      await notifyOnce($, `Delta settings at ${path} couldn't be used (${policy.problem}). Until it's fixed, only sessions you share with /delta-share sync. Run /delta-setup to replace it.`)
-    if (newSession && recordsAutomatically(policy) && await joinedBindingAt($, root))
-      await notifyOnce($, `${root} is a worktree of a Delta thread a Claude session joined, so this session isn't recorded automatically. Run /delta-join with that thread's link to record in it.`)
+      await notifyOnce(host, `Delta settings at ${path} couldn't be used (${policy.problem}). Until it's fixed, only sessions you share with /delta-share sync. Run /delta-setup to replace it.`)
+    if (newSession && recordsAutomatically(policy) && await joinedBindingAt(host, root))
+      await notifyOnce(host, `${root} is a worktree of a Delta thread a Claude session joined, so this session isn't recorded automatically. Run /delta-join with that thread's link to record in it.`)
     else if (newSession && recordsAutomatically(policy))
-      await activateAutomatically($, session, root,
+      await activateAutomatically(host, session, root,
         { mode: policy.mode === 'private' ? 'private' : 'organization', organization: policy.organization! })
   } finally {
     // Nothing below records, so the session's activity never waits on the setup offer's dialog.
     decideCapture(session)
   }
   // Headless sessions get no reminder and are never offered setup; only an interactive surface shows them.
-  if (!hasInteractiveSurface(await $.session.surfaces())) return
+  if (!hasInteractiveSurface(await host.session.surfaces())) return
   stateFor(session).reminder = syncReminder(policy)
-  $.ui.invalidate('ui.render')
+  host.ui.invalidate()
   try {
-    await offerOnboarding(env, claudeInteraction($), onboardingStore($), {
+    await offerOnboarding(env, claudeInteraction(host), onboardingStore(host), {
       root, configured: policy.configured, newToPlugin: newSession || loadedMidSession,
       joined: !!stateFor(session).binding?.joined, joining: !!requests.join,
     }, (key) => { openOnboarding.set(session, key) })
@@ -521,25 +522,25 @@ export async function startSession($: Runtime, session: string, loadedMidSession
     openOnboarding.delete(session)
   }
   // A setup the offer opened may have saved a setting; the band follows it.
-  await refreshReminder($, session)
+  await refreshReminder(host, session)
 }
 
 /** Re-read the checkout's setting after a setup, so the band's reminder follows what was saved. */
-export async function refreshReminder($: Runtime, session: string) {
+export async function refreshReminder(host: Host, session: string) {
   try {
-    const root = await checkoutRoot($)
-    stateFor(session).reminder = syncReminder(readProjectPolicy(await setupEnv($).readFile(policyPath(root))).policy)
+    const root = await checkoutRoot(host)
+    stateFor(session).reminder = syncReminder(readProjectPolicy(await setupEnv(host).readFile(policyPath(root))).policy)
   } catch { /* outside a checkout or unreadable: the band keeps what it had */ }
-  $.ui.invalidate('ui.render')
+  host.ui.invalidate()
 }
 
 /** The onboarding marker each session's still-open setup offer holds, cleared if the session ends first. */
 const openOnboarding = new Map<string, string>()
 
-function onboardingStore($: Runtime): OnboardingStore {
+function onboardingStore(host: Host): OnboardingStore {
   return {
-    get: (key) => $.store.get(key),
-    set: (key, value) => $.store.set(key, value).then(() => undefined),
+    get: (key) => host.store.get(key),
+    set: (key, value) => host.store.set(key, value).then(() => undefined),
   }
 }
 
@@ -569,31 +570,31 @@ export const autoActivating = new Map<string, Promise<void>>()
  * rather than dropped. Every await re-checks ownership: a session that ended, or that switched away
  * while a step was pending, leaves no half-initialized binding behind.
  */
-function activateAutomatically($: Runtime, session: string, root: string, upload: AutoUpload): Promise<void> {
+function activateAutomatically(host: Host, session: string, root: string, upload: AutoUpload): Promise<void> {
   const running = autoActivating.get(session)
   if (running) return running
   const ownsActivation = stillActive(session)
   const task = (async () => {
     const runtime = stateFor(session)
     if (activation.session !== session || requests.join) return
-    const existing = await serial(() => load($, session))
+    const existing = await serial(() => load(host, session))
     if (!ownsActivation()) return
     // A session that already holds a thread, or a binding that is not ours, is never re-created.
     if (existing.thread || (existing.snapshot && !existing.autoUpload) || existing.joined || existing.joinTransition) return
     // A fresh session checks the account against the policy alongside the contract, so a repository
     // this account cannot record to is reported before anything is staged.
-    const misconfiguration = existing.snapshot ? undefined : policyMisconfiguration($, upload.organization)
+    const misconfiguration = existing.snapshot ? undefined : policyMisconfiguration(host, upload.organization)
     try {
       // Refuse an incompatible CLI before persisting anything, so it leaves the session manual rather
       // than holding a half-initialized automatic binding.
-      await requireContract($, session)
+      await requireContract(host, session)
       if (!ownsActivation()) return
       const refusal = await misconfiguration
       if (!ownsActivation()) return
-      const interactive = hasInteractiveSurface(await $.session.surfaces())
+      const interactive = hasInteractiveSurface(await host.session.surfaces())
       if (!ownsActivation()) return
       if (refusal && !(refusal === SIGNED_OUT_REFUSAL && interactive)) {
-        await stopAutomaticRecording($, session, root, refusal)
+        await stopAutomaticRecording(host, session, root, refusal)
         return
       }
       // The session is new, so its snapshot is already taken: no history is exported, and live capture
@@ -602,7 +603,7 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
       // so nothing drains against a checkout that is not attached or a thread that is not uploaded.
       if (!existing.snapshot) {
         const staged: Binding = { session, snapshot: true, next: 1, pending: [], checkout: root, autoUpload: upload }
-        await serial(() => save($, staged))
+        await serial(() => save(host, staged))
         runtime.binding = staged
       }
       if (!ownsActivation()) return
@@ -615,15 +616,15 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
           if (!ownsActivation()) throw new Error('Delta automatic sign-in stopped')
         }
         try {
-          await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
+          await requireAuthentication(await authenticationHost(host), await resolveCli(host), check, async (text) => {
             await check()
-            setProgress($, 'Waiting for Delta sign-in…', 'active')
-            await $.ui.log(text, { to: 'transcript' })
+            setProgress(host, 'Waiting for Delta sign-in…', 'active')
+            await host.ui.log(text, { to: 'transcript' })
           }, '/delta-share')
         } catch (error) {
           if (!ownsActivation()) return
           // A cancelled or failed login needs an explicit retry, never another browser on each prompt.
-          await stopAutomaticRecording($, session, root, {
+          await stopAutomaticRecording(host, session, root, {
             band: 'Not syncing: Delta sign-in incomplete · /delta-share',
             // An access requirement already says nothing was synced and how to retry.
             transcript: error instanceof AccessRequiredError ? error.message
@@ -634,50 +635,50 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
         if (!ownsActivation()) return
         if (refusal === SIGNED_OUT_REFUSAL) {
           // Only the signed-in account can answer which organizations it belongs to.
-          const afterSignIn = await policyMisconfiguration($, upload.organization)
+          const afterSignIn = await policyMisconfiguration(host, upload.organization)
           if (!ownsActivation()) return
           if (afterSignIn) {
-            await stopAutomaticRecording($, session, root, afterSignIn)
+            await stopAutomaticRecording(host, session, root, afterSignIn)
             return
           }
         }
       }
-      setProgress($, 'Connecting this session to Delta…', 'active')
-      const created = await threadCreate($, {
+      setProgress(host, 'Connecting this session to Delta…', 'active')
+      const created = await threadCreate(host, {
         externalId: session, organization: { id: upload.organization, visibility: upload.mode },
       })
       if (!ownsActivation()) return
-      const reference = await attachWorktree($, root, created.thread_id, existing.checkoutReference, undefined, session)
+      const reference = await attachWorktree(host, root, created.thread_id, existing.checkoutReference, undefined, session)
       if (!ownsActivation()) return
-      await serial(async () => save($, { ...await load($, session), checkoutReference: reference, pendingWorktree: undefined }))
-      await mountCheckout($, { session, checkout: root, checkoutReference: reference }, async () => {
+      await serial(async () => save(host, { ...await load(host, session), checkoutReference: reference, pendingWorktree: undefined }))
+      await mountCheckout(host, { session, checkout: root, checkoutReference: reference }, async () => {
         if (!ownsActivation()) throw new Error('The session ended while its checkout was being mounted')
       })
       if (!ownsActivation()) return
       // Every step succeeded: now the thread and checkout become visible to drain and verification.
-      await serial(async () => save($, {
-        ...await load($, session), thread: created.thread_id, checkout: root, checkoutReference: reference,
+      await serial(async () => save(host, {
+        ...await load(host, session), thread: created.thread_id, checkout: root, checkoutReference: reference,
       }))
       if (!ownsActivation()) return
-      runtime.binding = await serial(() => load($, session))
-      void startConversation($, session).catch((error) => { if (ownsActivation()) void report($, error) })
-      void drain($, session).catch((error) => { if (ownsActivation()) void report($, error) })
+      runtime.binding = await serial(() => load(host, session))
+      void startConversation(host, session).catch((error) => { if (ownsActivation()) void report(host, error) })
+      void drain(host, session).catch((error) => { if (ownsActivation()) void report(host, error) })
       // The band now follows Delta's background upload until Delta confirms it, whether or not the
       // watcher becomes ready: a status read is what reports the thread's link.
-      clearProgress($)
-      followUpload($, session)
+      clearProgress(host)
+      followUpload(host, session)
     } catch (error) {
       if (!ownsActivation()) return
       // Retrying cannot change a permanent answer, so the session stops recording instead of queuing
       // records that would never be sent.
       if (classifyCommandFailure(error) === 'permanent') {
-        await stopAutomaticRecording($, session, root, activationRefusal(error, upload.organization))
+        await stopAutomaticRecording(host, session, root, activationRefusal(error, upload.organization))
         return
       }
       // Only a staged session gets this far: everything before staging fails permanently.
       const text = `Delta couldn't start syncing this session: ${errorText(error)}. Nothing is lost; Delta retries on your next prompt.`
-      setProgress($, text, 'error')
-      await notifyOnce($, text)
+      setProgress(host, text, 'error')
+      await notifyOnce(host, text)
     }
   })()
   autoActivating.set(session, task)
@@ -706,10 +707,10 @@ function notMemberRefusal(organization: string): ActivationRefusal {
  * refuses: an empty or unreadable list (Delta not running, memberships not loaded yet) lets
  * activation proceed, and `thread create` checks membership again.
  */
-async function policyMisconfiguration($: Runtime, organization: string): Promise<ActivationRefusal | undefined> {
+async function policyMisconfiguration(host: Host, organization: string): Promise<ActivationRefusal | undefined> {
   try {
     // Bounded like the contract check it runs beside, since new-session activity waits on both.
-    const organizations = await listOrganizations($, CONTRACT_TIMEOUT_MS)
+    const organizations = await listOrganizations(host, CONTRACT_TIMEOUT_MS)
     if (organizations.length && !organizations.some((known) => known.id === organization))
       return notMemberRefusal(organization)
   } catch (error) {
@@ -739,29 +740,29 @@ function activationRefusal(error: unknown, organization: string): ActivationRefu
  * The band shows the refusal for the whole session. The transcript explains it once per repository
  * and refusal, remembered in the store, so every new session in a misconfigured repository stays quiet.
  */
-async function stopAutomaticRecording($: Runtime, session: string, root: string, refusal: ActivationRefusal) {
+async function stopAutomaticRecording(host: Host, session: string, root: string, refusal: ActivationRefusal) {
   await serial(async () => {
-    const binding = await load($, session)
+    const binding = await load(host, session)
     if (!binding.autoUpload || binding.thread) return
-    await $.store.delete(key(session))
+    await host.store.delete(key(session))
     const runtime = stateFor(session)
-    runtime.binding = await load($, session)
+    runtime.binding = await load(host, session)
     runtime.cleanedThrough = undefined
     // Inside `serial`, so a share that starts next cannot stage a record this removal deletes. The
     // outbox is only disk, so a failed removal leaves orphans, never a wrong binding.
-    try { await collectAcknowledgedOutbox($, { session, root: outbox, next: binding.next, pending: [] }) }
+    try { await collectAcknowledgedOutbox(host, { session, root: outbox, next: binding.next, pending: [] }) }
     catch (error) {
-      try { await $.ui.log(`Delta outbox removal after stopping automatic recording failed: ${String(error)}`, { to: 'debug' }) }
+      try { await host.ui.log(`Delta outbox removal after stopping automatic recording failed: ${String(error)}`, { to: 'debug' }) }
       catch { /* the debug log is best effort; the orphaned files harm nothing */ }
     }
   })
-  finishProgress($, refusal.band, 'error')
-  const marker = `auto-refused:${await setupEnv($).gitCommonDir() ?? root}`
+  finishProgress(host, refusal.band, 'error')
+  const marker = `auto-refused:${await setupEnv(host).gitCommonDir() ?? root}`
   try {
-    if (await $.store.get(marker) === refusal.transcript) return
-    await $.store.set(marker, refusal.transcript)
+    if (await host.store.get(marker) === refusal.transcript) return
+    await host.store.set(marker, refusal.transcript)
   } catch { /* an unreadable marker only repeats the explanation */ }
-  await $.ui.log(refusal.transcript, { to: 'transcript' })
+  await host.ui.log(refusal.transcript, { to: 'transcript' })
 }
 
 /** How long after a session really ends its store entries may be removed; resuming into them dies past it. */
@@ -775,24 +776,24 @@ const STORE_HORIZON_MS = 30 * 24 * 60 * 60 * 1000
  * The store is shared by every Claude process and has no transactions, so each session is read,
  * checked, and deleted in turn: a resume elsewhere can only be lost in that one read-to-delete window.
  */
-async function pruneStore($: Runtime) {
+async function pruneStore(host: Host) {
   // A Claude build without `$.store.keys` cannot enumerate the store, so retention is skipped there.
   let keys: string[]
-  try { keys = await $.store.keys() } catch { return }
-  const now = await $.clock.now()
+  try { keys = await host.store.keys() } catch { return }
+  const now = await host.clock.now()
   const ids = new Set(keys.flatMap((storeKey) => /^(?:session|appended):(.+)$/.exec(storeKey)?.[1] ?? []))
   for (const id of ids) {
     if (sessions.has(id)) continue
-    const binding = await storedBinding($, key(id))
+    const binding = await storedBinding(host, key(id))
     if (typeof binding?.endedAt !== 'number' || binding.endedAt > now - STORE_HORIZON_MS ||
         binding.pending?.length || binding.captureFailure || binding.joinTransition) continue
     // A subagent's undelivered records keep its session, like the session's own.
     const recorded = await Promise.all((binding.children ?? []).map((agentId) =>
-      storedChildBinding($, id, agentId)))
+      storedChildBinding(host, id, agentId)))
     if (recorded.some((child) => child?.pending.length)) continue
-    for (const agentId of binding.children ?? []) await $.store.delete(childKey(id, agentId))
-    await $.store.delete(key(id))
-    await $.store.delete(ledgerKey(id))
-    for (const storeKey of keys) if (storeKey.startsWith(drawnRowKey(id, ''))) await $.store.delete(storeKey)
+    for (const agentId of binding.children ?? []) await host.store.delete(childKey(id, agentId))
+    await host.store.delete(key(id))
+    await host.store.delete(ledgerKey(id))
+    for (const storeKey of keys) if (storeKey.startsWith(drawnRowKey(id, ''))) await host.store.delete(storeKey)
   }
 }

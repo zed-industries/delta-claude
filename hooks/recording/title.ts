@@ -1,7 +1,8 @@
 import { conversationText } from '../watch/conversation'
 import { drain, stageRecord } from './delivery'
 import { isJsonObject } from '../core/json'
-import { load, report, type Runtime, save, serial, stateFor } from '../core/session-state'
+import { load, report, save, serial, stateFor } from '../core/session-state'
+import type { Host } from '../core/host'
 import { cutsSurrogatePair } from '../core/text'
 
 /** A thread title keeps at most this much. */
@@ -114,22 +115,22 @@ export function forgetTitleReader(session: string) {
  * shared session names its thread; a joined session takes part in someone else's. Nothing here can fail a turn or sharing: a title that cannot be read or staged is skipped, and
  * the next turn's end tries again.
  */
-export async function recordTitle($: Runtime, session: string, transcript: string) {
+export async function recordTitle(host: Host, session: string, transcript: string) {
   const binding = stateFor(session).binding
   if (!binding?.snapshot || binding.joined || !binding.thread) return
   try {
-    const title = await readTitle($, session, transcript)
+    const title = await readTitle(host, session, transcript)
     if (title === undefined || title === stateFor(session).binding?.title) return
     const staged = await serial(async () => {
-      const current = await load($, session)
+      const current = await load(host, session)
       if (!current.snapshot || current.joined || current.title === title) return false
-      await save($, { ...await stageRecord($, current, { update: { sessionUpdate: 'session_info_update', title } }), title })
+      await save(host, { ...await stageRecord(host, current, { update: { sessionUpdate: 'session_info_update', title } }), title })
       return true
     })
     // Once staged, the title is delivered and reported like every other record.
-    if (staged) void drain($, session).catch((error) => report($, error))
+    if (staged) void drain(host, session).catch((error) => report(host, error))
   } catch (error) {
-    await $.ui.log(`Couldn't record this session's title: ${String(error)}`, { to: 'debug' })
+    await host.ui.log(`Couldn't record this session's title: ${String(error)}`, { to: 'debug' })
   }
 }
 
@@ -144,10 +145,10 @@ export async function recordTitle($: Runtime, session: string, transcript: strin
  * {@link FS_READ_LIMIT}; past that it has no title to offer. A read already running is not
  * doubled; the next turn's end picks up what it left.
  */
-async function readTitle($: Runtime, session: string, transcript: string): Promise<string | undefined> {
+async function readTitle(host: Host, session: string, transcript: string): Promise<string | undefined> {
   const previous = titleReaders.get(session)
   if (previous?.reading) return previous.scanner.title
-  const { size } = await $.fs.stat(transcript)
+  const { size } = await host.fs.stat(transcript)
   let reader = previous
   if (!reader || reader.path !== transcript || size < reader.offset) {
     reader = {
@@ -161,17 +162,17 @@ async function readTitle($: Runtime, session: string, transcript: string): Promi
   try {
     if (reader.ranged) {
       try {
-        await readFrom($, transcript, reader.offset, (text) => reader.scanner.push(text))
+        await readFrom(host, transcript, reader.offset, (text) => reader.scanner.push(text))
         reader.offset = size
         return reader.scanner.title
       } catch (error) {
         reader.ranged = false
-        await $.ui.log(`Couldn't read the transcript from an offset (${String(error)}); reading it whole from now on.`, { to: 'debug' })
+        await host.ui.log(`Couldn't read the transcript from an offset (${String(error)}); reading it whole from now on.`, { to: 'debug' })
       }
     }
     if (size > FS_READ_LIMIT) throw new Error(`the transcript is ${size} bytes, more than it can be read whole`)
     const scanner = new TitleScanner()
-    scanner.push(await $.fs.read(transcript))
+    scanner.push(await host.fs.read(transcript))
     reader.scanner = scanner
     reader.offset = size
     return scanner.title
@@ -181,11 +182,11 @@ async function readTitle($: Runtime, session: string, transcript: string): Promi
 }
 
 /** Stream a file from a byte offset to its end, without holding it whole. */
-export async function readFrom($: Runtime, path: string, offset: number, onText: (text: string) => void) {
-  const stream = $.process.spawn(transcriptRead(path, offset, await $.env.get('OS') === 'Windows_NT'))
+export async function readFrom(host: Host, path: string, offset: number, onText: (text: string) => void) {
+  const stream = host.process.spawn(transcriptRead(path, offset, await host.env.os() === 'Windows_NT'))
   const deadline = new AbortController()
   let timedOut = false
-  void $.clock.sleep(TITLE_TIMEOUT_MS, { signal: deadline.signal }).then(() => {
+  void host.clock.sleep(TITLE_TIMEOUT_MS, { signal: deadline.signal }).then(() => {
     timedOut = true
     void stream.return({ code: null, signal: 'SIGTERM' }).catch(() => {})
   // The deadline's sleep rejects when the read ends first and cancels it.

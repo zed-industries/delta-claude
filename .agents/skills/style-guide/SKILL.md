@@ -1,6 +1,6 @@
 ---
 name: style-guide
-description: Conventions for the TypeScript in hooks/ of the Delta Claude Code plugin — what Claude Code's loader accepts, where code and state go, typing untrusted input, errors, tests and formatting. Use when writing, editing, reviewing or refactoring code under hooks/.
+description: Conventions for the TypeScript in hooks/ of the Delta Claude Code plugin — what Claude Code's loader and Anthropic's plugin directory accept, where code and state go, typing untrusted input, errors, tests and formatting. Use when writing, editing, reviewing or refactoring code under hooks/.
 ---
 
 # Delta plugin conventions
@@ -11,16 +11,25 @@ is better than an abstraction with one caller.
 ## Loading rules
 
 Claude Code reads `hooks/register.tsx` and every file it imports before loading the plugin, and refuses code it
-cannot follow. The engine's API is declared in `.claude-plugin/types/claude-code/index.d.ts`, which Claude Code
-writes when it loads this folder.
+cannot follow. Anthropic's plugin directory is stricter: it lists the plugin's capabilities from the engine calls in
+`register.tsx` alone, and refuses `$` handed to a function in another file, even though Claude Code accepts that.
+`claude plugin validate` applies none of the directory's rules; only the developer portal's Validate does. The
+engine's API is declared in `.claude-plugin/types/claude-code/index.d.ts`, which Claude Code writes when it loads
+this folder.
 
-- A helper that takes `$` is a `function` declaration: `export async function drain($: Runtime, session: string)`.
-  An arrow-function export, a class method, or `$` kept in a variable, field or array is refused. A callback inside
-  such a function may close over `$` and pass it on: `$.clock.after(0, () => drain($, session))`.
-- Import types with `type` (`import type { Runtime }`, or `type Runtime` in a mixed import). Each file is compiled
-  alone, so an unmarked type import fails at load with "Export named … not found".
-- Write each engine call literally: `$.noun.method(...)`, `$.env.get('LITERAL')`, and `$.state` references with a
-  literal `plugin` and `key`.
+- Only `register.tsx` names `$`. A hook that needs the engine beyond a direct call binds `const host = hostOf($)` as
+  its first statement and passes `host` on. Features take `host: Host` (`core/host.ts`), never `$`. This follows
+  Anthropic's own `code-modernization` plugin.
+- An engine call a feature needs is a member of `Host` and one line in `hostOf`: a closure making a single literal
+  call, `read: (path) => $.fs.read(path)`. An overloaded method gets one member per form Delta uses
+  (`session.apiMessages`), and an environment variable one member per name (`env.os`), so every call stays literal.
+  Bind a `Host` per hook call and keep none in a module variable: `$` carries the calling hook's context.
+- In `register.tsx`, `$` goes only to `hostOf` and `logHookFailure`, which are top-level function declarations
+  there. Write each call literally: `$.noun.method(...)`, `$.env.get('LITERAL')`, and `$.state` references with a
+  literal `plugin` and `key`. Don't give anything else the name of `$`, `on`, or a hook's third parameter: the
+  directory reads those names as the engine's throughout the file.
+- Import types with `type` (`import type { Host }`, or `type Host` in a mixed import). Each file is compiled alone,
+  so an unmarked type import fails at load with "Export named … not found".
 - Import only the plugin's own files: no `import()`, Node or DOM APIs, or npm packages.
 
 ## Where code goes
@@ -30,10 +39,10 @@ writes when it loads this folder.
   subagent's loop also raises routes on `e.agentId` to `subagents.ts`.
 - Each feature has a folder under `hooks/` (`watch/`, `recording/`, `sharing/`, …) holding its modules and their
   unit tests; `core/` holds what every feature uses, and `testing/` the test fake. New code goes in the module for
-  its feature; each module's header says what it holds (`head -6 hooks/*/*.ts*`). Logic without `$` sits in a
+  its feature; each module's header says what it holds (`head -6 hooks/*/*.ts*`). Logic without a `Host` sits in a
   module of its own, which tests call directly.
-- Pass `$` to helpers. The hosts `SetupEnv`, `Interaction`, `AuthenticationHost` and `UpdateHost` exist so tests can
-  substitute them; add no others.
+- Pass `host` to helpers. The narrower hosts `SetupEnv`, `Interaction`, `AuthenticationHost` and `UpdateHost` are
+  built from it so tests can substitute them; add no others.
 - Export only what another module or a test uses. A module variable others read is an `export let`, with no getter.
 - Run a Delta command through a `delta-cli.ts` function (sign-in and updates go through their hosts). It labels the
   command as Claude Code's for Delta's telemetry and checks the answer; the tests flag an unlabelled command.
@@ -52,7 +61,7 @@ writes when it loads this folder.
   `await`. Independent flags stay flags.
 - After an `await` that can yield to another event, check the work is still current: `stillActive(session)` for the
   recorded session, `feed.revision` for the watch.
-- The band's drawing state stays in `band.tsx` and `rows.tsx` module variables, redrawn with `$.ui.invalidate`.
+- The band's drawing state stays in `band.tsx` and `rows.tsx` module variables, redrawn with `host.ui.invalidate()`.
   `$.state` atoms survive a hot reload, so moving it there is its own decision.
 
 ## Types
@@ -81,8 +90,8 @@ writes when it loads this folder.
 
 ## Names and comments
 
-- `$` is the engine and `e` the event; `session` is a Claude session ID, `thread` a Delta thread ID, `agentId` a
-  Claude subagent ID.
+- `$` is the engine, `host` the `Host` bound from it, and `e` the event; `session` is a Claude session ID,
+  `thread` a Delta thread ID, `agentId` a Claude subagent ID.
 - A comment moves with its code and stays true there. Check a claim about the engine against its types or
   `claude plugin validate` before writing it.
 
@@ -113,4 +122,4 @@ There is no formatter: match the code around you, and keep formatting changes ou
 1. Run the checks in `AGENTS.md`. `claude plugin validate .` lists no `gating hook without .catch`.
 2. In a refactor, the hooks `validate` lists and the `$` calls in source
    (`grep -rohE --include='*.ts*' '\$\.[a-z]+\.[a-zA-Z]+' hooks | sort -u`) stay the same.
-3. Any change to user-visible text (`$.ui.log`, `{ drop }`, `{ text }`, band strings) is intended.
+3. Any change to user-visible text (`host.ui.log`, `{ drop }`, `{ text }`, band strings) is intended.

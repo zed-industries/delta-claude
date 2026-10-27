@@ -16,9 +16,10 @@ import {
 import { pathKey, samePath } from '../core/paths'
 import {
   activation, type Binding, boundDirectory, digest, type HookEvent, type HookNext, isPaused, load, pauseCheckout,
-  producerOf, recoveryAdvice, recoveryCommand, report, requests, resumeCheckout, type Runtime, save, serial, sessions,
+  producerOf, recoveryAdvice, recoveryCommand, report, requests, resumeCheckout, save, serial, sessions,
   type SessionState, stateFor, stillActive,
 } from '../core/session-state'
+import type { Host } from '../core/host'
 import { children, deliverChild, stopReasonOf } from '../subagents/subagents'
 import {
   appendFailure, classifyCommandFailure, DeltaCommandError, DeltaSendError, JoinNotReadyError, permanentFailureAdvice,
@@ -116,23 +117,23 @@ export function liveActivity(update: Update): Update {
   }
 }
 
-export async function stageRecord($: Runtime, binding: Binding, body: RecordBody): Promise<Binding> {
+export async function stageRecord(host: Host, binding: Binding, body: RecordBody): Promise<Binding> {
   // The continuing session stages under the same producer; a second writer would reuse its sequences.
   if (binding.continuedIn)
     throw new Error(`this conversation continues in Claude session ${binding.continuedIn}, which records it`)
-  return stageOutboxRecord($, producerOf(binding), binding, body)
+  return stageOutboxRecord(host, producerOf(binding), binding, body)
 }
 
 /** Stage one record in the outbox folder `folder`, which holds one recorded conversation's records. */
 export async function stageOutboxRecord<T extends { next: number; pending: Entry[] }>(
-  $: Runtime, folder: string, binding: T, body: RecordBody,
+  host: Host, folder: string, binding: T, body: RecordBody,
 ): Promise<T> {
   const sequence = binding.next
   const line = JSON.stringify({ schemaVersion: 1, sequence, ...body }) + '\n'
   const files: string[] = []
   for (const chunk of outboxChunks(line, sequence)) {
     const path = `${outbox}/${folder}/${sequence}-${files.length}.json`
-    await $.fs.write(path, chunk)
+    await host.fs.write(path, chunk)
     files.push(path)
   }
   // Only reference fully written immutable files. An interrupted write leaves orphans.
@@ -141,39 +142,39 @@ export async function stageOutboxRecord<T extends { next: number; pending: Entry
   return binding
 }
 
-async function writeRecord($: Runtime, binding: Binding, body: RecordBody): Promise<Binding> {
-  const next = await stageRecord($, binding, body)
-  await save($, next)
+async function writeRecord(host: Host, binding: Binding, body: RecordBody): Promise<Binding> {
+  const next = await stageRecord(host, binding, body)
+  await save(host, next)
   return next
 }
 
-async function readRecord($: Runtime, entry: Entry): Promise<string> {
-  const line = (await Promise.all(entry.files.map((path) => $.fs.read(path) as Promise<string>))).join('')
+async function readRecord(host: Host, entry: Entry): Promise<string> {
+  const line = (await Promise.all(entry.files.map((path) => host.fs.read(path)))).join('')
   if (await digest(line) !== entry.digest)
     throw new Error(`outbox record ${entry.sequence} changed on disk; sharing paused`)
   return line
 }
 
-export async function collectAcknowledgedOutbox($: Runtime, plan: CleanupPlan) {
+export async function collectAcknowledgedOutbox(host: Host, plan: CleanupPlan) {
   const { session, root, next, pending } = plan
   if (!/^[A-Za-z0-9_-]+$/.test(session)) throw new Error('Invalid outbox session directory')
   const frontier = pending.reduce((value, entry) => Math.min(value, entry.sequence), next)
   if (frontier <= 1) return
   const directory = `${root}/${session}`
-  if (!await $.fs.exists(directory)) return
-  const files = acknowledgedOutboxFiles(directory, next, pending, await $.fs.list(directory))
-  const windows = await $.env.get('OS') === 'Windows_NT'
+  if (!await host.fs.exists(directory)) return
+  const files = acknowledgedOutboxFiles(directory, next, pending, await host.fs.list(directory))
+  const windows = await host.env.os() === 'Windows_NT'
   // Keep command lines bounded, including Windows' smaller process argument limit.
   for (let offset = 0; offset < files.length; offset += 64) {
     const removal = outboxRemoval(files.slice(offset, offset + 64), windows)
-    const result = await $.process.run(removal.argv, { stdin: removal.stdin, timeoutMs: 30_000 })
+    const result = await host.process.run(removal.argv, { stdin: removal.stdin, timeoutMs: 30_000 })
     if (result.exitCode !== 0)
       throw new Error(result.stderr.trim() || `file removal exited ${result.exitCode}`)
   }
 }
 
 /** Schedule from an acknowledged saved binding, never from mutable staging state. */
-export function scheduleOutboxCleanup($: Runtime, binding: Binding) {
+export function scheduleOutboxCleanup(host: Host, binding: Binding) {
   const runtime = sessions.get(binding.session)
   // The outbox folder belongs to the session the conversation continued in.
   if (!runtime || binding.continuedIn) return
@@ -182,25 +183,25 @@ export function scheduleOutboxCleanup($: Runtime, binding: Binding) {
     pending: binding.pending.map((entry) => ({ sequence: entry.sequence, files: [...entry.files] })),
   }
   if (runtime.cleanupTask) return
-  const task = cleanupOutbox($, binding.session)
+  const task = cleanupOutbox(host, binding.session)
   runtime.cleanupTask = task
   void task.finally(() => {
     if (runtime.cleanupTask === task) runtime.cleanupTask = undefined
-  }).catch((error) => reportCleanupIssue($, binding.session, `Delta outbox cleanup failed: ${errorText(error)}`))
+  }).catch((error) => reportCleanupIssue(host, binding.session, `Delta outbox cleanup failed: ${errorText(error)}`))
 }
 
-async function reportCleanupIssue($: Runtime, session: string, message: string) {
+async function reportCleanupIssue(host: Host, session: string, message: string) {
   const runtime = stateFor(session)
   const changed = runtime.cleanupError !== message
   runtime.cleanupError = message
   // The error is retained even if the host rejects a diagnostic call.
   // Neither cleanup nor its reporting can be a prerequisite for delivery.
-  try { $.ui.invalidate('ui.render') } catch {}
-  try { if (changed) await $.ui.log(message, { to: 'transcript' }) }
+  try { host.ui.invalidate() } catch {}
+  try { if (changed) await host.ui.log(message, { to: 'transcript' }) }
   catch {}
 }
 
-async function cleanupOutbox($: Runtime, session: string) {
+async function cleanupOutbox(host: Host, session: string) {
   const runtime = stateFor(session)
   while (runtime.cleanupPlan) {
     const plan = runtime.cleanupPlan
@@ -208,15 +209,15 @@ async function cleanupOutbox($: Runtime, session: string) {
     const frontier = plan.pending.reduce((value, entry) => Math.min(value, entry.sequence), plan.next)
     if (frontier <= (runtime.cleanedThrough ?? 1)) continue
     try {
-      await collectAcknowledgedOutbox($, plan)
+      await collectAcknowledgedOutbox(host, plan)
       runtime.cleanedThrough = frontier
       const hadError = runtime.cleanupError !== undefined
       runtime.cleanupError = undefined
       // A redraw is best effort; the band reads the cleared error at its next draw anyway.
-      try { if (hadError) $.ui.invalidate('ui.render') } catch {}
+      try { if (hadError) host.ui.invalidate() } catch {}
     } catch (error) {
       const message = `Delivered Delta records could not be removed from the local outbox: ${errorText(error)}. Delivery can continue; cleanup retries on later acknowledgments or session activation.`
-      await reportCleanupIssue($, session, message)
+      await reportCleanupIssue(host, session, message)
       return
     }
   }
@@ -227,32 +228,32 @@ async function cleanupOutbox($: Runtime, session: string) {
  * below it. Claude's own `cd` in a Bash call moves the shell's directory within the project, so a
  * subdirectory is still the same checkout.
  */
-export async function isInDirectory($: Runtime, directory: string) {
-  const root = await $.session.root()
+export async function isInDirectory(host: Host, directory: string) {
+  const root = await host.session.root()
   if (!samePath(root, directory)) return false
-  const current = await $.session.cwd()
+  const current = await host.session.cwd()
   const cwd = pathKey(current, root, directory)
   directory = pathKey(directory, root)
   return cwd === directory || cwd.startsWith(directory.endsWith('/') ? directory : `${directory}/`)
 }
 
 /** A joined session runs only with Claude in its directory, so Claude's tools reach every mounted worktree. */
-async function requireJoinedDirectory($: Runtime, binding: Binding) {
-  if (await $.session.id() !== binding.session || !binding.directory || !await isInDirectory($, binding.directory))
+async function requireJoinedDirectory(host: Host, binding: Binding) {
+  if (await host.session.id() !== binding.session || !binding.directory || !await isInDirectory(host, binding.directory))
     throw new JoinNotReadyError(`This joined session must run in ${binding.directory}. Run /cd ${binding.directory}, then ${recoveryCommand(binding)}; no other checkout will be attached`)
 }
 
 /** Status observes the common owner's mounts; watcher lifetime is not checkout ownership. */
-export async function verifyCheckout($: Runtime, binding: Binding) {
+export async function verifyCheckout(host: Host, binding: Binding) {
   if (!boundDirectory(binding))
     throw new Error('the checkout has not been attached; saved messages remain queued')
-  if (binding.joined) await requireJoinedDirectory($, binding)
-  const status = await threadStatus($, binding.locator ?? binding.thread!, producerOf(binding))
+  if (binding.joined) await requireJoinedDirectory(host, binding)
+  const status = await threadStatus(host, binding.locator ?? binding.thread!, producerOf(binding))
   validateThreadFrontier(status, binding)
   if (binding.joined) validateJoinedMounts(status, binding.mounts ?? [])
   else validateThreadCheckout(status, binding)
   if (binding.joined) {
-    try { await requireJoinedDirectory($, binding) }
+    try { await requireJoinedDirectory(host, binding) }
     catch { throw new Error('The joined session or directory changed during checkout inspection; participation was not enabled') }
   }
   const runtime = sessions.get(binding.session)
@@ -260,7 +261,7 @@ export async function verifyCheckout($: Runtime, binding: Binding) {
     resumeCheckout(runtime, 'verification')
     runtime.joinFailure = undefined
   }
-  await rememberStatus($, binding.session, status)
+  await rememberStatus(host, binding.session, status)
   return status
 }
 
@@ -269,23 +270,23 @@ export async function verifyCheckout($: Runtime, binding: Binding) {
  * session change is not success. Rejects with the refusal, and appends nothing, when the CLI's
  * recording contract is one this plugin does not speak.
  */
-async function drainPending($: Runtime, session: string): Promise<boolean> {
+async function drainPending(host: Host, session: string): Promise<boolean> {
     const delivering = () => activation.session === session && sessions.has(session) && !isPaused(sessions.get(session)!)
     while (delivering()) {
-      const binding = await serial(async () => load($, session))
+      const binding = await serial(async () => load(host, session))
       // A conversation that continued in another session delivers from there.
       if (!binding.thread || !binding.pending.length || binding.continuedIn) return true
       // A recovered outbox checks the CLI's contract before its first append, so an incompatible CLI
       // records nothing. An answer that arrives after the session ended or was activated again belongs
       // to that earlier lifetime: it neither appends nor reports, and the current one checks for itself.
       const current = stillActive(session)
-      try { await requireContract($, session) }
+      try { await requireContract(host, session) }
       catch (error) {
         if (!delivering() || !current()) return false
         throw error
       }
       if (!delivering() || !current()) return false
-      try { await verifyCheckout($, binding) }
+      try { await verifyCheckout(host, binding) }
       catch (error) {
         // An unanswered check says nothing about the checkout. A session that records offline still
         // delivers, acknowledged locally, and checks the checkout again once the server answers;
@@ -295,16 +296,16 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
         if (state && permanent) pauseCheckout(state, 'verification')
         if (permanent || !recordsOffline(session, binding)) throw error
       }
-      const { count, fenced, failure } = await appendPending($, {
+      const { count, fenced, failure } = await appendPending(host, {
         reference: binding.locator ?? binding.thread, thread: binding.thread, externalId: producerOf(binding),
         local: recordsOffline(session, binding),
       }, binding.pending)
       if (count) {
         await serial(async () => {
-          const current = await load($, session)
+          const current = await load(host, session)
           const acknowledged = { ...current, pending: current.pending.slice(count) }
-          await save($, acknowledged)
-          scheduleOutboxCleanup($, acknowledged)
+          await save(host, acknowledged)
+          scheduleOutboxCleanup(host, acknowledged)
         })
       }
       // A `fenced` receipt names the turn Delta already superseded. A fence for the running turn
@@ -313,7 +314,7 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
       // on the stop, so a slow or failed abort cannot hold up the outbox.
       const running = binding.execution?.sequence
       if (running !== undefined && fenced.includes(running))
-        void loseExecution($, session, running, 'Shared execution was superseded').catch((error) => report($, error))
+        void loseExecution(host, session, running, 'Shared execution was superseded').catch((error) => report(host, error))
       if (failure) throw failure
     }
     return false
@@ -327,7 +328,7 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
  * acknowledged.
  */
 export async function appendPending(
-  $: Runtime,
+  host: Host,
   target: { reference: string; thread: string; externalId: string; local: boolean },
   pending: readonly Entry[],
 ): Promise<{ count: number; fenced: number[]; failure?: DeltaCommandError }> {
@@ -336,7 +337,7 @@ export async function appendPending(
   const turnSequences: (number | undefined)[] = []
   let collected = { input: '', bytes: 0, count: 0 }
   for (const entry of pending) {
-    const line = await readRecord($, entry)
+    const line = await readRecord(host, entry)
     const turnSequence = pendingRecordTurn(line, entry.sequence)
     const next = appendBatch(collected, line)
     if (!next) break
@@ -345,7 +346,7 @@ export async function appendPending(
     turnSequences.push(turnSequence)
     if (collected.bytes >= 2_000_000) break
   }
-  const result = await threadAppend($, target, collected.input)
+  const result = await threadAppend(host, target, collected.input)
   const { count, fenced } = acknowledgedPrefix(result.stdout, target.thread,
     batch.map((entry, index) => ({ sequence: entry.sequence, turnSequence: turnSequences[index] })))
   const failure = result.exitCode !== 0 ? appendFailure(result.stdout, result.stderr, result.exitCode)
@@ -355,20 +356,20 @@ export async function appendPending(
 }
 
 /** A turn's scoped running record, naming this plugin's version and where Claude runs when known. */
-export async function runningUpdate($: Runtime): Promise<Update> {
+export async function runningUpdate(host: Host): Promise<Update> {
   let producerVersion: string | undefined
   let executionLocation: 'local' | 'remote' | undefined
   try {
-    const manifest = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
+    const manifest = JSON.parse(await host.fs.read(`${host.plugin.root}/.claude-plugin/plugin.json`))
     if (typeof manifest.version === 'string' && manifest.version.length <= 32 &&
         /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(manifest.version))
       producerVersion = manifest.version
-  } catch (error) { await report($, error) }
+  } catch (error) { await report(host, error) }
   try {
-    const remote = await $.env.get('CLAUDE_CODE_REMOTE')
+    const remote = await host.env.claudeCodeRemote()
     if (remote === 'true') executionLocation = 'remote'
     else if (remote === 'false') executionLocation = 'local'
-  } catch (error) { await report($, error) }
+  } catch (error) { await report(host, error) }
   return {
     sessionUpdate: 'state_update', state: 'running',
     ...producerVersion || executionLocation ? { _meta: { delta: {
@@ -378,19 +379,19 @@ export async function runningUpdate($: Runtime): Promise<Update> {
   }
 }
 
-async function beginExecution($: Runtime, session: string, turnId: string) {
+async function beginExecution(host: Host, session: string, turnId: string) {
   await serial(async () => {
-    const running = await runningUpdate($)
-    let binding = await load($, session)
+    const running = await runningUpdate(host)
+    let binding = await load(host, session)
     // A delayed completion must not close this new turn. Finish only the stored
     // predecessor, then persist the new start and local identity in one manifest.
     if (binding.execution && !binding.execution.endSequence) {
-      binding = await stageRecord($, binding, {
+      binding = await stageRecord(host, binding, {
         turnSequence: binding.execution.sequence, update: { sessionUpdate: 'state_update', state: 'idle' },
       })
     }
     const sequence = binding.next
-    binding = await stageRecord($, binding, { turnSequence: sequence, update: running })
+    binding = await stageRecord(host, binding, { turnSequence: sequence, update: running })
     binding.execution = { sequence, turnId }
     binding.lastTurnSequence = sequence
     // The composer prompt that started this turn, and any output that reached a hook before this
@@ -404,10 +405,10 @@ async function beginExecution($: Runtime, session: string, turnId: string) {
       for (const { update, toolId, turnId: owner } of rows) {
         if (owner !== undefined && owner !== turnId) continue
         if (toolId && !runtime.tools.toolTurns.has(toolId)) runtime.tools.toolTurns.set(toolId, sequence)
-        binding = await stageRecord($, binding, { update, turnSequence: sequence })
+        binding = await stageRecord(host, binding, { update, turnSequence: sequence })
       }
     }
-    await save($, binding)
+    await save(host, binding)
     runtime.nativeTurns.set(turnId, sequence)
   })
 }
@@ -431,7 +432,7 @@ const TURN_COMPLETE_DELIVERY_BUDGET_MS = 5_000
  * shutdown paths keep waiting, so their pending records are delivered.
  */
 async function endExecution(
-  $: Runtime,
+  host: Host,
   session: string,
   sequence: number,
   isCurrent = () => true,
@@ -440,11 +441,11 @@ async function endExecution(
 ) {
   await serial(async () => {
     if (!isCurrent()) return
-    let binding = await load($, session)
+    let binding = await load(host, session)
     const execution = binding.execution
     if (!isCurrent() || !execution || execution.sequence !== sequence) return
     if (!execution.endSequence) {
-      binding = await stageRecord($, binding, {
+      binding = await stageRecord(host, binding, {
         turnSequence: sequence, update: {
           sessionUpdate: 'state_update', state: 'idle',
           ...stopReason ? { stopReason } : {},
@@ -453,94 +454,94 @@ async function endExecution(
       })
     }
     delete binding.execution
-    await save($, binding, isCurrent)
+    await save(host, binding, isCurrent)
   })
   if (!isCurrent()) return
-  if (delivery === 'await') await drain($, session)
-  else if (delivery === 'background') void drain($, session).catch((error) => report($, error))
-  else await deliverWithin($, session, TURN_COMPLETE_DELIVERY_BUDGET_MS)
+  if (delivery === 'await') await drain(host, session)
+  else if (delivery === 'background') void drain(host, session).catch((error) => report(host, error))
+  else await deliverWithin(host, session, TURN_COMPLETE_DELIVERY_BUDGET_MS)
 }
 
 /** Delivers within `budgetMs`, letting the outbox finish a slower append in the background. */
-async function deliverWithin($: Runtime, session: string, budgetMs: number): Promise<void> {
+async function deliverWithin(host: Host, session: string, budgetMs: number): Promise<void> {
   const cancelled = new AbortController()
-  const delivery = drain($, session).catch((error) => report($, error))
-  const expiry = $.clock.sleep(budgetMs, { signal: cancelled.signal }).catch(() => undefined)
+  const delivery = drain(host, session).catch((error) => report(host, error))
+  const expiry = host.clock.sleep(budgetMs, { signal: cancelled.signal }).catch(() => undefined)
   await Promise.race([delivery, expiry])
   cancelled.abort()
 }
 
-export async function loseExecution($: Runtime, session: string, sequence: number, reason: string, isCurrent = () => true) {
+export async function loseExecution(host: Host, session: string, sequence: number, reason: string, isCurrent = () => true) {
   const runtime = stateFor(session)
   let turnId = runtime.binding?.execution?.sequence === sequence ? runtime.binding.execution.turnId : undefined
   try {
     await serial(async () => {
       if (!isCurrent()) return
-      const binding = await load($, session)
+      const binding = await load(host, session)
       if (!isCurrent() || binding.execution?.sequence !== sequence) { turnId = undefined; return }
       turnId = binding.execution.turnId
-      await save($, { ...binding, execution: { ...binding.execution, lost: true } }, isCurrent)
+      await save(host, { ...binding, execution: { ...binding.execution, lost: true } }, isCurrent)
     })
-  } catch (error) { await report($, error) }
+  } catch (error) { await report(host, error) }
   if (!isCurrent()) return
   // Remember the loss so late output keeps this turn's sequence (which Delta fences) instead of
   // waiting for the next turn's start.
   if (turnId) runtime.lostTurns.add(turnId)
   if (!turnId || runtime.nativeTurns.get(turnId) !== sequence)
-    return endExecution($, session, sequence, isCurrent)
+    return endExecution(host, session, sequence, isCurrent)
   if (runtime.aborting.has(turnId)) return
   runtime.aborting.add(turnId)
   try {
-    await $.turn.abort({ turnId })
+    await host.turn.abort({ turnId })
     if (!isCurrent()) return
-    await $.ui.log(`${reason}; stopped Claude turn ${turnId}. Already performed tool effects are not rolled back.`, { to: 'transcript' })
+    await host.ui.log(`${reason}; stopped Claude turn ${turnId}. Already performed tool effects are not rolled back.`, { to: 'transcript' })
   } finally {
-    try { await endExecution($, session, sequence, isCurrent) }
+    try { await endExecution(host, session, sequence, isCurrent) }
     // Hold the guard until the finish is durable, so a duplicate supersession or a fenced receipt
     // for the same turn that is already in flight cannot abort it a second time.
     finally { runtime.aborting.delete(turnId) }
   }
 }
 
-export async function observeTurn($: Runtime, session: string, turn: ThreadTurn, isCurrent = () => true) {
+export async function observeTurn(host: Host, session: string, turn: ThreadTurn, isCurrent = () => true) {
   const execution = stateFor(session).binding?.execution
   if (!isCurrent() || !execution || execution.sequence !== turn.sequence || execution.endSequence) return
   if (turn.status === 'superseded')
-    await loseExecution($, session, turn.sequence, 'Shared execution was superseded', isCurrent)
+    await loseExecution(host, session, turn.sequence, 'Shared execution was superseded', isCurrent)
 }
 
-export async function recoverExecution($: Runtime, session: string) {
+export async function recoverExecution(host: Host, session: string) {
   const runtime = stateFor(session)
-  const execution = (await serial(() => load($, session))).execution
+  const execution = (await serial(() => load(host, session))).execution
   if (!execution) return
   if (execution.turnId && runtime.nativeTurns.has(execution.turnId) && !execution.lost && !execution.endSequence) return
   // Saved Claude IDs are not authority to abort a turn in a new host process.
   // Only a turn observed locally in this module can still be running here.
   if (execution.turnId && runtime.nativeTurns.get(execution.turnId) === execution.sequence)
-    await $.turn.abort({ turnId: execution.turnId })
-  await endExecution($, session, execution.sequence)
+    await host.turn.abort({ turnId: execution.turnId })
+  await endExecution(host, session, execution.sequence)
 }
 
-export async function drain($: Runtime, session: string): Promise<void> {
+export async function drain(host: Host, session: string): Promise<void> {
   if (activation.session !== session || isPaused(stateFor(session))) return
   if (drainTask) {
     await drainTask
     if (activation.session !== session || isPaused(stateFor(session))) return
-    if ((await serial(() => load($, session))).pending.length) return drain($, session)
+    if ((await serial(() => load(host, session))).pending.length) return drain(host, session)
     return
   }
-  const task = drainPending($, session).then(async (delivered) => {
+  const task = drainPending(host, session).then(async (delivered) => {
     const state = sessions.get(session)
     if (!delivered || activation.session !== session || !state) return
     endDeliveryFailures(state)
     // The session's thread exists now, so children that waited for it can be created.
     for (const child of children.values()) {
-      if (child.session === session && child.waitingForParent) void deliverChild($, child)
+      if (child.session === session && child.waitingForParent) void deliverChild(host, child)
     }
-    if (!state.captureFailure && !isPaused(state)) $.ui.status(undefined)
+    if (!state.captureFailure && !isPaused(state)) host.ui.status(undefined)
     // A delivery that succeeds again clears any pinned failure notice.
-    $.ui.invalidate('ui.render')
-  }, (error) => failDelivery($, session, error))
+    host.ui.invalidate()
+  }, (error) => failDelivery(host, session, error))
   drainTask = task
   try { await task }
   finally { if (drainTask === task) drainTask = undefined }
@@ -551,7 +552,7 @@ export async function drain($: Runtime, session: string): Promise<void> {
  * Failures that are not Delta command errors, such as a changed outbox file, pass through unchanged.
  * Queued records keep their sequence, so an unchanged retry is always safe.
  */
-async function failDelivery($: Runtime, session: string, error: unknown): Promise<never> {
+async function failDelivery(host: Host, session: string, error: unknown): Promise<never> {
   if (!(error instanceof DeltaCommandError)) throw error
   const state = sessions.get(session)
   // A session that ended or was replaced must not retry, pause, or speak in the active one's transcript.
@@ -569,14 +570,14 @@ async function failDelivery($: Runtime, session: string, error: unknown): Promis
     : `Delta sharing paused: ${failure.message}. The message stays queued. ${permanentFailureAdvice(error.code, !!state.binding?.autoUpload, error.reason)}, then ${recoveryAdvice(state.binding)}.`
   if (!willRetry) {
     pauseCheckout(state, decision.pause, pausedText)
-  } else scheduleSendRetry($, session, error.hints.retryAfterMs)
+  } else scheduleSendRetry(host, session, error.hints.retryAfterMs)
   state.retryReason = willRetry ? failure.message : undefined
   const text = willRetry ? `${failure.message}. The message stays queued and sending will be retried.` : pausedText
   // The band is the status surface: it shows the retry or the pause until delivery recovers.
-  $.ui.invalidate('ui.render')
+  host.ui.invalidate()
   // A repeating failure is shown once however its message varies; the band stays current.
   if (decision.show) {
-    await $.ui.log(text, { to: 'transcript' })
+    await host.ui.log(text, { to: 'transcript' })
   }
   throw failure
 }
@@ -591,34 +592,34 @@ export function endDeliveryFailures(state: SessionState) {
 }
 
 /** The CLI's `retryAfterMs` can lengthen the exponential backoff but never shorten it, so a tiny hint cannot spin. */
-function scheduleSendRetry($: Runtime, session: string, retryAfterMs?: number) {
+function scheduleSendRetry(host: Host, session: string, retryAfterMs?: number) {
   const state = sessions.get(session)
   if (!state || activation.session !== session || state.retryTimer) return
   const delay = deliveryRetryDelay(state.retryAttempts++, retryAfterMs)
   // A timer rather than a sleep: the hook that hit the failure may finish long before the retry.
-  state.retryTimer = $.clock.after(delay, () => {
+  state.retryTimer = host.clock.after(delay, () => {
     state.retryTimer = undefined
-    if (activation.session === session) void drain($, session).catch((error) => report($, error))
+    if (activation.session === session) void drain(host, session).catch((error) => report(host, error))
   })
 }
 
-async function recordCaptureFailure($: Runtime, session: string, error: unknown) {
+async function recordCaptureFailure(host: Host, session: string, error: unknown) {
   const state = stateFor(session)
   state.captureFailure = errorText(error)
   try {
-    await serial(async () => save($, { ...await load($, session), captureFailure: state.captureFailure }))
+    await serial(async () => save(host, { ...await load(host, session), captureFailure: state.captureFailure }))
   } catch {
     // An unavailable store cannot preserve its own failure across a process restart.
   }
   const execution = state.binding?.execution
   if (execution) {
-    try { await loseExecution($, session, execution.sequence, 'Local conversation capture failed') }
-    catch (failure) { await report($, failure) }
+    try { await loseExecution(host, session, execution.sequence, 'Local conversation capture failed') }
+    catch (failure) { await report(host, failure) }
   }
-  await report($, error)
+  await report(host, error)
 }
 
-async function persistUpdates($: Runtime, session: string, updates: Update[], turnSequence?: number) {
+async function persistUpdates(host: Host, session: string, updates: Update[], turnSequence?: number) {
   const unsaved = stateFor(session).unsaved
   try {
     await serial(async () => {
@@ -626,30 +627,30 @@ async function persistUpdates($: Runtime, session: string, updates: Update[], tu
         unsaved.push({ updates, turnSequence })
         return
       }
-      let state = await load($, session)
+      let state = await load(host, session)
       for (const [index, update] of updates.entries()) {
-        try { state = await writeRecord($, state, { update, turnSequence }) }
+        try { state = await writeRecord(host, state, { update, turnSequence }) }
         catch (error) {
           unsaved.push({ updates: updates.slice(index), turnSequence })
           throw error
         }
       }
     })
-  } catch (error) { await recordCaptureFailure($, session, error) }
+  } catch (error) { await recordCaptureFailure(host, session, error) }
 }
 
-export async function flushUnsaved($: Runtime, session: string) {
+export async function flushUnsaved(host: Host, session: string) {
   const runtime = stateFor(session)
   const unsaved = runtime.unsaved
   while (unsaved.length) {
     const first = unsaved[0]
     if (!first) break
     await serial(async () => {
-      let state = await load($, session)
+      let state = await load(host, session)
       while (first.updates.length) {
         const update = first.updates[0]
         if (!update) break
-        state = await writeRecord($, state, { update, turnSequence: first.turnSequence })
+        state = await writeRecord(host, state, { update, turnSequence: first.turnSequence })
         first.updates.shift()
       }
       unsaved.shift()
@@ -657,9 +658,9 @@ export async function flushUnsaved($: Runtime, session: string) {
   }
   if (runtime.captureFailure) {
     await serial(async () => {
-      const state = await load($, session)
+      const state = await load(host, session)
       delete state.captureFailure
-      await save($, state)
+      await save(host, state)
     })
     runtime.captureFailure = undefined
   }
@@ -669,12 +670,12 @@ export async function flushUnsaved($: Runtime, session: string) {
  * Begin the person's choice for a refused offline thread, from the band's controls. The command runs
  * off the hook, and its result clears the refusal so the queued records can drain.
  */
-export function beginRefusalResolution($: Runtime, session: string, kind: 'fork' | 'discard'): boolean {
+export function beginRefusalResolution(host: Host, session: string, kind: 'fork' | 'discard'): boolean {
   if (resolving || !stateFor(session).refusedOffline) return false
   resolving = true
-  $.clock.after(0, async () => {
-    try { await resolveRefusal($, session, kind) }
-    catch (error) { await reportRefusal($, session, error) }
+  host.clock.after(0, async () => {
+    try { await resolveRefusal(host, session, kind) }
+    catch (error) { await reportRefusal(host, session, error) }
     finally { resolving = false }
   })
   return true
@@ -686,46 +687,46 @@ export function beginRefusalResolution($: Runtime, session: string, kind: 'fork'
  * Either way the original is the server's view again when it finishes, a fork is named once, and the
  * queued records drain into the original.
  */
-async function resolveRefusal($: Runtime, session: string, kind: 'fork' | 'discard'): Promise<void> {
+async function resolveRefusal(host: Host, session: string, kind: 'fork' | 'discard'): Promise<void> {
   const state = sessions.get(session)
   if (!state || activation.session !== session) return
-  const thread = (await serial(() => load($, session))).thread
+  const thread = (await serial(() => load(host, session))).thread
   if (!thread) return
   // Fork first: it copies the refused changes into a kept thread, and the discard then resets the original.
-  const forked = kind === 'fork' ? await threadFork($, thread) : undefined
-  await threadDiscard($, thread)
+  const forked = kind === 'fork' ? await threadFork(host, thread) : undefined
+  await threadDiscard(host, thread)
   endDeliveryFailures(state)
   resumeCheckout(state, 'delivery')
-  $.ui.invalidate('ui.render')
+  host.ui.invalidate()
   if (forked)
-    await notifyOnce($, `Delta kept this thread's offline changes in the new thread "${forked.thread_id}"; this thread carries on without them.`)
-  await $.ui.log(kind === 'fork' ? "Delta forked this thread's offline changes into a kept thread." : "Delta discarded this thread's offline changes.", { to: 'debug' })
-  void drain($, session).catch((error) => report($, error))
+    await notifyOnce(host, `Delta kept this thread's offline changes in the new thread "${forked.thread_id}"; this thread carries on without them.`)
+  await host.ui.log(kind === 'fork' ? "Delta forked this thread's offline changes into a kept thread." : "Delta discarded this thread's offline changes.", { to: 'debug' })
+  void drain(host, session).catch((error) => report(host, error))
 }
 
 /** Show why the person's Fork & Restore or Discard did not resolve the refusal; the controls stay available. */
-async function reportRefusal($: Runtime, session: string, error: unknown) {
+async function reportRefusal(host: Host, session: string, error: unknown) {
   const state = sessions.get(session)
   if (!state || activation.session !== session) return
-  await $.ui.log(`Delta could not resolve this thread's offline changes: ${errorText(error)}. The records stay queued.`, { to: 'transcript' })
+  await host.ui.log(`Delta could not resolve this thread's offline changes: ${errorText(error)}. The records stay queued.`, { to: 'transcript' })
   // A redraw is best effort; the band shows the refusal again at its next draw.
-  try { $.ui.invalidate('ui.render') } catch {}
+  try { host.ui.invalidate() } catch {}
 }
 
 /**
  * The main loop's turn started: bind it as the current turn and open its execution, or lose the
  * execution at once when observation or capture is unavailable.
  */
-export async function startTurn($: Runtime, e: HookEvent<'turn.start'>, next: HookNext<'turn.start'>) {
-  const session = await $.session.id()
-  await noticeSession($, session)
+export async function startTurn(host: Host, e: HookEvent<'turn.start'>, next: HookNext<'turn.start'>) {
+  const session = await host.session.id()
+  await noticeSession(host, session)
   await captureDecided(session)
   const runtime = stateFor(session)
   runtime.currentTurnId = e.turnId
   if (runtime.localTurn && !runtime.localTurn.turnId) runtime.localTurn.turnId = e.turnId
   if (!runtime.binding?.snapshot || isLocalTurn(runtime, e.turnId)) return next(e)
   try {
-    await beginExecution($, session, e.turnId)
+    await beginExecution(host, session, e.turnId)
     // A session that records offline keeps its turn while the watcher is down, and a delivery pause
     // stops delivery rather than Claude: observation and delivery are not required to record, and a
     // transient refusal queues rather than stopping the turn. A verification pause still stops it.
@@ -734,13 +735,13 @@ export async function startTurn($: Runtime, e: HookEvent<'turn.start'>, next: Ho
     const observationDown = !offline && !activationIncomplete(runtime) &&
       !liveFor(session)
     if (blockingPause || runtime.captureFailure || observationDown)
-      await loseExecution($, session, runtime.nativeTurns.get(e.turnId)!, 'Delta observation or capture is unavailable')
-    else void drain($, session).catch((error) => report($, error))
+      await loseExecution(host, session, runtime.nativeTurns.get(e.turnId)!, 'Delta observation or capture is unavailable')
+    else void drain(host, session).catch((error) => report(host, error))
   } catch (error) {
     // A hook's return value cannot prevent this turn. Cancel the local ID when
     // its durable start/binding could not be saved; never run uncorrelated output.
-    await $.turn.abort({ turnId: e.turnId })
-    await recordCaptureFailure($, session, error)
+    await host.turn.abort({ turnId: e.turnId })
+    await recordCaptureFailure(host, session, error)
   }
   return next(e)
 }
@@ -749,8 +750,8 @@ export async function startTurn($: Runtime, e: HookEvent<'turn.start'>, next: Ho
  * The main loop's turn ended: stage its finish, then release the remote rows held while it ran, move
  * Claude if it must, and start a share asked for during the turn.
  */
-export async function completeTurn($: Runtime, e: HookEvent<'turn.complete'>, next: HookNext<'turn.complete'>) {
-  const session = await $.session.id()
+export async function completeTurn(host: Host, e: HookEvent<'turn.complete'>, next: HookNext<'turn.complete'>) {
+  const session = await host.session.id()
   const runtime = stateFor(session)
   const sequence = runtime.nativeTurns.get(e.turnId) ??
     (runtime.binding?.execution?.turnId === e.turnId ? runtime.binding.execution.sequence : undefined)
@@ -761,8 +762,8 @@ export async function completeTurn($: Runtime, e: HookEvent<'turn.complete'>, ne
   const result = await next(e)
   if (sequence !== undefined) runtime.tools.forgetUnpaired(sequence)
   if (sequence !== undefined) {
-    try { await endExecution($, session, sequence, () => true, 'bounded', stopReasonOf(e)) }
-    catch (error) { await report($, error) }
+    try { await endExecution(host, session, sequence, () => true, 'bounded', stopReasonOf(e)) }
+    catch (error) { await report(host, error) }
   }
   // Release the remote rows held back while this turn ran now that its finish is staged: delivered
   // within the budget, or queued in the outbox behind any later records. Each
@@ -770,33 +771,33 @@ export async function completeTurn($: Runtime, e: HookEvent<'turn.complete'>, ne
   // so this runs on its own rather than holding a host that may exit at the turn's end. A later
   // prompt or live event reuses the same settling task, so nothing settles or draws twice.
   if (runtime.currentTurnId === undefined) {
-    void settleRemote($, session)?.catch((error) => report($, error))
-    scheduleMove($, session)
+    void settleRemote(host, session)?.catch((error) => report(host, error))
+    scheduleMove(host, session)
     if (requests.shareAfterTurn?.session === session) {
       const { audience } = requests.shareAfterTurn
       requests.shareAfterTurn = undefined
-      beginShare($, session, audience)
+      beginShare(host, session, audience)
     }
   }
   return result
 }
 
 /** A row the main conversation kept is recorded, or held for the turn it belongs to. */
-export async function recordRow($: Runtime, e: HookEvent<'session.append'>, next: HookNext<'session.append'>) {
+export async function recordRow(host: Host, e: HookEvent<'session.append'>, next: HookNext<'session.append'>) {
   // A session Claude starts after `/clear` has no start hook of its own: its first row, the command's, is the first
   // thing this plugin sees of it, and the rows after it wait on the capture boundary this opens.
-  await noticeSession($)
+  await noticeSession(host)
   // The plugin's own `show` run is stored rewritten, so neither the model nor a resumed session's
   // copy of these rows names the internal command or its item id. Its output row names the item
   // until then, which is how the row is tied to what it draws.
-  const shown = shownCommandRewrite($.plugin.name, e)
+  const shown = shownCommandRewrite(host.plugin.name, e)
   if (shown !== undefined) {
     const stored = await next({ ...e, message: { ...e.message, content: shown.content } })
-    if (!('deny' in stored)) await storeShownRow($, stored.uuid, shown)
+    if (!('deny' in stored)) await storeShownRow(host, stored.uuid, shown)
     return stored
   }
   if (!capturedMessage(e.message, e.door)) return next(e)
-  const session = await $.session.id()
+  const session = await host.session.id()
   // A row from a brand-new session waits for its capture boundary, so a prompt or its output that
   // reaches a hook before the snapshot is staged is recorded under the session's new thread.
   await captureDecided(session)
@@ -833,7 +834,7 @@ export async function recordRow($: Runtime, e: HookEvent<'session.append'>, next
             const tool = update.sessionUpdate === 'tool_call_update' && typeof update.toolCallId === 'string'
               ? update.toolCallId : undefined
             if (tool && !runtime.tools.toolTurns.has(tool)) runtime.tools.toolTurns.set(tool, turnSequence)
-            await persistUpdates($, session, [update], tool ? runtime.tools.toolTurns.get(tool) : turnSequence)
+            await persistUpdates(host, session, [update], tool ? runtime.tools.toolTurns.get(tool) : turnSequence)
           }
         }
         for (const block of message.content) {
@@ -841,7 +842,7 @@ export async function recordRow($: Runtime, e: HookEvent<'session.append'>, next
             runtime.tools.settle(block.tool_use_id, 'row')
         }
         if (!hold && !runtime.captureFailure && runtime.binding.thread)
-          void drain($, session).catch((error) => report($, error))
+          void drain(host, session).catch((error) => report(host, error))
       }
     }
     return stored
@@ -851,9 +852,9 @@ export async function recordRow($: Runtime, e: HookEvent<'session.append'>, next
 }
 
 /** The main conversation's tool call: its result is recorded under the turn that made the call. */
-export async function recordToolCall($: Runtime, e: HookEvent<'tool.call'>, next: HookNext<'tool.call'>) {
+export async function recordToolCall(host: Host, e: HookEvent<'tool.call'>, next: HookNext<'tool.call'>) {
   if (isAskingOwnQuestion() && e.tool === 'AskUserQuestion') return next(e)
-  const session = await $.session.id()
+  const session = await host.session.id()
   const runtime = stateFor(session)
   if (runtime.localTurn) return next(e)
   // The turn this call belongs to is fixed now, so a later result row keeps it even after the
@@ -880,9 +881,9 @@ export async function recordToolCall($: Runtime, e: HookEvent<'tool.call'>, next
       : [{ ...update, status: 'in_progress', name: e.tool,
         ...toolInfo(e.tool, e, root) }]).map(liveActivity)
     if (hold) holdRows(runtime, updates, runtime.currentTurnId)
-    else await persistUpdates($, session, updates, turnSequence)
+    else await persistUpdates(host, session, updates, turnSequence)
     if (!hold && !runtime.captureFailure && runtime.binding.thread)
-      void drain($, session).catch((error) => report($, error))
+      void drain(host, session).catch((error) => report(host, error))
     return result
   } finally {
     if (e.tool_use_id) {

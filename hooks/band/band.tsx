@@ -8,8 +8,9 @@ import {
   currentOrganizationId, isPersonalOrganizationId, loadOrganizationDirectory, organizationName,
 } from '../setup/organizations'
 import {
-  activation, type Binding, type HookEvent, type HookNext, report, requests, type Runtime, sessions,
+  activation, type Binding, type HookEvent, type HookNext, report, requests, sessions,
 } from '../core/session-state'
+import type { Host } from '../core/host'
 import {
   copyText, personColor, personKey, renderBand, SPINNER_FRAMES, type StatusSegment, statusSpinnerRunning,
   type StatusState,
@@ -82,16 +83,16 @@ export function clearDoneNotice() {
  * asked for once the last one was drawn, so time that passes with nothing drawn, as in a test that
  * moves the clock minutes on, costs one frame rather than one per interval.
  */
-export function syncSpinner($: Runtime) {
+export function syncSpinner(host: Host) {
   if (!spinnerRunning()) return stopSpinner()
   const spinner = bandState.spinner ?? { frame: 0 }
   bandState.spinner = spinner
   if (spinner.timer) return
-  const timer = $.clock.after(SPINNER_INTERVAL_MS, () => {
+  const timer = host.clock.after(SPINNER_INTERVAL_MS, () => {
     if (bandState.spinner !== spinner || spinner.timer !== timer) return
     spinner.timer = undefined
     spinner.frame = (spinner.frame + 1) % SPINNER_FRAMES.length
-    $.ui.invalidate('ui.render')
+    host.ui.invalidate()
   })
   spinner.timer = timer
 }
@@ -107,42 +108,42 @@ function stopSpinner() {
 }
 
 /** Record what a share or join is doing and redraw; the band's animation follows it. */
-export function setProgress($: Runtime, text: string, tone: ProgressTone, step?: [number, number]) {
+export function setProgress(host: Host, text: string, tone: ProgressTone, step?: [number, number]) {
   bandState.progressTimer?.cancel()
   bandState.progressTimer = undefined
   bandState.progress = { text, tone, step }
-  syncSpinner($)
-  $.ui.invalidate('ui.render')
+  syncSpinner(host)
+  host.ui.invalidate()
 }
 
 /** Finish an operation: a success clears after BAND_NOTICE_MS, a failure stays until replaced. */
-export function finishProgress($: Runtime, text: string, tone: 'done' | 'error') {
-  setProgress($, text, tone)
+export function finishProgress(host: Host, text: string, tone: 'done' | 'error') {
+  setProgress(host, text, tone)
   if (tone !== 'done') return
-  const timer = $.clock.after(BAND_NOTICE_MS, () => {
+  const timer = host.clock.after(BAND_NOTICE_MS, () => {
     if (bandState.progressTimer !== timer) return
     bandState.progressTimer = undefined
     bandState.progress = undefined
-    syncSpinner($)
-    $.ui.invalidate('ui.render')
+    syncSpinner(host)
+    host.ui.invalidate()
   })
   bandState.progressTimer = timer
 }
 
 /** Show the installation update's latest step in place, or drop its line once it ends (undefined). */
-export function showUpdateProgress($: Runtime, step: UpdateStep | undefined) {
+export function showUpdateProgress(host: Host, step: UpdateStep | undefined) {
   bandState.update = step
-  syncSpinner($)
-  $.ui.invalidate('ui.render')
+  syncSpinner(host)
+  host.ui.invalidate()
 }
 
 /** Drop an operation's band line, as a torn-down session does. */
-export function clearProgress($: Runtime) {
+export function clearProgress(host: Host) {
   bandState.progressTimer?.cancel()
   bandState.progressTimer = undefined
   bandState.progress = undefined
-  syncSpinner($)
-  $.ui.invalidate('ui.render')
+  syncSpinner(host)
+  host.ui.invalidate()
 }
 
 /**
@@ -194,12 +195,12 @@ function remoteActivity(remote: RemoteTurn, now: number): NonNullable<StatusStat
 }
 
 /** What the band shows, at the moment it draws. */
-async function statusView($: Runtime): Promise<StatusState> {
+async function statusView(host: Host): Promise<StatusState> {
   const session = watchedSession()
   const state = session ? sessions.get(session) : undefined
   const watch = watchStatus()
   const remote = feed.turn.state === 'remote' ? feed.remoteTurn : undefined
-  const now = await $.clock.now()
+  const now = await host.clock.now()
   const since = remote?.since ?? now
   const silent = now - (remote?.heard ?? since)
   // A turn with an item still open, such as a long command, is working however long it is silent.
@@ -207,7 +208,7 @@ async function statusView($: Runtime): Promise<StatusState> {
   const doing = remote ? remoteActivity(remote, now) : undefined
   const binding = state?.binding
   // The visibility label names an organization; read the directory once, and a later redraw fills it.
-  if (binding?.visibility) void loadOrganizationDirectory($)
+  if (binding?.visibility) void loadOrganizationDirectory(host)
   return {
     ...feed,
     // A staged automatic session records before its watch starts, while the band shows its connection step.
@@ -323,29 +324,29 @@ export function forgetBarTheme() {
  * The status bar's shade for the person's theme. A terminal that cannot show it as given rounds it
  * to a color it has; at worst the shade is lost and the band reads as a plain row.
  */
-async function barShade($: Runtime): Promise<string> {
+async function barShade(host: Host): Promise<string> {
   if (!barTheme) {
-    const theme = (await $.config.list()).find((row) => row.key === 'theme')?.value
+    const theme = (await host.config.list()).find((row) => row.key === 'theme')?.value
     barTheme = typeof theme === 'string' && theme.startsWith('light') ? 'light' : 'dark'
   }
   return BAR_SHADES[barTheme]
 }
 
 /** Copy the link to the surface the press came from, and confirm it only once the clipboard took it. */
-async function copyLink($: Runtime, link: string, surface: RenderSurface) {
-  const result = await $.ui.copy({ text: link, surface })
+async function copyLink(host: Host, link: string, surface: RenderSurface) {
+  const result = await host.ui.copy({ text: link, surface })
   if (!result.isCopied) {
-    await $.ui.log(`Delta: couldn't copy the link: ${result.reason}`, { to: 'debug' })
+    await host.ui.log(`Delta: couldn't copy the link: ${result.reason}`, { to: 'debug' })
     return
   }
   bandState.copiedTimer?.cancel()
-  const timer = $.clock.after(COPIED_MS, () => {
+  const timer = host.clock.after(COPIED_MS, () => {
     if (bandState.copiedTimer !== timer) return
     bandState.copiedTimer = undefined
-    $.ui.invalidate('ui.render')
+    host.ui.invalidate()
   })
   bandState.copiedTimer = timer
-  $.ui.invalidate('ui.render')
+  host.ui.invalidate()
 }
 
 /** Only the props a segment actually sets, so the surface never sees an undefined style. */
@@ -370,20 +371,20 @@ export function authorColor(item: WatchItem): string {
  * context their own command needs.
  */
 export async function drawBand(
-  $: Runtime,
+  host: Host,
   e: HookEvent<'ui.render', { component: 'AbovePrompt' }>,
   next: HookNext<'ui.render', { component: 'AbovePrompt' }>,
 ) {
-  await drainMessages($)
+  await drainMessages(host)
   if (!statusShown() || e.props.hasSurvey) return next(e)
   const maxRows = Math.max(0, e.props.maxRows)
   if (maxRows === 0) return next(e)
   // This draw shows the current frame, so the animation may ask for the next.
-  syncSpinner($)
+  syncSpinner(host)
   const terminal = e.surface === 'terminal'
   const columns = Math.max(0, e.props.bodyColumns)
-  const band = renderBand(await statusView($), { columns, terminal, rows: maxRows })
-  const { Box, Text, Link, Button } = $.ui.resolve(e)
+  const band = renderBand(await statusView(host), { columns, terminal, rows: maxRows })
+  const { Box, Text, Link, Button } = host.ui.resolve(e)
   const spans = (segments: StatusSegment[]) =>
     segments.map((segment, index) => <Text key={String(index)} {...segmentProps(segment)}>{segment.text}</Text>)
   const { text, href, ownRow, copy } = band.link ?? {}
@@ -400,17 +401,17 @@ export async function drawBand(
   // Taking the band's focus lands on the copy control, so Enter copies; a hotkey hint would read
   // as though the key worked from the prompt, where it only types.
   else if (href && copy) copier = <Button key="copy" plain dimColor autoFocus label={copy.label}
-    onPress={(press) => { void copyLink($, href, press.surface).catch((error) => report($, error)) }} />
+    onPress={(press) => { void copyLink(host, href, press.surface).catch((error) => report(host, error)) }} />
   // A private thread offers the same publication `/delta share` runs; the band does not repeat it
   // once the thread is shared with the organization.
   const sharer = band.share ? <Button key="share" plain dimColor label={band.share.label}
-    onPress={() => { const session = watchedSession(); if (session) beginShare($, session) }} /> : null
+    onPress={() => { const session = watchedSession(); if (session) beginShare(host, session) }} /> : null
   // A refused offline thread offers the person the choice that resolves it.
   const conflict = band.conflict ? [
     <Button key="fork" plain dimColor label={band.conflict.fork}
-      onPress={() => { const session = watchedSession(); if (session) beginRefusalResolution($, session, 'fork') }} />,
+      onPress={() => { const session = watchedSession(); if (session) beginRefusalResolution(host, session, 'fork') }} />,
     <Button key="discard" plain dimColor label={band.conflict.discard}
-      onPress={() => { const session = watchedSession(); if (session) beginRefusalResolution($, session, 'discard') }} />,
+      onPress={() => { const session = watchedSession(); if (session) beginRefusalResolution(host, session, 'discard') }} />,
   ] : []
   // Every control is set apart by the same gap the band's other segments use.
   const controls = [copier, sharer, ...conflict].filter((control) => control !== null)
@@ -440,7 +441,7 @@ export async function drawBand(
   // The desktop's own card sets the band apart. The terminal shades it, a status bar the width of
   // the band, so it reads as part of the input area rather than another transcript row.
   if (!terminal) return <Box flexDirection="column">{activity}{childActivity}{rows}</Box>
-  const bar = <Box key="bar" flexDirection="column" width={columns} paddingX={1} backgroundColor={await barShade($)}>{rows}</Box>
+  const bar = <Box key="bar" flexDirection="column" width={columns} paddingX={1} backgroundColor={await barShade(host)}>{rows}</Box>
   if (!activity && !childActivity) return bar
   return <Box flexDirection="column" width={columns}>
     {activity ? <Box paddingX={1}>{activity}</Box> : null}

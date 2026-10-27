@@ -7,7 +7,7 @@
  */
 import type { FsEntry } from 'claude-code'
 import { isJsonObject } from '../core/json'
-import type { Runtime } from '../core/session-state'
+import type { Host } from '../core/host'
 
 /** Where each platform keeps managed settings; WSL can also read the Windows one through `/mnt/c`. */
 const MANAGED_DIRECTORIES = [
@@ -53,37 +53,37 @@ export function agentDefinitionName(fileName: string, text: string): string {
  * Whether the organization may provide the agent type `type`. Anything that cannot be read counts as
  * the organization's, so a call this plugin cannot follow is left as Claude made it.
  */
-export async function providedByOrganization($: Runtime, type: string): Promise<boolean> {
+export async function providedByOrganization(host: Host, type: string): Promise<boolean> {
   try {
     const colon = type.indexOf(':')
     if (colon >= 0)
-      return organizationPluginNames(await $.settings.read({ source: 'policy' })).has(type.slice(0, colon).toLowerCase())
-    return (await managedAgentNames($)).has(type)
+      return organizationPluginNames(await host.settings.policy()).has(type.slice(0, colon).toLowerCase())
+    return (await managedAgentNames(host)).has(type)
   } catch {
     return true
   }
 }
 
 /** The names of the agents in every managed settings directory's `.claude/agents/`. */
-async function managedAgentNames($: Runtime): Promise<Set<string>> {
+async function managedAgentNames(host: Host): Promise<Set<string>> {
   const names = new Set<string>()
   let read = 0
   const visit = async (folder: string, depth: number) => {
     let entries: FsEntry[]
-    try { entries = await $.fs.list(folder) }
+    try { entries = await host.fs.list(folder) }
     catch { return }
     for (const entry of entries) {
       const path = `${folder}/${entry.name}`
       if (entry.kind === 'dir' && depth < MAX_AGENT_DEPTH) await visit(path, depth + 1)
       else if (entry.kind === 'file' && /\.md$/i.test(entry.name)) {
         if (++read > MAX_AGENT_FILES) throw new Error('too many managed agent definitions to read')
-        names.add(agentDefinitionName(entry.name, await $.fs.read(path)))
+        names.add(agentDefinitionName(entry.name, await host.fs.read(path)))
       }
     }
   }
   for (const directory of MANAGED_DIRECTORIES) {
     const agents = `${directory}/.claude/agents`
-    if (await $.fs.exists(agents)) await visit(agents, 0)
+    if (await host.fs.exists(agents)) await visit(agents, 0)
   }
   return names
 }

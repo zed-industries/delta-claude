@@ -1,5 +1,5 @@
 /**
- * What the band above the prompt shows, worked out from the watch and progress state without `$`:
+ * What the band above the prompt shows, worked out from the watch and progress state without a `Host`:
  * the turn it reports, the people and children it lists, and the rows it lays out. `band.tsx` draws it.
  */
 import { conversationText, itemAuthor, middleTruncate, toolCallParts } from '../watch/conversation'

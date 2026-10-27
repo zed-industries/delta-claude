@@ -9,7 +9,8 @@ import {
   itemAuthor, itemDisplay, itemMarkdown, keyedComment, type PendingRow,
 } from './conversation'
 import { DrawQueue, EMPTY_ROW_TEXT, shownItemId } from './row-delivery'
-import { drawnRowKey, type HookEvent, type HookNext, ledgerKey, type Runtime, stateFor } from '../core/session-state'
+import { drawnRowKey, type HookEvent, type HookNext, ledgerKey, stateFor } from '../core/session-state'
+import type { Host } from '../core/host'
 import { personColor, personKey, toolRowParts } from '../band/status'
 import { errorText } from '../core/text'
 import { feed, watchedSession } from './watch'
@@ -38,24 +39,24 @@ export function rowsHeld(session: string) {
  * The transcript draws one `$.ui.log` entry per call and flattens an embedded newline to U+FFFD, so
  * a person-visible item goes out one entry per paragraph, keeping the line breaks it should have.
  */
-export function showToPerson($: Runtime, text: string) {
-  for (const line of text.split('\n')) $.ui.log(line, { to: 'transcript' })
+export function showToPerson(host: Host, text: string) {
+  for (const line of text.split('\n')) host.ui.log(line, { to: 'transcript' })
 }
 
 /** A hidden row for Claude's context, held back while a turn runs so it never lands inside one. */
-export async function deliverNote($: Runtime, session: string, text: string) {
+export async function deliverNote(host: Host, session: string, text: string) {
   const runtime = stateFor(session)
   runtime.notes.push(text)
-  if (!rowsHeld(session)) await flushNotes($, session)
+  if (!rowsHeld(session)) await flushNotes(host, session)
 }
 
 /** Add the notes held for a session to Claude's context, in order. */
-async function flushNotes($: Runtime, session: string) {
+async function flushNotes(host: Host, session: string) {
   const runtime = stateFor(session)
   for (const text of runtime.notes.splice(0)) {
-    $.ui.log(`Adding a row to Claude's context: ${text.split('\n', 1)[0]}`, { to: 'debug' })
-    try { await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }) }
-    catch (error) { $.ui.log(`Couldn't add a Delta worktree update to Claude's context: ${String(error)}`, { to: 'debug' }) }
+    host.ui.log(`Adding a row to Claude's context: ${text.split('\n', 1)[0]}`, { to: 'debug' })
+    try { await host.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }) }
+    catch (error) { host.ui.log(`Couldn't add a Delta worktree update to Claude's context: ${String(error)}`, { to: 'debug' }) }
   }
 }
 
@@ -68,10 +69,10 @@ async function flushNotes($: Runtime, session: string) {
  * altogether. The row therefore waits for a redraw: a `ui.render` hook is a hook context, and the
  * command it raises inside one is answered.
  */
-function drawMessage($: Runtime, session: string, id: string): Promise<{ deny?: string }> {
+function drawMessage(host: Host, session: string, id: string): Promise<{ deny?: string }> {
   const result = drawQueue.wait(session, id, () => rowsHeld(session),
-    (milliseconds, action) => $.clock.after(milliseconds, action))
-  $.ui.invalidate('ui.render')
+    (milliseconds, action) => host.clock.after(milliseconds, action))
+  host.ui.invalidate()
   return result
 }
 
@@ -94,7 +95,7 @@ export function stopRows(): Promise<void> | undefined {
  * stored, which the `session.append` hook confirms; a command that fails or goes unanswered settles
  * its row as not drawn.
  */
-export async function drainMessages($: Runtime) {
+export async function drainMessages(host: Host) {
   const session = watchedSession()
   if (drawing || !session || !feed.view) return
   drawing = true
@@ -103,16 +104,16 @@ export async function drainMessages($: Runtime) {
       if (watchedSession() !== session || rowsHeld(session)) break
       const entry = drawQueue.shift()!
       let answer: string | undefined
-      try { answer = (await $.command.run({ command: 'delta', args: `show ${entry.id}` })).text }
+      try { answer = (await host.command.run({ command: 'delta', args: `show ${entry.id}` })).text }
       catch (error) { entry.settle({ deny: errorText(error) }); continue }
       if (answer === undefined || UNANSWERED_COMMAND.test(answer))
         entry.settle({ deny: "this host did not run the plugin's own command" })
-      else $.ui.log(`Ran the plugin's own command to draw the Delta item ${entry.id}.`, { to: 'debug' })
+      else host.ui.log(`Ran the plugin's own command to draw the Delta item ${entry.id}.`, { to: 'debug' })
     }
   } finally {
     drawing = false
   }
-  if (drawQueue.length) $.ui.invalidate('ui.render')
+  if (drawQueue.length) host.ui.invalidate()
 }
 
 /**
@@ -124,23 +125,23 @@ export async function drainMessages($: Runtime) {
  * neither. A host that will not draw the command output row leaves the model's row alone and shows
  * the person the plain notice.
  */
-async function appendRow($: Runtime, session: string, row: PendingRow): Promise<{ deny?: string }> {
+async function appendRow(host: Host, session: string, row: PendingRow): Promise<{ deny?: string }> {
   const id = row.commandItem
   const runtime = stateFor(session)
   if (id !== undefined) {
-    const drawing = runtime.drawn.drawOnce(id, () => drawMessage($, session, id))
+    const drawing = runtime.drawn.drawOnce(id, () => drawMessage(host, session, id))
     if (drawing) {
       const refusal = await drawing
       if (refusal.deny === undefined)
-        $.ui.log(`Drew the Delta item ${id} as a command output row.`, { to: 'debug' })
-      else fallbackNotice($, row, refusal.deny)
+        host.ui.log(`Drew the Delta item ${id} as a command output row.`, { to: 'debug' })
+      else fallbackNotice(host, row, refusal.deny)
     }
   }
-  return $.session.append({ message: { type: 'user', content: [{ type: 'text', text: row.text }] } })
+  return host.session.append({ message: { type: 'user', content: [{ type: 'text', text: row.text }] } })
 }
 
 /** Show a message or comment the plain way, when its command output row is refused; the model's row stands. */
-function fallbackNotice($: Runtime, row: PendingRow, reason: string) {
+function fallbackNotice(host: Host, row: PendingRow, reason: string) {
   const view = feed.view
   const commentId = keyedComment(row.id)
   const comment = commentId === undefined ? undefined : view?.comments.get(commentId)
@@ -148,8 +149,8 @@ function fallbackNotice($: Runtime, row: PendingRow, reason: string) {
   const display = !view ? undefined
     : comment ? commentDisplay(comment, view.commentParent(comment), view.commentTarget(comment), view.thread)
     : item ? itemDisplay(item, view.thread) : undefined
-  if (display) showToPerson($, display)
-  $.ui.log(`Couldn't draw this Delta message as a command row (${reason}).`, { to: 'debug' })
+  if (display) showToPerson(host, display)
+  host.ui.log(`Couldn't draw this Delta message as a command row (${reason}).`, { to: 'debug' })
 }
 
 /**
@@ -157,7 +158,7 @@ function fallbackNotice($: Runtime, row: PendingRow, reason: string) {
  * turn, and correct rows for items that later changed or disappeared. Held rows resume when the
  * prompt is dropped or its turn completes.
  */
-export function settleRemote($: Runtime, session: string): Promise<void> | undefined {
+export function settleRemote(host: Host, session: string): Promise<void> | undefined {
   if (settling || watchedSession() !== session) return settling
   const revision = feed.revision
   const owns = () => feed.revision === revision && watchedSession() === session
@@ -166,65 +167,65 @@ export function settleRemote($: Runtime, session: string): Promise<void> | undef
     // Start after `task` is assigned, so a run with nothing to do still clears `settling`.
     await undefined
     try {
-      if (!rowsHeld(session)) await flushNotes($, session)
+      if (!rowsHeld(session)) await flushNotes(host, session)
       const view = feed.view
       if (view) await addRows(view, {
-        append: (row) => appendRow($, session, row),
-        save: (ledger) => $.store.set(ledgerKey(session), ledger),
+        append: (row) => appendRow(host, session, row),
+        save: (ledger) => host.store.set(ledgerKey(session), ledger),
         held: () => rowsHeld(session),
         current: owns,
-        announce: (text) => showToPerson($, text),
-        debug: (text) => $.ui.log(text, { to: 'debug' }),
-        fail: (reason) => settleFailure($, reason),
+        announce: (text) => showToPerson(host, text),
+        debug: (text) => host.ui.log(text, { to: 'debug' }),
+        fail: (reason) => settleFailure(host, reason),
       })
     } finally {
       if (settling === task) settling = undefined
     }
-    if (owns() && feed.view && !feed.view.settled && !rowsHeld(session)) await settleRemote($, session)
+    if (owns() && feed.view && !feed.view.settled && !rowsHeld(session)) await settleRemote(host, session)
   })()
   settling = task
   return task
 }
 
-function settleFailure($: Runtime, reason: string) {
+function settleFailure(host: Host, reason: string) {
   // Print and SDK sessions keep no conversation a plugin can add rows to; nothing retries that.
   const notice = /keeps no conversation/.test(reason)
     ? `Couldn't add Delta activity to Claude's context: ${reason}. Remote Delta activity isn't available in print or SDK sessions.`
     : `Couldn't add Delta activity to Claude's context: ${reason}. It is offered again when the watcher reconnects.`
   if (settleNotice === notice) return
   settleNotice = notice
-  $.ui.log(notice)
+  host.ui.log(notice)
 }
 
 /**
  * A row of the plugin's own `show` run was stored as `row`: settle the draw of the item its output
  * row shows, and remember what the row is.
  */
-export async function storeShownRow($: Runtime, row: string, shown: { item?: string; echo?: boolean }) {
+export async function storeShownRow(host: Host, row: string, shown: { item?: string; echo?: boolean }) {
   if (shown.item !== undefined) {
     drawQueue.confirm(shown.item)
-    await rememberShownRow($, row, shown.item)
+    await rememberShownRow(host, row, shown.item)
   }
-  if (shown.echo) await rememberShownRow($, row, { echo: true })
+  if (shown.echo) await rememberShownRow(host, row, { echo: true })
 }
 
 /**
  * Remember what a stored row of the plugin's own `show` run is, so it draws the same after a restart
  * or resume; one the store refuses is still remembered by this process.
  */
-async function rememberShownRow($: Runtime, row: string, shown: ShownRow) {
+async function rememberShownRow(host: Host, row: string, shown: ShownRow) {
   shownRows.set(row, shown)
-  try { await $.store.set(drawnRowKey(await $.session.id(), row), shown) }
-  catch (error) { $.ui.log(`Couldn't remember a drawn Delta row (${String(error)}).`, { to: 'debug' }) }
+  try { await host.store.set(drawnRowKey(await host.session.id(), row), shown) }
+  catch (error) { host.ui.log(`Couldn't remember a drawn Delta row (${String(error)}).`, { to: 'debug' }) }
 }
 
 /** What a stored row of the plugin's own `show` run is, by the row's message id. */
-async function shownRow($: Runtime, row: string): Promise<ShownRow | undefined> {
+async function shownRow(host: Host, row: string): Promise<ShownRow | undefined> {
   const known = shownRows.get(row)
   if (known !== undefined) return known
   try {
     // Only this plugin writes these keys, and it writes a ShownRow; the value is checked below.
-    const stored = await $.store.get(drawnRowKey(await $.session.id(), row)) as ShownRow | undefined
+    const stored = await host.store.get(drawnRowKey(await host.session.id(), row)) as ShownRow | undefined
     if (typeof stored === 'string' || stored?.echo === true) {
       shownRows.set(row, stored)
       return stored
@@ -237,8 +238,8 @@ async function shownRow($: Runtime, row: string): Promise<ShownRow | undefined> 
  * identity the engine documents for a drawn row, else by the run's arguments, which rows stored
  * by earlier versions of the plugin carry.
  */
-async function drawnRowItem($: Runtime, row: string, args: string): Promise<string | undefined> {
-  const shown = await shownRow($, row)
+async function drawnRowItem(host: Host, row: string, args: string): Promise<string | undefined> {
+  const shown = await shownRow(host, row)
   return typeof shown === 'string' ? shown : shownItemId(args)
 }
 
@@ -247,12 +248,12 @@ async function drawnRowItem($: Runtime, row: string, args: string): Promise<stri
  * id: Desktop reports every row's origin as the SDK's. Only empty rows are looked up, as the echo is one.
  */
 export async function drawEcho(
-  $: Runtime,
+  host: Host,
   e: HookEvent<'ui.render', { component: 'UserMessage' }>,
   next: HookNext<'ui.render', { component: 'UserMessage' }>,
 ) {
-  if (e.props.text !== EMPTY_ROW_TEXT || typeof await shownRow($, e.requestId) !== 'object') return next(e)
-  const { Box } = $.ui.resolve(e)
+  if (e.props.text !== EMPTY_ROW_TEXT || typeof await shownRow(host, e.requestId) !== 'object') return next(e)
+  const { Box } = host.ui.resolve(e)
   return <Box />
 }
 
@@ -261,16 +262,16 @@ export async function drawEcho(
  * this plugin's own data rather than the row's stored text, which carries none of it.
  */
 export async function drawRow(
-  $: Runtime,
+  host: Host,
   e: HookEvent<'ui.render', { component: 'CommandOutput' }>,
   next: HookNext<'ui.render', { component: 'CommandOutput' }>,
 ) {
   if (e.props.command !== 'delta') return next(e)
-  const id = await drawnRowItem($, e.requestId, e.props.args)
+  const id = await drawnRowItem(host, e.requestId, e.props.args)
   if (id === undefined) return next(e)
   const view = feed.view
   const item = view?.items.get(id)
-  const { Box, Text, Markdown } = $.ui.resolve(e)
+  const { Box, Text, Markdown } = host.ui.resolve(e)
   if (view?.wasRemoved(id)) return <Box />
   const commentId = keyedComment(id)
   if (commentId !== undefined) {

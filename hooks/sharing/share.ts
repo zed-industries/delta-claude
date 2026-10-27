@@ -17,9 +17,10 @@ import {
 } from '../setup/organizations'
 import { samePath } from '../core/paths'
 import {
-  type Binding, isPaused, load, pauseCheckout, recoveryCommand, requests, type Runtime, save, serial, stateFor,
+  type Binding, isPaused, load, pauseCheckout, recoveryCommand, requests, save, serial, stateFor,
   storedBinding,
 } from '../core/session-state'
+import type { Host } from '../core/host'
 import { InteractionDismissedError, InteractionUnavailableError, invitationSummary, remoteRefusal } from '../setup/setup'
 import { type AudienceAnswer, chooseShareAudience, type ShareAudience } from './share-audience'
 import { snapshotMessages } from '../recording/snapshot'
@@ -64,16 +65,16 @@ export function endAppend() {
   }
 }
 
-export async function checkoutRoot($: Runtime): Promise<string> {
-  const result = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd: await $.session.cwd() })
+export async function checkoutRoot(host: Host): Promise<string> {
+  const result = await host.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd: await host.session.cwd() })
   if (result.exitCode !== 0 || result.isStdoutTruncated)
     throw new Error('current directory is not inside a Git checkout; open a checkout first')
   return result.stdout.trim()
 }
 
-async function assertShareSession($: Runtime, request: ShareRequest) {
-  const session = await $.session.id()
-  const cwd = await $.session.cwd()
+async function assertShareSession(host: Host, request: ShareRequest) {
+  const session = await host.session.id()
+  const cwd = await host.session.cwd()
   if (request.cancelled || requests.share !== request || session !== request.session || !samePath(cwd, request.cwd))
     throw new Error('The Claude session or folder changed during share; the obsolete share was stopped')
 }
@@ -93,60 +94,60 @@ export function sessionSyncs(binding: Binding | undefined): boolean {
  */
 type ShareOutcome = { url?: string; band?: string; notice?: string }
 
-async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
+async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   const { session } = request
-  const check = () => assertShareSession($, request)
-  await assertShareSession($, request)
+  const check = () => assertShareSession(host, request)
+  await assertShareSession(host, request)
   const runtime = stateFor(session)
   if (runtime.currentTurnId) throw new Error('Wait for the current Claude turn to finish before sharing or reattaching')
-  let binding = await serial(() => load($, session))
+  let binding = await serial(() => load(host, session))
   if (binding.joined || binding.joinTransition)
     throw new Error(`This session joined an already shared thread. Retry ${recoveryCommand(binding)} to reconnect; joining never attaches or republishes a checkout.`)
-  if (runtime.unsaved.length) await flushUnsaved($, session)
-  binding = await serial(() => load($, session))
+  if (runtime.unsaved.length) await flushUnsaved(host, session)
+  binding = await serial(() => load(host, session))
   if (runtime.captureFailure || binding.captureFailure)
     throw new Error(`a stored Claude row could not be saved locally (${runtime.captureFailure ?? binding.captureFailure}); sharing is paused to avoid an incomplete transcript`)
   // A repository Delta can't identify fails at the attach, after everything else; say so before asking.
-  const unidentified = remoteRefusal(await gitRemotes($, await checkoutRoot($)), '/delta-share')
+  const unidentified = remoteRefusal(await gitRemotes(host, await checkoutRoot(host)), '/delta-share')
   if (unidentified) throw new ShareRefusalError(unidentified)
   // Refuse a CLI this plugin cannot record against before its snapshot fills the local outbox.
-  await resolveCli($, (text) => setProgress($, text, 'active'))
-  await assertShareSession($, request)
-  await requireContract($, session)
-  await assertShareSession($, request)
+  await resolveCli(host, (text) => setProgress(host, text, 'active'))
+  await assertShareSession(host, request)
+  await requireContract(host, session)
+  await assertShareSession(host, request)
   // Asked before anything is staged, so declining leaves the session exactly as it was.
   const chosen: AudienceAnswer = request.choose
-    ? await chooseAudience($, session, request.choose.emails) : request.audience ?? { kind: 'organization' }
+    ? await chooseAudience(host, session, request.choose.emails) : request.audience ?? { kind: 'organization' }
   if (chosen.kind === 'none') return chosen.reason ? { notice: chosen.reason } : {}
   const audience = chosen
-  await assertShareSession($, request)
+  await assertShareSession(host, request)
   if (runtime.currentTurnId) throw new Error('Wait for the current Claude turn to finish before sharing or reattaching')
-  await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
+  await requireAuthentication(await authenticationHost(host), await resolveCli(host), check, async (text) => {
     await check()
-    setProgress($, 'Waiting for Delta sign-in…', 'active')
-    await $.ui.log(text, { to: 'transcript' })
+    setProgress(host, 'Waiting for Delta sign-in…', 'active')
+    await host.ui.log(text, { to: 'transcript' })
   })
   await check()
   // Every recorded path is shown relative to the checkout this share attaches.
-  const root = await checkoutRoot($)
-  await assertShareSession($, request)
+  const root = await checkoutRoot(host)
+  await assertShareSession(host, request)
   // Refused before the snapshot, so a refusal leaves no thread or staged records behind.
-  const joined = await joinedBindingAt($, root)
+  const joined = await joinedBindingAt(host, root)
   if (joined) throw new ShareRefusalError(joinedCheckoutRefusal(root, joined))
-  await assertShareSession($, request)
+  await assertShareSession(host, request)
   if (!binding.snapshot) {
     let release!: () => void
     snapshotBarrier.gate = new Promise<void>((resolve) => { release = resolve })
     try {
       if (snapshotBarrier.inFlight) await new Promise<void>((resolve) => { snapshotBarrier.quiet = resolve })
-      await assertShareSession($, request)
+      await assertShareSession(host, request)
       // Appends begun after the gate cannot reach the transcript until the snapshot is read.
-      setProgress($, 'Exporting earlier messages…', 'active', [2, 5])
-      const snapshot = snapshotMessages(await $.session.messages({ as: 'api' }))
-      await assertShareSession($, request)
-      setProgress($, `Exporting ${snapshot.length} earlier messages…`, 'active', [2, 5])
-      const summaries = await $.session.messages()
-      await assertShareSession($, request)
+      setProgress(host, 'Exporting earlier messages…', 'active', [2, 5])
+      const snapshot = snapshotMessages(await host.session.apiMessages())
+      await assertShareSession(host, request)
+      setProgress(host, `Exporting ${snapshot.length} earlier messages…`, 'active', [2, 5])
+      const summaries = await host.session.messages()
+      await assertShareSession(host, request)
       const toolResults = new Map(summaries.flatMap((row) =>
         row.toolUses.map((use) => [use.tool_use_id, use] as const)))
       for (const [id, tool] of toolResults) {
@@ -155,24 +156,24 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
       }
       // Snapshot only the normalized, post-compaction main conversation.
       await serial(async () => {
-        let state = await load($, session)
-        await assertShareSession($, request)
+        let state = await load(host, session)
+        await assertShareSession(host, request)
         for (const [index, message] of snapshot.entries()) {
           rememberToolResults(runtime.tools, message)
           const updates = messageUpdates(message, `snapshot:${index}`, runtime.tools.structuredResults,
             { root, omitted: runtime.tools.omitted })
-          for (const update of updates) state = await stageRecord($, state, { update })
+          for (const update of updates) state = await stageRecord(host, state, { update })
         }
         // Commit the complete immutable plan and its pending receipts together. Until
         // this succeeds, neither a retry nor a CLI invocation can see a partial import.
-        await save($, { ...state, snapshot: true })
+        await save(host, { ...state, snapshot: true })
       })
-      runtime.binding = await serial(() => load($, session))
+      runtime.binding = await serial(() => load(host, session))
       // The agents that already ran become child threads too. A failure leaves them unrecorded
       // and never fails the share.
       if (recordsChildren(session)) {
-        try { await adoptExistingChildren($, session) }
-        catch (error) { await $.ui.log(`Delta could not record this session's earlier subagents: ${errorText(error)}`, { to: 'transcript' }) }
+        try { await adoptExistingChildren(host, session) }
+        catch (error) { await host.ui.log(`Delta could not record this session's earlier subagents: ${errorText(error)}`, { to: 'transcript' }) }
       }
     } finally {
       // Nothing is recorded before the snapshot, so these hold only its bulk results.
@@ -186,8 +187,8 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   // Reattachment is the explicit recovery: it lifts every pause but the watcher's, which going live lifts.
   runtime.pauses.clear()
   runtime.deliveryNotice = undefined
-  binding = await serial(() => load($, session))
-  await assertShareSession($, request)
+  binding = await serial(() => load(host, session))
+  await assertShareSession(host, request)
   // A private share hands the thread to Delta's background uploader, as Private sync does, so it needs
   // an organization to upload to even in a repository with no saved team.
   const privateUpload = audience.kind === 'private' && !binding.autoUpload
@@ -195,18 +196,18 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
     // The repository's saved team decides where its sessions go, rather than the organization selected
     // in Delta: creating the thread under it makes the later `thread share` or invitation publish there too.
     // Asking who should see the session read the organization list, so the selected one is known.
-    const organization = (binding.thread ? threadOrganization(binding) : undefined) ?? await savedOrganization($, root) ??
+    const organization = (binding.thread ? threadOrganization(binding) : undefined) ?? await savedOrganization(host, root) ??
       (privateUpload ? currentOrganizationId : undefined)
     if (privateUpload && !organization)
       throw new Error('Delta has no team to sync this session to; check /delta-org list')
     // Creation is idempotent: for a thread that already exists, it only records the private upload.
-    const created = await threadCreate($, {
+    const created = await threadCreate(host, {
       externalId: session, organization: organization ? { id: organization, visibility: 'private' } : undefined, check,
     })
     if (binding.thread && created.thread_id !== binding.thread)
       throw new Error('Delta returned a different thread for this session; the existing binding was preserved')
     if (!binding.thread && !created.created) {
-      const status = await threadStatus($, created.thread_id, session)
+      const status = await threadStatus(host, created.thread_id, session)
       validateThreadFrontier(status, { session, thread: created.thread_id, next: binding.next, pending: binding.pending })
       // A durable identity always precedes append. A staged plan alone may have
       // been regenerated after losing the binding, so it cannot prove lineage.
@@ -214,24 +215,24 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
         throw new Error('This Delta producer already contains records, but its local thread identity and receipts are missing. Restore the matching producer state or start a new Claude session; do not reset or reuse sequence numbers. The existing Delta conversation was preserved.')
     }
     // Persist identity before further fallible commands; creation is idempotent if this write fails.
-    await serial(async () => save($, {
-      ...await load($, session), thread: created.thread_id, ...organization ? { organization } : {},
+    await serial(async () => save(host, {
+      ...await load(host, session), thread: created.thread_id, ...organization ? { organization } : {},
       ...privateUpload ? { autoUpload: { mode: 'private' as const, organization: organization! } } : {},
     }))
-    binding = await serial(() => load($, session))
+    binding = await serial(() => load(host, session))
   }
   // The thread exists from here on: it was bound already, or the creation above saved it.
   const thread = binding.thread
   if (!thread) throw new Error('Delta returned no thread for this session; the existing binding was preserved')
-  await assertShareSession($, request)
+  await assertShareSession(host, request)
   await stopConversation()
-  await assertShareSession($, request)
+  await assertShareSession(host, request)
   // Only now that the watcher is stopped is its pause true; the restarted watch lifts it once live.
   // A session that records offline does not wait for the watcher and takes no such pause.
   if (!recordsOffline(session, binding)) pauseCheckout(runtime, 'watcher')
-  setProgress($, 'Attaching the checkout…', 'active', [3, 5])
+  setProgress(host, 'Attaching the checkout…', 'active', [3, 5])
   let reference: string
-  try { reference = await attachWorktree($, root, thread, binding.checkoutReference, check, session) }
+  try { reference = await attachWorktree(host, root, thread, binding.checkoutReference, check, session) }
   catch (error) {
     // A checkout Delta manages for another thread, which no session here joined.
     if (error instanceof DeltaCommandError && error.reason === 'worktree_directory_in_use')
@@ -239,62 +240,62 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
     throw error
   }
   await serial(async () => {
-    const current = await load($, session)
+    const current = await load(host, session)
     if ((current.checkout && !samePath(current.checkout, root)) ||
         (current.checkoutReference !== undefined && worktreeHistory(current.checkoutReference) !== worktreeHistory(reference)))
       throw new Error('Delta returned a different checkout reference or directory; the existing binding was preserved')
-    await save($, { ...current, checkout: root, checkoutReference: reference, pendingWorktree: undefined })
+    await save(host, { ...current, checkout: root, checkoutReference: reference, pendingWorktree: undefined })
   })
-  await mountCheckout($, { session, checkout: root, checkoutReference: reference }, check)
-  await assertShareSession($, request)
+  await mountCheckout(host, { session, checkout: root, checkoutReference: reference }, check)
+  await assertShareSession(host, request)
   let outcome: ShareOutcome = { band: audience.kind === 'unchanged' ? 'Reconnected' : 'Synced privately' }
   if (audience.kind === 'unchanged' && !sessionSyncs(binding))
     throw new Error('This session has not been shared yet; run /delta-share and choose who should see it')
   // Keeping a thread Delta last reported as shared with its organization publishes it again, which is
   // idempotent and restores access the server has since lost.
   if (audience.kind === 'organization' || (audience.kind === 'unchanged' && binding.visibility === 'organization')) {
-    setProgress($, 'Publishing the thread…', 'active', [4, 5])
-    const shared = await threadShare($, thread, { form: request.form, check })
-    await serial(async () => save($, { ...await load($, session), url: shared.url }))
+    setProgress(host, 'Publishing the thread…', 'active', [4, 5])
+    const shared = await threadShare(host, thread, { form: request.form, check })
+    await serial(async () => save(host, { ...await load(host, session), url: shared.url }))
     outcome = { url: shared.url, band: 'Shared' }
   } else if (audience.kind === 'invite') {
     // Inviting uploads a thread that is not on the server yet privately, so only the people invited see it.
-    setProgress($, 'Sending invitations…', 'active', [4, 5])
-    const { url, results } = await threadInvite($, thread, audience.emails, { form: request.form, check })
-    await serial(async () => save($, { ...await load($, session), url }))
+    setProgress(host, 'Sending invitations…', 'active', [4, 5])
+    const { url, results } = await threadInvite(host, thread, audience.emails, { form: request.form, check })
+    await serial(async () => save(host, { ...await load(host, session), url }))
     const invited = results.filter((result) => result.invited).length
     outcome = {
       url, notice: `${invitationSummary(results, 'this session')} Link: ${url}`,
       band: invited ? `Invited ${invited === 1 ? '1 person' : `${invited} people`}` : 'Synced privately; nobody was invited',
     }
   }
-  await assertShareSession($, request)
-  await startConversation($, session)
-  await assertShareSession($, request)
-  setProgress($, 'Syncing files…', 'active', [5, 5])
-  await drain($, session)
-  for (const child of children.values()) if (child.session === session) void deliverChild($, child)
+  await assertShareSession(host, request)
+  await startConversation(host, session)
+  await assertShareSession(host, request)
+  setProgress(host, 'Syncing files…', 'active', [5, 5])
+  await drain(host, session)
+  for (const child of children.values()) if (child.session === session) void deliverChild(host, child)
   if (isPaused(runtime))
     throw new Error('checkout sharing is paused; saved messages remain queued until reattachment succeeds')
   if (runtime.captureFailure || runtime.unsaved.length)
     throw new Error('a live row could not be saved locally; fix the outbox error and retry /delta-share')
-  await verifyCheckout($, await load($, session))
-  await assertShareSession($, request)
+  await verifyCheckout(host, await load(host, session))
+  await assertShareSession(host, request)
   runtime.joinFailure = undefined
-  return { ...outcome, url: outcome.url ?? (await serial(() => load($, session))).url }
+  return { ...outcome, url: outcome.url ?? (await serial(() => load(host, session))).url }
 }
 
 /**
  * The joined session whose mounts include `directory`. A mount's path is unique to its thread and
  * owner, so a match means the directory is that thread's checkout, not one this session can share.
  */
-export async function joinedBindingAt($: Runtime, directory: string): Promise<Binding | undefined> {
+export async function joinedBindingAt(host: Host, directory: string): Promise<Binding | undefined> {
   // A Claude build without `$.store.keys` cannot enumerate the store; Delta still refuses the attach.
   let keys: string[]
-  try { keys = await $.store.keys() } catch { return }
+  try { keys = await host.store.keys() } catch { return }
   for (const storeKey of keys) {
     if (!storeKey.startsWith('session:')) continue
-    const binding = await storedBinding($, storeKey)
+    const binding = await storedBinding(host, storeKey)
     if (!binding?.joined || !binding.thread) continue
     if (binding.mounts?.some((mount) => samePath(mount.directory, directory))) return binding
   }
@@ -315,8 +316,8 @@ export function shareFailureText(error: unknown, retry: string): string {
 }
 
 /** A checkout's Git remote names, or undefined when Git cannot list them. */
-export async function gitRemotes($: Runtime, root: string): Promise<string[] | undefined> {
-  const result = await $.process.run(['git', 'remote'], { cwd: root }).catch(() => undefined)
+export async function gitRemotes(host: Host, root: string): Promise<string[] | undefined> {
+  const result = await host.process.run(['git', 'remote'], { cwd: root }).catch(() => undefined)
   if (!result || result.exitCode !== 0 || result.isStdoutTruncated) return undefined
   return result.stdout.split('\n').map((name) => name.trim()).filter(Boolean)
 }
@@ -330,30 +331,30 @@ function joinedCheckoutRefusal(root: string, joined: Binding): string {
  * The band reports its progress, and once the share succeeds it keeps the link on hand, so nothing is
  * added to the transcript.
  */
-export function startShare($: Runtime, request: ShareRequest) {
+export function startShare(host: Host, request: ShareRequest) {
   requests.share = request
-  setProgress($, 'Preparing to share…', 'active', [1, 5])
-  $.clock.after(0, async () => {
+  setProgress(host, 'Preparing to share…', 'active', [1, 5])
+  host.clock.after(0, async () => {
     // The band's share control starts a share before it has read Claude's directory.
-    request.cwd ||= await $.session.cwd()
-    await runShare($, request)
+    request.cwd ||= await host.session.cwd()
+    await runShare(host, request)
   })
 }
 
-async function runShare($: Runtime, request: ShareRequest) {
+async function runShare(host: Host, request: ShareRequest) {
   const { session } = request
   try {
-    const outcome = await share($, request)
-    if (outcome.band) finishProgress($, outcome.band, 'done')
-    else clearProgress($)
-    if (outcome.notice) await $.ui.log(outcome.notice, { to: 'transcript' })
-    if (outcome.url) await $.ui.log(`Delta share link: ${outcome.url}`, { to: 'debug' })
+    const outcome = await share(host, request)
+    if (outcome.band) finishProgress(host, outcome.band, 'done')
+    else clearProgress(host)
+    if (outcome.notice) await host.ui.log(outcome.notice, { to: 'transcript' })
+    if (outcome.url) await host.ui.log(`Delta share link: ${outcome.url}`, { to: 'debug' })
   } catch (error) {
     if (request.cancelled || requests.share !== request) return
     const text = error instanceof AccessRequiredError ? error.message
       : shareFailureText(error, recoveryCommand(stateFor(session).binding))
-    setProgress($, text, 'error')
-    await $.ui.log(text, { to: 'transcript' })
+    setProgress(host, text, 'error')
+    await host.ui.log(text, { to: 'transcript' })
   } finally {
     if (requests.share === request) requests.share = undefined
   }
@@ -363,17 +364,17 @@ async function runShare($: Runtime, request: ShareRequest) {
  * Decide who a `/delta share` makes the session visible to: the addresses typed after the command, or
  * the person's answer to the question; `none` carries the command's answer when nothing is shared.
  */
-async function chooseAudience($: Runtime, session: string, typed: string[]): Promise<AudienceAnswer> {
+async function chooseAudience(host: Host, session: string, typed: string[]): Promise<AudienceAnswer> {
   if (typed.length) return { kind: 'invite', emails: typed }
   const binding = stateFor(session).binding
-  await loadOrganizationDirectory($)
+  await loadOrganizationDirectory(host)
   const organization = (binding ? threadOrganization(binding) : undefined) ??
-    await savedOrganization($, await checkoutRoot($)) ?? currentOrganizationId
+    await savedOrganization(host, await checkoutRoot(host)) ?? currentOrganizationId
   // A personal organization has nobody to share with, and a thread already shared with its organization stays shared.
   const team = isPersonalOrganizationId(organization ?? '') || binding?.visibility === 'organization' ? undefined
     : organizationName(organization) ?? 'your team'
   try {
-    return await chooseShareAudience(claudeInteraction($), { team, synced: sessionSyncs(binding) })
+    return await chooseShareAudience(claudeInteraction(host), { team, synced: sessionSyncs(binding) })
   } catch (error) {
     if (error instanceof InteractionDismissedError) return { kind: 'none', reason: '' }
     if (error instanceof InteractionUnavailableError)
@@ -383,13 +384,13 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
 }
 
 /** Begin the same publication flow `/delta share` runs, for the band's share control. */
-export function beginShare($: Runtime, session: string, audience?: ShareAudience): boolean {
+export function beginShare(host: Host, session: string, audience?: ShareAudience): boolean {
   if (requests.share) return false
   if (stateFor(session).currentTurnId) {
     requests.shareAfterTurn = { session, ...audience ? { audience } : {} }
-    $.ui.invalidate('ui.render')
+    host.ui.invalidate()
     return true
   }
-  startShare($, { session, cwd: '', ...audience ? { audience } : {} })
+  startShare(host, { session, cwd: '', ...audience ? { audience } : {} })
   return true
 }

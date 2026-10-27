@@ -2,7 +2,7 @@
  * Each Claude session's state in this process and its binding in the store: which session is recorded
  * now, the join and share in flight, checkout pauses, and loading and saving bindings one at a time.
  */
-import type { EngineInterface, EventName, HookFor, MatchedHook, Timer } from 'claude-code'
+import type { EventName, HookFor, MatchedHook, Timer } from 'claude-code'
 import type { SyncReminder } from '../band/band'
 import { type Execution, restoreBinding } from './binding'
 import type { Entry } from '../subagents/children'
@@ -16,8 +16,7 @@ import type { ShareAudience } from '../sharing/share-audience'
 import { errorText } from './text'
 import { DeltaSendError, type ThreadMount, type ThreadUpload } from '../cli/thread-commands'
 import { ToolRecords } from '../recording/tool-records'
-
-export type Runtime = EngineInterface
+import type { Host } from './host'
 
 /** The hook registered for event `E` with matcher `M`, for a handler body that lives in a feature module. */
 type HookOf<E extends EventName, M> = [M] extends [undefined] ? HookFor<E> : MatchedHook<E, M>
@@ -288,12 +287,12 @@ export function forgetTranscriptPath(session: string) {
   transcriptPaths.delete(session)
 }
 
-export async function save($: Runtime, value: Binding, isCurrent = () => true) {
+export async function save(host: Host, value: Binding, isCurrent = () => true) {
   // A recording session keeps its transcript's latest path, so a continuation can find the record
   // Claude Code appends there.
   const transcript = transcriptPathOf(value.session)
   if (transcript && value.thread && value.transcript !== transcript) value = { ...value, transcript }
-  await $.store.set(key(value.session), value)
+  await host.store.set(key(value.session), value)
   // A session already ended and pruned must not be recreated by a late write.
   const state = sessions.get(value.session)
   if (state && isCurrent()) state.binding = value
@@ -303,12 +302,12 @@ export async function save($: Runtime, value: Binding, isCurrent = () => true) {
  * The binding saved under `storeKey`, as this plugin wrote it. Only this plugin writes binding keys,
  * so the value is taken to have a binding's shape; `restoreBinding` checks the fields delivery needs.
  */
-export async function storedBinding($: Runtime, storeKey: string): Promise<Binding | undefined> {
-  return await $.store.get(storeKey) as Binding | undefined
+export async function storedBinding(host: Host, storeKey: string): Promise<Binding | undefined> {
+  return await host.store.get(storeKey) as Binding | undefined
 }
 
-export async function load($: Runtime, session: string): Promise<Binding> {
-  const previous = await storedBinding($, key(session))
+export async function load(host: Host, session: string): Promise<Binding> {
+  const previous = await storedBinding(host, key(session))
   if (!previous || previous.session !== session) return { session, snapshot: false, next: 1, pending: [] }
   return restoreBinding(previous)
 }
@@ -324,12 +323,12 @@ export function boundDirectory(binding?: Binding): string | undefined {
   return binding.joined ? binding.directory : binding.checkout
 }
 
-export async function report($: Runtime, error: unknown) {
+export async function report(host: Host, error: unknown) {
   // A delivery failure was already shown, with its retry or pause, where it was classified.
   if (error instanceof DeltaSendError) return
   const text = `Delta sharing paused: ${errorText(error)}. ${recoveryAdvice(sessions.get(activation.session)?.binding)}.`
-  await $.ui.status(text)
-  await $.ui.log(text)
+  await host.ui.status(text)
+  await host.ui.log(text)
 }
 
 /**
@@ -389,10 +388,10 @@ export function forgetRuntime(session: string, runtime: SessionState) {
  * Mark when a session stopped here, on every end, a clear or a switch included: only a marked binding
  * can be pruned, since an unmarked one may be live in another Claude process.
  */
-export async function markEnded($: Runtime, session: string) {
+export async function markEnded(host: Host, session: string) {
   try {
-    const stored = await storedBinding($, key(session))
+    const stored = await storedBinding(host, key(session))
     if (stored?.session === session && stored.endedAt === undefined)
-      await $.store.set(key(session), { ...stored, endedAt: await $.clock.now() })
+      await host.store.set(key(session), { ...stored, endedAt: await host.clock.now() })
   } catch { /* a session that cannot record its end is simply never pruned */ }
 }
