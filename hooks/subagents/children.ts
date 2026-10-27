@@ -57,8 +57,17 @@ export type ChildBinding = {
    * no thread is created and no checkout is attached for it.
    */
   adopted?: true
-  /** The owner Delta mounted an adopted thread's own worktrees under, released when the session ends. */
+  /**
+   * The owner Delta mounted the child's own worktrees under, an adopted thread's or an isolated child's
+   * fork, released when the session ends.
+   */
   mountOwner?: string
+  /**
+   * The git worktree Claude made for an isolated child, which a link to the child's fork stands in for
+   * while the session runs, so the child works in the fork under the path Claude gave it. Claude's
+   * worktree itself waits beside it, `.claude-worktree` appended, until the session ends.
+   */
+  claudeWorktree?: string
   /**
    * The parent waits on this thread's turn, so it is told the reply when the turn ends: `claude` for
    * a thread the plugin started Claude on, which Claude itself reports nothing of, and `delta` for a
@@ -69,15 +78,17 @@ export type ChildBinding = {
   reportedItem?: string
 }
 
-/** The kinds of spawn that start an agent this plugin records as a child thread. */
-export type SpawnKind = { fork: boolean; isTeammate?: true; workflow?: unknown }
-
 /**
- * Whether a spawn starts an ordinary subagent. Forks, teammates, and workflow agents keep running in
- * Claude without a child thread of their own.
+ * Whether an agent `$.agent.list()` names is an ordinary subagent. Forks and teammates keep running in
+ * Claude without a child thread of their own, as do workflow agents, which the list never names.
  */
-export function recordsSubagent(spawn: SpawnKind): boolean {
-  return !spawn.fork && !spawn.isTeammate && spawn.workflow === undefined
+export function recordsSubagent(agent: { type: string; teammateId?: string }): boolean {
+  return agent.teammateId === undefined && agent.type !== 'fork' && agent.type !== 'teammate'
+}
+
+/** Whether `tool` is the one that starts subagents: `Agent`, which a transcript from an older Claude names `Task`. */
+export function isAgentTool(tool: string): boolean {
+  return tool === 'Agent' || tool === 'Task'
 }
 
 export function childKey(session: string, agentId: string): string {

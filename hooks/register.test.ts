@@ -2,6 +2,7 @@ import type { UiCopyResult } from 'claude-code'
 import { describe, expect, test as kitTest, tier } from 'claude-code/testing'
 import { cliFixture } from './testing/cli-fixtures'
 import { claudeVersionWarning } from './core/compatibility'
+import { transcriptCandidate } from './core/transcript'
 import { addRows, itemFingerprint, type PendingRow, RemoteView } from './watch/conversation'
 import {
   abovePrompt, ADA, bash, CHECKOUT, commandOutput, CONFIG, drawBandText, drawReady, expectNoSetupCommands,
@@ -2908,13 +2909,15 @@ describe('recording titles', () => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
     await fake.share($)
-    const transcript = '/config/projects/repo/session.jsonl'
+    const transcript = transcriptCandidate(CONFIG, CHECKOUT, fake.session)
     const titles = () => fake.records().flatMap((record) =>
       record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])
+    let turns = 0
     const stop = async (...lines: object[]) => {
       fake.files.set(transcript, [...(fake.files.get(transcript) ?? '').split('\n').filter(Boolean),
         ...lines.map((line) => JSON.stringify(line))].join('\n') + '\n')
-      await $.classic.Stop({ transcript_path: transcript, stop_hook_active: false } as any)
+      await $.turn.start(turnStart(`turn-${++turns}`, 'hello'))
+      await $.turn.complete(turnComplete(`turn-${turns}`))
       await fake.settle()
     }
     // No title yet: nothing is recorded.
@@ -2937,19 +2940,51 @@ describe('recording titles', () => {
     fake.expectClean()
   })
 
+  test("a session finds its transcript in another project's folder after a move", async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('initial')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    // A `/cd` moved the file, or Claude shortened the folder's name; the working directory's folder has none.
+    const transcript = `${CONFIG}/projects/elsewhere/${fake.session}.jsonl`
+    fake.files.set(`${CONFIG}/projects/other/unrelated.jsonl`, '')
+    fake.files.set(transcript, JSON.stringify({ type: 'ai-title', aiTitle: 'Found it', sessionId: fake.session }) + '\n')
+    await $.turn.start(turnStart('turn-1', 'hello'))
+    await $.turn.complete(turnComplete('turn-1'))
+    await fake.settle()
+    expect(fake.records().flatMap((record) =>
+      record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])).toEqual(['Found it'])
+    expect((fake.store.get(`session:${fake.session}`) as { transcript?: unknown }).transcript).toBe(transcript)
+    fake.expectClean()
+  })
+
+  test('a session that keeps no transcript stops looking for one after a few turns', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('initial')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    for (let turn = 1; turn <= 5; turn++) {
+      await $.turn.start(turnStart(`turn-${turn}`, 'hello'))
+      await $.turn.complete(turnComplete(`turn-${turn}`))
+      await fake.settle()
+    }
+    expect(fake.listed.filter((path) => path === `${CONFIG}/projects`)).toHaveLength(3)
+    fake.expectClean()
+  })
+
   test('a title still arrives when reading from an offset fails, and a missing transcript fails nothing', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
     await fake.share($)
-    const transcript = '/config/projects/repo/session.jsonl'
+    const transcript = transcriptCandidate(CONFIG, CHECKOUT, fake.session)
     const titles = () => fake.records().flatMap((record) =>
       record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])
-    const stop = async (path = transcript) => {
-      await $.classic.Stop({ transcript_path: path, stop_hook_active: false } as any)
+    let turns = 0
+    const stop = async () => {
+      await $.turn.start(turnStart(`turn-${++turns}`, 'hello'))
+      await $.turn.complete(turnComplete(`turn-${turns}`))
       await fake.settle()
     }
     // Neither a missing transcript nor a missing reader pauses sharing or says anything.
-    await stop('/config/projects/repo/missing.jsonl')
+    await stop()
     fake.failTranscriptRead = true
     fake.files.set(transcript, JSON.stringify({ type: 'ai-title', aiTitle: 'Read whole', sessionId: fake.session }) + '\n')
     await stop()

@@ -2,11 +2,12 @@
  * Recording Claude's subagents, each into a child thread of its own: their bindings, turns, records,
  * checkouts and delivery.
  */
-import type { ApiMessage, Timer } from 'claude-code'
-import { autoActivating, outbox } from '../setup/activation'
+import type { ApiMessage, FsEntry, Timer } from 'claude-code'
+import { outbox } from '../setup/activation'
 import { restoreBinding } from '../core/binding'
 import { type ChildBinding, childKey, childName, childOutbox, recordsSubagent, sentBy } from './children'
 import { capturedMessage, messageUpdates, resultUpdate, toolInfo } from '../recording/content'
+import { isJsonObject } from '../core/json'
 import {
   appendPending, collectAcknowledgedOutbox, liveActivity, type RecordBody, recordsOffline, rememberToolResults,
   runningUpdate, stageOutboxRecord,
@@ -17,7 +18,9 @@ import {
 } from '../cli/delta-cli'
 import { attachWorktree, mountCheckout } from '../sharing/checkout'
 import { mountThread, unmountThread } from '../sharing/join'
-import { samePath } from '../core/paths'
+import { providedByOrganization } from './org-agents'
+import { KEPT_SUFFIX, listedBranch } from './git-worktrees'
+import { isWithin, samePath } from '../core/paths'
 import { deliverNote } from '../watch/rows'
 import {
   boundDirectory, type HeldRow, type HookEvent, type HookNext, load, type Runtime, save, serial, stateFor,
@@ -69,28 +72,8 @@ export type ChildRuntime = {
 export const children = new Map<string, ChildRuntime>()
 /** Agents never recorded here: other kinds of agent, and agents spawned by one that is not recorded. */
 const unrecordedAgents = new Set<string>()
-/** Spawns whose agent ID is not known yet. A child's first hooks can run before its spawn resolves. */
-let pendingSpawns = 0
-
-/** A spawn started whose agent ID is not known yet. */
-export function beginSpawn() {
-  pendingSpawns++
-}
-
-/** A spawn settled; once none is pending, what unnamed agents recorded meanwhile is not recorded. */
-export function endSpawn() {
-  pendingSpawns--
-  if (!pendingSpawns) earlyChildSteps.clear()
-}
-/** The recorded spawns in flight, by the loop that spawned them; their agent IDs are not known yet. */
-export const spawning: { parent: string; name: string }[] = []
-/** What each not-yet-named agent's hooks recorded meanwhile, replayed once its spawn names it. */
-export const earlyChildSteps = new Map<string, ((child: ChildRuntime) => Promise<void>)[]>()
-
-/** Whether an agent's hooks may concern a recorded child: one already recorded, or one a pending spawn may name. */
-function mayRecordChild(agentId: string): boolean {
-  return children.has(agentId) || (pendingSpawns > 0 && !unrecordedAgents.has(agentId))
-}
+/** Agents whose first hook is finding out whether they are recorded, which their other hooks wait for. */
+const discoveries = new Map<string, Promise<ChildRuntime | undefined>>()
 
 export function stopReasonOf(e: { isAborted?: boolean; reason?: string }): 'end_turn' | 'cancelled' | 'refusal' | 'error' | undefined {
   return e.isAborted || e.reason === 'aborted' ? 'cancelled'
@@ -107,15 +90,25 @@ export function childStep($: Runtime, child: ChildRuntime, step: () => Promise<v
 }
 
 /**
- * Run `step` for the recorded child `agentId`, or hold it until a pending spawn names that agent.
- * An agent nobody spawns while this session records is not recorded, so its steps are dropped.
+ * The recorded child `agentId`, or undefined for an agent this session does not record. This plugin
+ * hooks no `agent.spawn`: the organization's built-in guard keeps that event from the plugins a person
+ * installs whenever the organization provides the agent, and Claude then says each one's hook was
+ * skipped. So the first hook an agent's loop raises finds out, and its other hooks wait for that.
  */
-function onChild($: Runtime, agentId: string, step: (child: ChildRuntime) => Promise<void>): Promise<void> {
-  const child = children.get(agentId)
-  if (child) return childStep($, child, () => step(child))
-  if (!unrecordedAgents.has(agentId) && pendingSpawns)
-    earlyChildSteps.set(agentId, [...earlyChildSteps.get(agentId) ?? [], step])
-  return Promise.resolve()
+export function childFor($: Runtime, agentId: string): Promise<ChildRuntime | undefined> {
+  const known = children.get(agentId)
+  if (known || unrecordedAgents.has(agentId)) return Promise.resolve(known)
+  let discovery = discoveries.get(agentId)
+  if (!discovery) {
+    // A failure leaves the agent unknown, so its next hook asks again.
+    discovery = discoverChild($, agentId).catch(async (error) => {
+      try { await $.ui.log(`Delta could not record the subagent ${agentId}: ${String(error)}`, { to: 'debug' }) }
+      catch { /* reporting never fails a hook */ }
+      return undefined
+    }).finally(() => { discoveries.delete(agentId) })
+    discoveries.set(agentId, discovery)
+  }
+  return discovery
 }
 
 /** The binding saved for a recorded subagent, as this plugin wrote it; see `storedBinding`. */
@@ -145,42 +138,78 @@ export function recordsChildren(session: string): boolean {
 }
 
 /**
- * Start recording the agent a spawn named, or resume recording one this session already records.
- * A new child's state is saved before any of its steps run, then the steps its hooks held run.
+ * Decide whether the agent `agentId`, whose loop raised its first hook here, is recorded, and start
+ * recording it if so; Claude lists an agent before its loop raises anything. A child this session
+ * recorded before, as a resumed one, goes on recording. Otherwise an ordinary subagent a recorded loop
+ * started is recorded, unless it ran before, unrecorded: its history is not ours. The plugin's own spawn
+ * for a thread Claude runs is that thread's.
  */
-async function adoptChild($: Runtime, session: string, agentId: string,
-    spawn: { parent: string; name: string; foreground: boolean; resumed: boolean }) {
-  let child = children.get(agentId)
-  if (child) {
-    child.sender = spawn.parent
-    child.foreground = spawn.foreground
-  } else {
-    const stored = await storedChildBinding($, session, agentId)
-    // A resumed agent this session never recorded stays unrecorded: its history is not ours.
-    if (!stored && spawn.resumed) {
-      unrecordedAgents.add(agentId)
-      earlyChildSteps.delete(agentId)
-      return
-    }
-    const adopted = addChild(session, agentId, spawn.parent, spawn.foreground)
-    child = adopted
-    // A thread created while its spawn was in flight, for its worktree, may carry another spawn's name.
-    if (stored && !spawn.resumed && stored.name !== spawn.name) await childStep($, adopted, async () => {
-      const current = await loadChild($, adopted)
-      await saveChild($, { ...await stageChildRecord($, current, {
-        update: { sessionUpdate: 'session_info_update', title: spawn.name },
-      }), name: spawn.name })
-    })
-    // Saving is the child's first step, so none of its steps can run before its state exists.
-    if (!stored) await childStep($, adopted, async () => {
-      await saveChild($, { session, agentId, parent: spawn.parent, name: spawn.name, next: 1, pending: [] })
-      await rememberChild($, session, agentId)
-    })
-  }
-  const held = earlyChildSteps.get(agentId) ?? []
-  earlyChildSteps.delete(agentId)
-  for (const step of held) void childStep($, child, () => step(child))
+async function discoverChild($: Runtime, agentId: string): Promise<ChildRuntime | undefined> {
+  const session = await $.session.id()
+  if (!recordsChildren(session)) return unrecorded(agentId)
+  const stored = await storedChildBinding($, session, agentId)
+  if (stored) return children.get(agentId) ?? addChild(session, agentId, stored.parent, false)
+  const agent = (await $.agent.list()).find((listed) => listed.id === agentId)
+  if (!agent || !recordsSubagent(agent)) return unrecorded(agentId)
+  if (isAdoptionSpawn(agent.description)) return adoptThread($, agentId) ?? unrecorded(agentId)
+  const parent = agent.parentId ?? session
+  if (parent !== session && !children.has(parent)) return unrecorded(agentId)
+  const messages = await $.session.messages({ agentId })
+  if (Array.isArray(messages) && messages.some((message) => message.role === 'assistant')) return unrecorded(agentId)
+  const known = children.get(agentId)
+  if (known) return known
+  // An agent another plugin spawns runs in the background, as does one Claude said it launched there.
+  // One that starts beside a waiting Agent call of its parent before its own call answers `async_launched`
+  // counts as foreground until that answer: no hook the guard lets through says sooner.
+  const background = agent.spawnedBy !== undefined || launchedInBackground.delete(agentId)
+  const child = addChild(session, agentId, parent, !background && (waitingCalls.get(parent) ?? 0) > 0)
+  // Saving is the child's first step, so none of its steps can run before its state exists.
+  await childStep($, child, async () => {
+    await saveChild($, { session, agentId, parent, name: childName(agent), next: 1, pending: [] })
+    await rememberChild($, session, agentId)
+  })
   void deliverChild($, child)
+  return child
+}
+
+function unrecorded(agentId: string): undefined {
+  unrecordedAgents.add(agentId)
+  launchedInBackground.delete(agentId)
+  return undefined
+}
+
+/** Per loop, how many of its Agent calls that wait for their subagent are running; see `followAgentCall`. */
+const waitingCalls = new Map<string, number>()
+/** Agents Claude launched in the background before their loop raised anything here. */
+const launchedInBackground = new Set<string>()
+
+/**
+ * Run a model's Agent call, counting the calls of each loop that wait for their subagent: a subagent
+ * that starts while one of its parent's runs is in the foreground, and taking it over stops that turn.
+ * Claude may still launch it in the background, as its definition can ask, which the call's answer says.
+ */
+export async function followAgentCall<R>($: Runtime, e: HookEvent<'tool.call'>, run: () => Promise<R>): Promise<R> {
+  const call: unknown = e
+  const loop = e.agentId ?? await $.session.id()
+  const waits = isJsonObject(call) && call.run_in_background !== true
+  if (waits) waitingCalls.set(loop, (waitingCalls.get(loop) ?? 0) + 1)
+  try {
+    const result = await run()
+    const answer: unknown = result
+    const record = isJsonObject(answer) ? answer.result : undefined
+    if (isJsonObject(record) && record.status === 'async_launched' && typeof record.agentId === 'string') {
+      const child = children.get(record.agentId)
+      if (child) child.foreground = false
+      else launchedInBackground.add(record.agentId)
+    }
+    return result
+  } finally {
+    if (waits) {
+      const left = (waitingCalls.get(loop) ?? 0) - 1
+      if (left > 0) waitingCalls.set(loop, left)
+      else waitingCalls.delete(loop)
+    }
+  }
 }
 
 /** Begin a child's turn: close any turn left open, stage its scoped start, and place its held rows. */
@@ -687,168 +716,206 @@ export function forgetSubagents(session: string) {
   }
 }
 
-/**
- * Decide whether a spawned agent is recorded, and adopt it once its spawn names it. A spawn names its
- * agent only once it resolves, and the agent's first hooks may run before that, so they are held
- * until the spawn says whether the agent is recorded.
- */
-export async function recordSpawn($: Runtime, e: HookEvent<'agent.spawn'>, next: HookNext<'agent.spawn'>) {
-  // The plugin's own spawn for a thread Claude runs: the subagent is that thread's, not a new one's.
-  if (e.resume === undefined && isAdoptionSpawn(e.prompt)) {
-    const result = await next(e)
-    if (!('deny' in result) && result.agentId) await adoptThread($, result.agentId)
-    return result
-  }
-  const session = await $.session.id()
-  const resumed = e.resume?.agentId
-  const records = (resumed !== undefined && children.has(resumed)) ||
-    (recordsChildren(session) && recordsSubagent(e) &&
-      (e.parentAgentId === undefined || children.has(e.parentAgentId)))
-  if (!records) {
-    const result = await next(e)
-    const agentId = 'deny' in result ? undefined : result.agentId ?? resumed
-    if (agentId && !children.has(agentId)) {
-      unrecordedAgents.add(agentId)
-      earlyChildSteps.delete(agentId)
-    }
-    return result
-  }
-  // The spawn stays pending until its child is registered: the agent's prompt can arrive between
-  // the spawn resolving and this hook getting to run again.
-  beginSpawn()
-  const spawn = { parent: e.parentAgentId ?? session, name: childName(e) }
-  spawning.push(spawn)
-  let result: Awaited<ReturnType<typeof next>>
-  try {
-    result = await next(e)
-    const agentId = 'deny' in result ? undefined : result.agentId ?? resumed
-    if (agentId) {
-      try {
-        await adoptChild($, session, agentId, {
-          parent: e.parentAgentId ?? session, name: childName(e), foreground: !e.background,
-          resumed: resumed !== undefined,
-        })
-        // Claude hands a resumed run its message as a row this plugin does not record, so the
-        // message is recorded here, as it was sent rather than with the history it came with.
-        const child = children.get(agentId)
-        if (resumed !== undefined && child) {
-          const text = child.promptText ?? e.prompt
-          child.promptText = undefined
-          await onChild($, agentId, (child) =>
-            recordChildMessage($, child, { role: 'user', content: [{ type: 'text', text }] }, `resume:${crypto.randomUUID()}`))
-        }
-      } catch (error) { await $.ui.log(`Delta could not record the subagent ${agentId}: ${String(error)}`, { to: 'debug' }) }
-    }
-  } finally {
-    spawning.splice(spawning.indexOf(spawn), 1)
-    endSpawn()
-  }
-  return result
-}
+/** A fork of a parent's worktrees made for a child, and the folder Delta mounted it in, when there were any to fork. */
+type Fork = { thread: string; reference: string; owner: string; directory?: string }
 
 /**
- * Claude asks for an isolated subagent's worktree: a recorded subagent gets a Delta fork of its
- * parent's worktrees instead of Claude's own, so its work merges back into the parent's thread.
+ * Create the thread of the child `agentId` as a fork of its parent's worktrees, and mount the fork for
+ * it to work in. Undefined when the parent's thread does not exist yet.
+ *
+ * The child works in the fork of the worktree its parent works in, which Delta checks out inside the
+ * parent's checkout: Claude lets a subagent edit inside the session's directories without asking, as in
+ * a worktree of its own, but asks for a directory it was merely sent to elsewhere. Only a parent that
+ * works in a thread folder itself, as a joined thread with several worktrees does, gets the fork's.
  */
-export async function createSubagentWorktree(
-  $: Runtime, e: HookEvent<'classic.WorktreeCreate'>, next: HookNext<'classic.WorktreeCreate'>,
-) {
-  // Claude names a subagent's isolated worktree after the agent.
-  const agentId = /^agent-(.+)$/.exec(e.name)?.[1]
-  const session = await $.session.id()
-  // The hook runs in the spawning loop: a subagent's names it, the main loop's names none.
-  const parent = (e as { agent_id?: string }).agent_id ?? session
-  const spawn = spawning.find((entry) => entry.parent === parent)
-  if (agentId && spawn && recordsChildren(session)) {
-    try {
-      // A session whose recording is starting forks once its thread exists, if that is soon.
-      const activating = autoActivating.get(session)
-      if (activating) {
-        const expiry = new AbortController()
-        await Promise.race([activating.catch(() => undefined),
-          $.clock.sleep(FORK_ACTIVATION_WAIT_MS, { signal: expiry.signal }).catch(() => undefined)])
-        expiry.abort()
-      }
-      const directory = await forkChild($, session, agentId, parent, spawn.name)
-      if (directory) return { worktreePath: directory }
-    } catch (error) {
-      await $.ui.log(`Delta could not fork the worktrees of the subagent ${agentId}; Claude makes its own: ${String(error)}`, { to: 'debug' })
-    }
-  }
-  return next(e)
-}
-
-/**
- * Create an isolated subagent's thread with a fork of its parent's worktrees and mount it for the
- * subagent to work in. Returns the checkout's directory, or undefined when the session does not
- * record yet or the parent has no worktrees to fork, which leaves Claude to make a worktree of its own.
- */
-async function forkChild($: Runtime, session: string, agentId: string, parent: string, name: string): Promise<string | undefined> {
+async function forkWorktrees($: Runtime, binding: ChildBinding): Promise<Fork | undefined> {
+  const { session, agentId, parent, name } = binding
   const reference = await parentReference($, session, parent)
   if (!reference) return
   const created = await createChildThread($, agentId, reference, name, 'isolated')
-  const mountOwner = `${session}-${agentId.slice(-12)}`
-  const mounted = await mountThread($, { session, thread: created.thread_id, locator: created.reference, owner: mountOwner })
-  if (mounted.thread_id !== created.thread_id) throw new Error('Delta mounted a different thread for the subagent')
-  const binding: ChildBinding = {
-    session, agentId, parent, name, thread: created.thread_id, reference: created.reference, next: 1, pending: [],
-    sharesParentCheckout: false, directories: [mounted.directory], mountOwner,
+  const owner = `${session}-${agentId.slice(-12)}`
+  const fork: Fork = { thread: created.thread_id, reference: created.reference, owner }
+  const mounted = await mountThread($, { session, thread: created.thread_id, locator: created.reference, owner })
+  if (mounted.thread_id !== created.thread_id) {
+    await unmountThread($, created.reference, owner)
+    throw new Error('Delta mounted a different thread for the subagent')
   }
   if (!mounted.worktrees.length) {
-    // Nothing to fork: where it works is decided at its first turn, as for any other subagent.
-    await unmountThread($, created.reference, mountOwner)
-    delete binding.mountOwner
-    delete binding.directories
-    delete binding.sharesParentCheckout
+    await unmountThread($, created.reference, owner)
+    return fork
   }
-  const stored = await storedChildBinding($, session, agentId)
-  await saveChild($, stored ? { ...stored, ...binding, next: stored.next, pending: stored.pending } : binding)
-  await rememberChild($, session, agentId)
-  return binding.mountOwner ? mounted.directory : undefined
-}
-
-/** How long an isolated subagent's worktree waits for its session's recording to finish starting. */
-const FORK_ACTIVATION_WAIT_MS = 20_000
-
-/** Claude removes an isolated subagent's worktree: one Delta forked is unmounted rather than deleted. */
-export async function removeSubagentWorktree(
-  $: Runtime, e: HookEvent<'classic.WorktreeRemove'>, next: HookNext<'classic.WorktreeRemove'>,
-) {
-  const session = await $.session.id()
-  for (const child of children.values()) {
-    if (child.session !== session) continue
-    const binding = await loadChild($, child).catch(() => undefined)
-    if (!binding?.mountOwner || !binding.reference ||
-        !binding.directories?.some((directory) => samePath(directory, e.worktree_path))) continue
-    // Delta deletes its checkout once its changes are uploaded; the fork stays in the thread.
-    await unmountThread($, binding.reference, binding.mountOwner)
-    return {}
-  }
-  return next(e)
+  const roots = await parentDirectories($, { session, parent })
+  const own = mounted.worktrees.find((worktree) => roots.some((root) => isWithin(worktree.directory, root)))
+  return { ...fork, directory: own?.directory ?? mounted.directory }
 }
 
 /** A subagent's turn started in its own loop; a recorded one's turn is its own thread's. */
 export async function startChildTurn($: Runtime, e: HookEvent<'turn.start'>, agentId: string, next: HookNext<'turn.start'>) {
-  if (mayRecordChild(agentId)) {
+  const child = await childFor($, agentId)
+  if (child) {
     // The child's own hook is the only place its working directory can be read.
     const cwd = await $.session.cwd()
-    await onChild($, agentId, (child) => beginChildTurn($, child, e.turnId, cwd))
+    // The turn waits for the child's fork, so nothing the child does lands in Claude's worktree first.
+    if (isClaudeWorktree(cwd, agentId)) await childStep($, child, () => forkIntoClaudeWorktree($, child, cwd))
+    await childStep($, child, () => beginChildTurn($, child, e.turnId, cwd))
   }
   return next(e)
+}
+
+/**
+ * Whether `cwd` is the git worktree Claude made for the isolated subagent `agentId`:
+ * `<root>/.claude/worktrees/agent-<agentId>`. Only POSIX paths: a Windows directory link is a
+ * junction, which this plugin does not make.
+ */
+function isClaudeWorktree(cwd: string, agentId: string): boolean {
+  return cwd.startsWith('/') && cwd.replace(/\/+$/, '').endsWith(`/.claude/worktrees/agent-${agentId}`)
+}
+
+/**
+ * An isolated subagent, whether its Agent call or its own definition asks for isolation, works in a git
+ * worktree Claude makes for it, and no hook the organization's guard lets through can send it elsewhere.
+ * Its work belongs in a fork of its parent's worktrees, which merges back into the parent's thread, so
+ * the fork is made at the child's first turn and Claude's worktree is moved aside for a link to it: the
+ * child works in the fork under the path Claude gave it. Claude sees the fork's changes there when the
+ * run ends, so it keeps the path and reports it, and the path shows the work. A later turn links it
+ * again if a resume needed Claude's own worktree back. An agent the organization provides, and anything
+ * that fails, leaves Claude's worktree in place, recorded as any subagent's own checkout is.
+ */
+async function forkIntoClaudeWorktree($: Runtime, child: ChildRuntime, worktree: string) {
+  const binding = await loadChild($, child)
+  try {
+    if (binding.claudeWorktree && binding.directories?.[0]) {
+      await linkWorktree($, binding.claudeWorktree, binding.directories[0])
+      return
+    }
+    // A child already placed, as one found running when recording started, keeps its place.
+    if (binding.thread || binding.sharesParentCheckout !== undefined || !recordsChildren(child.session)) return
+    // An agent the organization provides keeps the worktree Claude made; see `org-agents.ts`.
+    const type = (await $.agent.list()).find((agent) => agent.id === child.agentId)?.type
+    if (type === undefined || await providedByOrganization($, type)) return
+    const fork = await forkWorktrees($, binding)
+    if (!fork) return
+    const current = { ...await loadChild($, child), thread: fork.thread, reference: fork.reference }
+    // Nothing to fork: the thread is the child's, and it records Claude's worktree as its own checkout.
+    if (!fork.directory) {
+      await saveChild($, current)
+      return
+    }
+    try { await linkWorktree($, worktree, fork.directory) }
+    catch (error) {
+      await unmountThread($, fork.reference, fork.owner)
+      throw error
+    }
+    await saveChild($, {
+      ...current, sharesParentCheckout: false, directories: [fork.directory], mountOwner: fork.owner, claudeWorktree: worktree,
+    })
+  } catch (error) {
+    await $.ui.log(`Delta could not fork the worktrees of the subagent ${child.agentId}; it works in Claude's own: ${String(error)}`, { to: 'debug' })
+  }
+}
+
+/**
+ * Put a link to `target` where Claude's worktree `worktree` was, keeping the worktree beside it. The
+ * worktree is put back if the link cannot be made, so the child never finds its directory gone.
+ */
+async function linkWorktree($: Runtime, worktree: string, target: string) {
+  const stat = await $.fs.stat(worktree).catch(() => undefined)
+  if (stat?.isLink) return
+  const kept = `${worktree}${KEPT_SUFFIX}`
+  if (stat) await runLocal($, worktree, ['mv', '--', worktree, kept])
+  try { await runLocal($, worktree, ['ln', '-s', '--', target, worktree]) }
+  catch (error) {
+    if (stat) await runLocal($, worktree, ['mv', '--', kept, worktree])
+    throw error
+  }
+}
+
+/**
+ * Put back Claude's worktree for a child about to resume, which Claude verifies first: the resume fails
+ * without it. The resumed turn links the child to its fork again.
+ */
+export async function unlinkForResume($: Runtime, child: ChildRuntime) {
+  try {
+    const binding = await loadChild($, child)
+    if (binding.claudeWorktree) await unlinkWorktree($, binding.claudeWorktree)
+  } catch (error) {
+    // The resume still goes; Claude then says why it cannot verify the child's worktree.
+    await $.ui.log(`Delta could not put back the worktree Claude made for the subagent ${child.agentId}: ${String(error)}`, { to: 'debug' })
+  }
+}
+
+/** Put Claude's worktree back where the link to the child's fork is, which a resume and git expect. */
+async function unlinkWorktree($: Runtime, worktree: string) {
+  const kept = `${worktree}${KEPT_SUFFIX}`
+  if (!await $.fs.exists(kept)) return
+  if ((await $.fs.stat(worktree).catch(() => undefined))?.isLink) await runLocal($, worktree, ['rm', '--', worktree])
+  await runLocal($, worktree, ['mv', '--', kept, worktree])
+}
+
+/**
+ * The session ended, and with it the child's fork's mount: Claude's worktree takes the link's place
+ * again, and goes with its branch as Claude would remove it, unless it holds anything of its own.
+ * `git` refuses either removal for a worktree with changes or a branch with unmerged commits.
+ */
+export async function restoreClaudeWorktree($: Runtime, worktree: string) {
+  if (!await $.fs.exists(`${worktree}${KEPT_SUFFIX}`)) return
+  await unlinkWorktree($, worktree)
+  const root = worktree.slice(0, worktree.lastIndexOf('/.claude/worktrees/'))
+  // The branch is read before the worktree goes, which takes it off git's list.
+  const listed = await $.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: root })
+  const branch = listed.exitCode === 0 ? listedBranch(listed.stdout, worktree) : undefined
+  if ((await $.process.run(['git', 'worktree', 'remove', '--', worktree], { cwd: root })).exitCode === 0 && branch)
+    await $.process.run(['git', 'branch', '-d', '--', branch], { cwd: root })
+}
+
+/**
+ * Put back each git worktree Claude made for an isolated subagent that a session which did not end
+ * cleanly left moved aside, so Claude finds it where it made it. A link that still leads to a fork may
+ * be another running session's, so only a missing link or one that leads nowhere is replaced.
+ */
+export async function restoreAbandonedWorktrees($: Runtime) {
+  const cwd = await $.session.cwd()
+  if (!cwd.startsWith('/')) return
+  // Claude makes them in the checkout `cwd` is in: the nearest folder that holds `.git`.
+  let top = cwd.replace(/\/+$/, '')
+  while (top && !await $.fs.exists(`${top}/.git`)) top = top.slice(0, top.lastIndexOf('/'))
+  if (!top) return
+  const folder = `${top}/.claude/worktrees`
+  let entries: FsEntry[]
+  try { entries = await $.fs.list(folder) }
+  catch { return }
+  for (const kept of entries) {
+    if (kept.kind !== 'dir' || !kept.name.endsWith(KEPT_SUFFIX)) continue
+    const name = kept.name.slice(0, -KEPT_SUFFIX.length)
+    const worktree = `${folder}/${name}`
+    const link = entries.find((entry) => entry.name === name)
+    if (link && !link.isLink) continue
+    // `stat` follows a link and rejects for one that leads nowhere.
+    if (link && await $.fs.stat(worktree).then(() => true, () => false)) continue
+    if (link) await runLocal($, worktree, ['rm', '--', worktree])
+    await runLocal($, worktree, ['mv', '--', `${worktree}${KEPT_SUFFIX}`, worktree])
+  }
+}
+
+/**
+ * Run a local file command on the worktree `worktree`, from the folder that holds it: the hook's own
+ * directory may be that worktree, which a move takes away.
+ */
+async function runLocal($: Runtime, worktree: string, argv: string[]) {
+  const result = await $.process.run(argv, { cwd: worktree.slice(0, worktree.lastIndexOf('/')) })
+  if (result.exitCode !== 0) throw new Error(`${argv[0]} failed: ${result.stderr.trim() || `exit ${result.exitCode}`}`)
 }
 
 /** A subagent's turn ended: close its record, finish its run, and report a thread run's reply. */
 export async function completeChildTurn($: Runtime, e: HookEvent<'turn.complete'>, agentId: string, next: HookNext<'turn.complete'>) {
   const result = await next(e)
-  if (mayRecordChild(agentId)) {
+  const child = await childFor($, agentId)
+  if (child) {
     // A run found going when recording started attaches its own checkout now, read from its hook.
     const cwd = await $.session.cwd()
-    await onChild($, agentId, (child) => endChildTurn($, child, e.turnId, stopReasonOf(e), cwd))
-    const child = children.get(agentId)
-    if (child) {
-      await finishChildRun($, child)
-      await reportClaudeRun($, child)
-    }
+    await childStep($, child, () => endChildTurn($, child, e.turnId, stopReasonOf(e), cwd))
+    await finishChildRun($, child)
+    await reportClaudeRun($, child)
   }
   return result
 }
@@ -856,11 +923,12 @@ export async function completeChildTurn($: Runtime, e: HookEvent<'turn.complete'
 /** A row a recorded subagent's loop kept is recorded on its thread. */
 export async function recordChildRow($: Runtime, e: HookEvent<'session.append'>, agentId: string, next: HookNext<'session.append'>) {
   const stored = await next(e)
-  if ('deny' in stored || !mayRecordChild(agentId)) return stored
+  if ('deny' in stored) return stored
   const message = capturedMessage(stored.message, e.door)
-  if (message) await onChild($, agentId, (child) => {
-    // A run the plugin started on a thread is recorded as prompted with the message alone, not
-    // the thread history it was handed with it. The prompt may arrive before the run is bound.
+  const child = message && await childFor($, agentId)
+  if (message && child) await childStep($, child, () => {
+    // A run the plugin started on a thread, or resumed, is recorded as prompted with the message alone,
+    // not the thread history it was handed with it.
     if (child.promptText !== undefined && e.door === 'prompt' && message.content.some((block) => block.type === 'text')) {
       const text = child.promptText
       child.promptText = undefined
@@ -875,8 +943,9 @@ export async function recordChildRow($: Runtime, e: HookEvent<'session.append'>,
 export async function recordChildToolCall($: Runtime, e: HookEvent<'tool.call'>, agentId: string, next: HookNext<'tool.call'>) {
   const result = await next(e)
   const id = e.tool_use_id
-  if (id && mayRecordChild(agentId) && 'result' in result && result.result !== undefined)
-    await onChild($, agentId, (child) =>
-      recordChildToolResult($, child, { tool: e.tool, tool_use_id: id, input: e }, result.result, !!result.isError))
+  if (!id || !('result' in result) || result.result === undefined) return result
+  const child = await childFor($, agentId)
+  if (child) await childStep($, child, () =>
+    recordChildToolResult($, child, { tool: e.tool, tool_use_id: id, input: e }, result.result, !!result.isError))
   return result
 }

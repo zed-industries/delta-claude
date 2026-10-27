@@ -1,7 +1,7 @@
 import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import {
-  CHECKOUT, childActor, fakeThreads, FOLDERS, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
+  CHECKOUT, childActor, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
   turnComplete, turnStart, userText,
 } from '../testing/fake-thread-commands'
 
@@ -58,19 +58,21 @@ describe('subagents', () => {
     fake.expectClean()
   })
 
-  test('a prompt that arrives while its resolved spawn is still being registered is recorded', async ($, on) => {
+  test("a subagent's hooks that run while its first hook finds out whether it is recorded are recorded in order", async ($, on) => {
     const fake = await sharedSession($, on)
     await mainTurn($, 'main')
+    await spawn($)
     let release!: () => void
     const held = new Promise<void>((resolve) => { release = resolve })
     fake.holdStoreGet = (key) => key.startsWith('child:') ? held : undefined
-    const spawned = $.agent.spawn(spawnInput() as never)
+    const prompted = $.session.append(childPrompt('agent1'))
     await fake.settle()
-    await $.session.append(childPrompt('agent1'))
+    const started = $.turn.start({ ...turnStart('late-turn', 'Inspect the parser'), agentId: 'agent1' } as never)
+    await fake.settle()
     fake.holdStoreGet = undefined
     release()
-    await spawned
-    await $.turn.start({ ...turnStart('late-turn', 'Inspect the parser'), agentId: 'agent1' } as never)
+    await prompted
+    await started
     await $.turn.complete({ ...turnComplete('late-turn'), agentId: 'agent1' } as never)
     await fake.settle()
     expect(fake.childRecords('agent1').map((record) => record.update?.sessionUpdate))
@@ -95,7 +97,8 @@ describe('subagents', () => {
     const fake = await sharedSession($, on)
     await mainTurn($, 'main')
     const agentId = await spawn($)
-    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
+    // A git worktree Claude did not make for this subagent's isolation, which Delta leaves as it is.
+    const worktree = `${CHECKOUT}/.claude/worktrees/own-${agentId}`
     fake.cwd = worktree
     await childRun($, agentId, 'isolated-turn', 'Edited in the worktree')
     fake.cwd = CHECKOUT
@@ -114,7 +117,7 @@ describe('subagents', () => {
     const fake = await sharedSession($, on)
     await mainTurn($, 'main')
     const agentId = await spawn($)
-    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
+    const worktree = `${CHECKOUT}/.claude/worktrees/own-${agentId}`
     fake.cwd = worktree
     let release = () => {}
     fake.holdCheckoutRelease = new Promise((resolve) => { release = resolve })
@@ -136,49 +139,11 @@ describe('subagents', () => {
     fake.expectClean()
   })
 
-  test("an isolated subagent works in a fork of its parent's worktrees in Delta, released when Claude removes it", async ($, on) => {
-    const fake = await sharedSession($, on)
-    await mainTurn($, 'main')
-    // Claude asks for the subagent's isolated worktree while its spawn is in flight.
-    let release!: () => void
-    fake.holdSpawn = new Promise<void>((resolve) => { release = resolve })
-    const spawning = $.agent.spawn(spawnInput({ description: 'Fix the lexer' }) as never) as Promise<{ agentId: string }>
-    await fake.settle()
-    const created = await $.classic.WorktreeCreate({
-      session_id: fake.session, cwd: CHECKOUT, hook_event_name: 'WorktreeCreate', name: 'agent-agent1',
-    } as never) as { worktreePath?: string }
-    release()
-    const { agentId } = await spawning
-    const child = fake.server.subagents.get(agentId)!
-    expect(child).toMatchObject({ isolatedWorktrees: true, sharedWorktrees: false, name: 'Fix the lexer' })
-    expect(created.worktreePath).toBe(`${FOLDERS}/${child.mountedFor}`)
-
-    // It records as any subagent does, and Claude's checkout is never attached to its thread.
-    fake.cwd = created.worktreePath!
-    await childRun($, agentId, 'forked-turn', 'Fixed the lexer')
-    fake.cwd = CHECKOUT
-    await fake.settle()
-    expect(fake.childRecords(agentId).map((record) => record.update?.state ?? record.update?.content?.[0]?.text))
-      .toEqual(['running', 'Inspect the parser', 'Fixed the lexer', 'idle'])
-    expect(child.checkout).toBeUndefined()
-    // Its fork has no git branch here, so the parent is told how to merge it.
-    await $.turn.complete(turnComplete('main'))
-    await fake.settle()
-    expect(notes(fake).at(-1)).toContain(`thread merge ${child.reference} --into ${fake.threadId}`)
-
-    // Claude removing the worktree releases Delta's checkout; the fork stays in the thread.
-    await $.classic.WorktreeRemove({
-      session_id: fake.session, cwd: CHECKOUT, hook_event_name: 'WorktreeRemove', worktree_path: created.worktreePath,
-    } as never)
-    expect(child.mountedFor).toBeUndefined()
-    fake.expectClean()
-  })
-
   test("a nested subagent's thread is under its parent subagent's, which prompts it, and shares that parent's checkout", async ($, on) => {
     const fake = await sharedSession($, on)
     await mainTurn($, 'main')
     const parent = await spawn($)
-    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${parent}`
+    const worktree = `${CHECKOUT}/.claude/worktrees/own-${parent}`
     fake.cwd = worktree
     await $.session.append(childPrompt(parent))
     await $.turn.start({ ...turnStart('parent-turn', 'Inspect the parser'), agentId: parent } as never)
@@ -202,10 +167,17 @@ describe('subagents', () => {
     test(`a ${foreground ? 'foreground' : 'background'} subagent someone takes over in Delta is stopped`, async ($, on) => {
       const fake = await sharedSession($, on)
       await mainTurn($, 'main')
-      const agentId = await spawn($, { background: !foreground })
       fake.fenceChildTurns.add(1)
-      await $.turn.start({ ...turnStart('fenced-turn', 'Inspect the parser'), agentId } as never)
-      await $.session.append(childPrompt(agentId))
+      // A foreground subagent runs while its Agent call waits for it.
+      let agentId = ''
+      fake.spawnForAgentCall = async () => {
+        agentId = await spawn($)
+        await $.session.append(childPrompt(agentId))
+        await $.turn.start({ ...turnStart('fenced-turn', 'Inspect the parser'), agentId } as never)
+        await fake.settle()
+        return { agentId }
+      }
+      await $.tool.call(agentCall({ run_in_background: !foreground }) as never)
       await fake.settle()
       if (foreground) {
         expect(fake.aborts).toEqual(['main'])
@@ -332,6 +304,20 @@ describe('subagents', () => {
     fake.expectClean()
   })
 
+  test('a refusal Delta calls permanent stops recording the subagent, once', async ($, on) => {
+    const fake = await sharedSession($, on)
+    await mainTurn($, 'main')
+    fake.commandFault = permanentRefusal
+    const logged = fake.logs.length
+    const agentId = await spawn($)
+    await childRun($, agentId, 'child-turn', 'Parser looks fine')
+    await fake.settle()
+    await fake.advance(60_000)
+    expect(fake.server.subagents.has(agentId)).toBe(false)
+    expect(fake.logs.slice(logged).filter((line) => line.includes('Delta stopped recording the subagent'))).toHaveLength(1)
+    fake.commandFault = undefined
+  })
+
   test('a restart delivers what a subagent queued and closes the turn it left open', async ($, on) => {
     const fake = await sharedSession($, on)
     await mainTurn($, 'main')
@@ -345,6 +331,133 @@ describe('subagents', () => {
     await fake.settle()
     expect(fake.childRecords(agentId).map((record) => [record.update?.state, record.update?.stopReason]))
       .toEqual([['running', undefined], ['idle', 'cancelled']])
+    fake.expectClean()
+  })
+})
+
+describe('isolated subagents', () => {
+  // An isolated subagent is forked from its first turn's directory, so isolation its own definition asks for
+  // takes the same path as isolation its Agent call asks for.
+  test('an isolated subagent works in a fork under the path Claude gave it, until the session ends', async ($, on) => {
+    const fake = await sharedSession($, on)
+    await mainTurn($, 'main')
+    // Claude makes the subagent's git worktree itself and starts it there; its call reaches Claude as it was made.
+    let agentId = ''
+    fake.spawnForAgentCall = async () => {
+      agentId = await spawn($, { description: 'Fix the lexer' })
+      const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
+      fake.worktreeDirectories.add(worktree)
+      fake.cwd = worktree
+      await childRun($, agentId, 'isolated-turn', 'Fixed the lexer')
+      fake.cwd = CHECKOUT
+      return { agentId }
+    }
+    await $.tool.call(agentCall({ isolation: 'worktree' }) as never)
+    expect(fake.agentCalls.at(-1)?.isolation).toBe('worktree')
+    await fake.settle()
+    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
+    // Its thread is a fork of the parent's worktrees, and Claude's worktree waits beside a link to it.
+    const child = fake.server.subagents.get(agentId)!
+    expect(child).toMatchObject({ isolatedWorktrees: true, sharedWorktrees: false, name: 'Fix the lexer' })
+    const fork = `${CHECKOUT}/.delta/worktrees/${child.mountedFor}/repo`
+    expect(fake.linkCommands).toEqual([`mv -- ${worktree} ${worktree}.claude-worktree`, `ln -s -- ${fork} ${worktree}`])
+    expect(child.checkout).toBeUndefined()
+    expect(fake.childRecords(agentId).map((record) => record.update?.state ?? record.update?.content?.[0]?.text))
+      .toEqual(['running', 'Inspect the parser', 'Fixed the lexer', 'idle'])
+
+    // Claude resumes it only in the worktree it made, which takes the link's place before the message
+    // goes; the resumed turn starts at the same path, linked to its fork again.
+    fake.server.threads.set(child.reference, { thread: child.thread, name: child.name, worktrees: [], items: [] })
+    expect(await $.session.send({ to: agentId, text: 'Again' } as never)).toEqual({ isDelivered: true })
+    expect(fake.linkCommands.slice(2)).toEqual([`rm -- ${worktree}`, `mv -- ${worktree}.claude-worktree ${worktree}`])
+    fake.cwd = worktree
+    await childRun($, agentId, 'resumed-turn', 'Fixed it again')
+    fake.cwd = CHECKOUT
+    await fake.settle()
+    expect(fake.linkCommands.slice(4)).toEqual([`mv -- ${worktree} ${worktree}.claude-worktree`, `ln -s -- ${fork} ${worktree}`])
+    await $.turn.complete(turnComplete('main'))
+    await fake.settle()
+    expect(notes(fake).at(-1)).toContain(`thread merge ${child.reference} --into ${fake.threadId}`)
+
+    // The session's end puts Claude's worktree back before the fork's mount goes.
+    await $.session.end(sessionEnd(fake.session))
+    expect(fake.links.has(worktree)).toBe(false)
+    expect(fake.linkCommands.slice(6)).toEqual([`rm -- ${worktree}`, `mv -- ${worktree}.claude-worktree ${worktree}`])
+    expect(fake.worktreeDirectories.has(worktree)).toBe(true)
+    expect(child.mountedFor).toBeUndefined()
+    // Claude's worktree goes with the branch git lists for it, whatever Claude named it.
+    expect(fake.commands).toContainEqual(['git', 'branch', '-d', '--', `claude/agent-${agentId}`])
+    fake.expectClean()
+  })
+
+  test("Claude's worktrees a session left moved aside are put back when the next one starts, unless a fork still has their place", async ($, on) => {
+    const fake = fakeThreads(on)
+    const folder = `${CHECKOUT}/.claude/worktrees`
+    fake.files.set(`${CHECKOUT}/.git/HEAD`, 'ref: refs/heads/main\n')
+    for (const name of ['agent-gone', 'agent-bare', 'agent-live']) fake.worktreeDirectories.add(`${folder}/${name}.claude-worktree`)
+    fake.links.set(`${folder}/agent-gone`, '/gone/fork')
+    fake.danglingLinks.add(`${folder}/agent-gone`)
+    fake.links.set(`${folder}/agent-live`, `${CHECKOUT}/.delta/worktrees/other/repo`)
+    await $.session.start(sessionStart)
+    await fake.settle()
+    expect(fake.linkCommands).toEqual([
+      `rm -- ${folder}/agent-gone`, `mv -- ${folder}/agent-gone.claude-worktree ${folder}/agent-gone`,
+      `mv -- ${folder}/agent-bare.claude-worktree ${folder}/agent-bare`,
+    ])
+    expect(fake.links.get(`${folder}/agent-live`)).toBe(`${CHECKOUT}/.delta/worktrees/other/repo`)
+  })
+
+  const kept: { name: string; type: string; arrange: (fake: ReturnType<typeof fakeThreads>) => void }[] = [
+    { name: "of the organization's own plugin", type: 'acme-tools:reviewer',
+      arrange: (fake) => { fake.policy = { enabledPlugins: { 'acme-tools@acme': true } } } },
+    { name: 'the managed settings directory defines, which takes the place of the built-in', type: 'general-purpose',
+      arrange: (fake) => { fake.files.set('/etc/claude-code/.claude/agents/review/general.md', '---\nname: general-purpose\n---\nOrg prompt') } },
+  ]
+  for (const { name, type, arrange } of kept) test(`an isolated subagent of a type ${name} records Claude's worktree as its own`, async ($, on) => {
+    const fake = await sharedSession($, on)
+    arrange(fake)
+    await mainTurn($, 'main')
+    const agentId = await spawn($, { subagentType: type })
+    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
+    fake.worktreeDirectories.add(worktree)
+    fake.cwd = worktree
+    await childRun($, agentId, 'isolated-turn', 'Reviewed')
+    fake.cwd = CHECKOUT
+    await fake.settle()
+    const child = fake.server.subagents.get(agentId)!
+    expect(child.isolatedWorktrees).toBeFalsy()
+    expect(child.checkout?.directory).toBe(worktree)
+    expect(fake.linkCommands).toEqual([])
+    fake.expectClean()
+  })
+
+  const failures: { name: string; arrange: (fake: ReturnType<typeof fakeThreads>) => void }[] = [
+    { name: 'cannot be linked to its fork', arrange: (fake) => { fake.failLink = true } },
+    { name: 'cannot get a fork from Delta', arrange: (fake) => {
+      let failed = false
+      fake.holdRun = (operation) => {
+        if (operation !== 'create' || failed) return undefined
+        failed = true
+        return Promise.reject(new Error('Delta is unavailable'))
+      }
+    } },
+  ]
+  for (const { name, arrange } of failures) test(`an isolated subagent whose worktree ${name} records Claude's worktree as its own`, async ($, on) => {
+    const fake = await sharedSession($, on)
+    await mainTurn($, 'main')
+    arrange(fake)
+    const agentId = await spawn($)
+    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
+    fake.worktreeDirectories.add(worktree)
+    fake.cwd = worktree
+    await childRun($, agentId, 'isolated-turn', 'Edited in the worktree')
+    fake.cwd = CHECKOUT
+    await fake.settle()
+    const child = fake.server.subagents.get(agentId)!
+    // No fork stays mounted, and Claude's worktree is where the work is recorded.
+    expect(child.mountedFor).toBeUndefined()
+    expect(child.checkout?.directory).toBe(worktree)
+    expect(fake.links.size).toBe(0)
     fake.expectClean()
   })
 })
@@ -365,34 +478,27 @@ describe('Delta threads as subagents', () => {
     expect(notes(fake).join('\n')).toContain('"Release notes" (inactive)')
 
     const creates = fake.operations().filter((operation) => operation === 'create').length
-    // Claude starts the subagent's turn and stores its prompt before the spawn resolves.
-    let release!: () => void
-    fake.holdSpawn = new Promise<void>((resolve) => { release = resolve })
+    // The plugin's spawn answers without the agent's ID, so the subagent's first hook names it.
     const sending = $.session.send({ to: 'Release notes', text: 'Write RELEASE.md' } as never)
     await fake.settle()
-    await $.turn.start({ ...turnStart('notes-turn'), agentId: 'agent1' } as never)
-    await $.session.append({ agentId: 'agent1', door: 'prompt', uuid: 'adopted-prompt', message: {
+    const agentId = threadAgent(fake)
+    await $.turn.start({ ...turnStart('notes-turn'), agentId } as never)
+    await $.session.append({ agentId, door: 'prompt', uuid: 'adopted-prompt', message: {
       type: 'user', role: 'user', content: [{ type: 'text', text: 'the history, then Write RELEASE.md' }] } } as never)
-    release()
     expect(await sending).toEqual({ isDelivered: true })
-    // The plugin ran the thread itself: Claude delivered nothing, and the subagent starts from the
-    // thread's history in the session's checkout, whose worktrees the thread shares.
+    // The plugin ran the thread itself: Claude delivered nothing.
     expect(fake.sends).toEqual([])
-    const [run] = fake.spawned
-    expect(run!.agentId).toBe('agent1')
-    expect(run!.cwd).toBe(CHECKOUT)
-    expect(run!.prompt.indexOf('We should ship release notes')).toBeLessThan(run!.prompt.indexOf('Write RELEASE.md'))
-    await $.session.append({ agentId: run!.agentId, door: 'response', uuid: 'notes-answer', message: {
+    await $.session.append({ agentId, door: 'response', uuid: 'notes-answer', message: {
       type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Wrote RELEASE.md' }] } } as never)
-    fake.agentSummaries.set(run!.agentId, [{ role: 'assistant', text: 'Wrote RELEASE.md', toolUses: [] }])
-    await $.turn.complete({ ...turnComplete('notes-turn'), agentId: run!.agentId } as never)
+    fake.agentSummaries.set(agentId, [{ role: 'assistant', text: 'Wrote RELEASE.md', toolUses: [] }])
+    await $.turn.complete({ ...turnComplete('notes-turn'), agentId } as never)
     await fake.settle()
 
     // Its turn is recorded on the existing thread, prompted with the message alone; no thread was created.
-    const recorded = fake.server.subagents.get(run!.agentId)!
+    const recorded = fake.server.subagents.get(agentId)!
     expect(recorded.thread).toBe('notes-thread')
     expect(fake.operations().filter((operation) => operation === 'create')).toHaveLength(creates)
-    const records = fake.childRecords(run!.agentId)
+    const records = fake.childRecords(agentId)
     expect(records.map((record) => [record.update?.sessionUpdate, record.update?.content?.[0]?.text ?? record.update?.state]))
       .toEqual([['state_update', 'running'], ['user_message', 'Write RELEASE.md'], ['agent_message', 'Wrote RELEASE.md'], ['state_update', 'idle']])
     expect(records[1]!.update?._meta?.delta?.sender).toEqual({ external_id: fake.session })
@@ -435,9 +541,10 @@ describe('Delta threads as subagents', () => {
     })
     fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
     await fake.settle()
-    fake.spawnStartsNone = true
-    const sent = await $.session.send({ to: 'Release notes', text: 'Write RELEASE.md' } as never)
-    expect(sent).toEqual({ isDelivered: false, reason: 'Claude started no subagent to run the Delta thread "Release notes".' })
+    // No subagent's hook names it within the wait.
+    const sending = $.session.send({ to: 'Release notes', text: 'Write RELEASE.md' } as never)
+    await fake.advance(5_000)
+    expect(await sending).toEqual({ isDelivered: false, reason: 'Claude started no subagent to run the Delta thread "Release notes".' })
     expect(fake.server.subagents.size).toBe(0)
     fake.expectClean()
   })
@@ -466,12 +573,13 @@ describe('Delta threads as subagents', () => {
     fake.answerQuestion = answer('Leave it running')
     expect(await send()).toMatchObject({ isDelivered: false })
     expect(fake.questions.at(-1)?.questions[0].question).toBe('Claude wants to take over "Release notes", which Antonio is running in Delta. Take it over?')
-    expect(fake.spawned).toHaveLength(0)
 
     // Or let Claude take it over.
     fake.answerQuestion = answer('Take it over')
-    expect(await send()).toEqual({ isDelivered: true })
-    expect(fake.spawned).toHaveLength(1)
+    const taking = send()
+    await fake.settle()
+    await $.session.append(childPrompt(threadAgent(fake)))
+    expect(await taking).toEqual({ isDelivered: true })
   })
 
   test('a subagent resumed by a message hears what happened in Delta since it last ran, and its message is recorded', async ($, on) => {
@@ -498,7 +606,9 @@ describe('Delta threads as subagents', () => {
     expect(sent!.to).toBe(agentId)
     for (const part of ['Also check the lexer', 'The lexer is fine too', 'Summarize both']) expect(sent!.text).toContain(part)
     expect(sent!.text).not.toContain('Parser looks fine')
-    await $.agent.spawn(spawnInput({ resume: { agentId }, prompt: sent!.text }) as never)
+    // The resumed run's prompt row holds what Claude delivered, with the history.
+    await $.session.append({ agentId, door: 'prompt', uuid: 'resumed-prompt', message: {
+      type: 'user', role: 'user', content: [{ type: 'text', text: sent!.text }] } } as never)
     await $.turn.start({ ...turnStart('second-turn'), agentId } as never)
     await $.turn.complete({ ...turnComplete('second-turn'), agentId } as never)
     await fake.settle()
@@ -580,6 +690,12 @@ function isPluginOrigin(origin: unknown): boolean {
 
 const answer = (value: string) => ({ role: 'assistant' as const, content: [{ type: 'text' as const, text: value }] })
 
+/** A child thread's creation refused with an error Delta says retrying will not fix. */
+const permanentRefusal = {
+  operation: 'create', code: 'failed', reason: 'remote_refused', retryable: false,
+  message: 'the server will not serve this request',
+}
+
 /** A session shared before the test's subagents run. */
 async function sharedSession($: Engine, on: On) {
   const fake = fakeThreads(on)
@@ -599,6 +715,21 @@ function spawnInput(fields: Record<string, unknown> = {}) {
     subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'test-model',
     background: true, fork: false, ...fields,
   }
+}
+
+/** An Agent tool call, as the model makes it. */
+function agentCall(fields: Record<string, unknown> = {}) {
+  return {
+    tool: 'Agent', tool_use_id: 'agent-call', subagent_type: 'general-purpose', description: 'Fix the lexer',
+    prompt: 'Inspect the parser', ...fields,
+  }
+}
+
+/** The subagent Claude starts for the plugin's own spawn, as `$.agent.list()` names it: by the thread's name. */
+function threadAgent(fake: ReturnType<typeof fakeThreads>): string {
+  const agentId = `thread-agent${fake.agents.length + 1}`
+  fake.agents.push({ id: agentId, description: 'Release notes', type: 'general-purpose', status: 'running' })
+  return agentId
 }
 
 /** Spawn a subagent as the Agent tool does and return the agent ID the host gave it. */

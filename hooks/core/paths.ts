@@ -11,3 +11,10 @@ export function pathKey(path: string, ...counterparts: string[]): string {
 export function samePath(left: string, right: string): boolean {
   return pathKey(left, right) === pathKey(right, left)
 }
+
+/** Whether `path` is `directory` or lies inside it, compared as {@link samePath} compares. */
+export function isWithin(path: string, directory: string): boolean {
+  const inner = pathKey(path, directory)
+  const outer = pathKey(directory, path).replace(/\/+$/, '')
+  return inner === outer || inner.startsWith(`${outer}/`)
+}

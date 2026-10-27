@@ -3,7 +3,7 @@
  * a session ran before it was shared.
  */
 import type { Timer } from 'claude-code'
-import { type ChildBinding, childName } from './children'
+import { type ChildBinding, childName, isAgentTool, recordsSubagent } from './children'
 import { conversationText } from '../watch/conversation'
 import { runningUpdate } from '../recording/delivery'
 import { threadStatus, threadWatch, watchEvents } from '../cli/delta-cli'
@@ -17,9 +17,9 @@ import { hasInteractiveSurface } from '../sharing/lifecycle'
 import { deliverNote } from '../watch/rows'
 import { type Binding, boundDirectory, report, type Runtime, stateFor } from '../core/session-state'
 import {
-  addChild, beginSpawn, children, type ChildRuntime, childStep, deliverChild, earlyChildSteps, endChildTurn, endSpawn,
-  loadChild, parentDirectories, recordChildMessage, rememberChild, reportChild, saveChild, snapshotChild,
-  stageChildRecord,
+  addChild, children, type ChildRuntime, childStep, deliverChild, endChildTurn, loadChild, parentDirectories,
+  recordChildMessage, rememberChild, reportChild, restoreClaudeWorktree, saveChild, snapshotChild, stageChildRecord,
+  unlinkForResume,
 } from './subagents'
 import type { WatchChild, WatchItem } from '../cli/thread-commands'
 import { feed, watchedSession } from '../watch/watch'
@@ -135,17 +135,22 @@ async function childForThread($: Runtime, session: string, thread: string): Prom
 }
 
 /**
- * The thread a running adoption spawns a subagent for, which that spawn's hook binds it to.
- * `agentId` is set once the hook adopted the subagent: only a hook sees the spawned agent's ID in
- * every host, since the engine sets it on the spawn's result rather than on what the caller receives.
+ * The thread a running adoption spawns a subagent for. `agentId` is set once the subagent is adopted:
+ * when the spawn answers with it, or at the first hook the subagent's loop raises, which can run first.
+ * `adopted` tells the waiting adoption.
  */
-type Adoption = { session: string; prompt: string; binding: Omit<ChildBinding, 'agentId'>; text: string; agentId?: string }
+type Adoption = { session: string; binding: Omit<ChildBinding, 'agentId'>; text: string; agentId?: string; adopted?: () => void }
 let adoption: Adoption | undefined
 
-/** Whether a spawn with `prompt` is the one a running adoption made for its thread. */
-export function isAdoptionSpawn(prompt: string): boolean {
-  return adoption !== undefined && adoption.prompt === prompt
+/**
+ * Whether an agent Claude lists with `description` is the one a running adoption is spawning, which is
+ * described by its thread's name. Claude lists no plugin as the spawner of a plugin's own spawn.
+ */
+export function isAdoptionSpawn(description: string): boolean {
+  return adoption !== undefined && adoption.agentId === undefined && adoption.binding.name === description
 }
+/** How long an adoption whose spawn answered without the agent's ID waits for the agent's first hook. */
+const ADOPTION_WAIT_MS = 5_000
 
 /**
  * Run a thread `to` names with `text`, or leave the send to Claude: undefined when `to` names no
@@ -171,7 +176,7 @@ export async function sendToThread($: Runtime, session: string, sender: string, 
       }
     }
   }
-  if (child) return resumeThread($, child, text, next)
+  if (child) return resumeThread($, child, sender, text, next)
   if (target) return runThread($, session, sender, target, text)
 }
 
@@ -179,7 +184,7 @@ export async function sendToThread($: Runtime, session: string, sender: string, 
  * Message a recorded subagent: one running now gets it in its turn, recorded there; a finished one
  * resumes with it, after what happened in its thread in Delta since it last ran.
  */
-async function resumeThread($: Runtime, child: ChildRuntime, text: string,
+async function resumeThread($: Runtime, child: ChildRuntime, sender: string, text: string,
     next: (to: string, text: string) => Promise<{ isDelivered: true } | { isDelivered: false; reason: string }>) {
   const binding = await loadChild($, child)
   if (binding.execution) {
@@ -202,7 +207,11 @@ async function resumeThread($: Runtime, child: ChildRuntime, text: string,
       if (last) await childStep($, child, async () => saveChild($, { ...await loadChild($, child), reportedItem: last.id }))
     } catch (error) { await reportChild($, child, error) }
   }
+  // The resumed run is prompted by the loop that sent the message, and runs in the background.
+  child.sender = sender
+  child.foreground = false
   child.promptText = text
+  await unlinkForResume($, child)
   const result = await next(child.agentId, prompt)
   if (!result.isDelivered) child.promptText = undefined
   return result
@@ -247,39 +256,49 @@ async function runThread($: Runtime, session: string, sender: string, target: Th
     sharesParentCheckout: shares, directories, adopted: true, awaited: 'claude',
     ...mountOwner ? { mountOwner } : {}, ...read.items.length ? { reportedItem: read.items.at(-1)!.id } : {},
   }
-  const adopting: Adoption = { session, prompt, binding, text }
+  const adopting: Adoption = { session, binding, text }
   adoption = adopting
-  beginSpawn()
   try {
+    const adopted = new Promise<void>((resolve) => { adopting.adopted = resolve })
     const spawned = await $.agent.spawn({ prompt, description: name, subagentType: 'general-purpose', cwd })
     if ('deny' in spawned) return { isDelivered: false as const, reason: String(spawned.deny) }
+    if (spawned.agentId) adoptThread($, spawned.agentId)
+    else if (adopting.agentId === undefined) {
+      // Claude Code 2.1.309 answers with the agent's ID, but the engine's test host answers a plugin's own
+      // spawn without it, so the agent's first hook names it instead.
+      const expiry = new AbortController()
+      await Promise.race([adopted, $.clock.sleep(ADOPTION_WAIT_MS, { signal: expiry.signal }).catch(() => undefined)])
+      expiry.abort()
+    }
     // A hook that answers the spawn without starting a subagent leaves nothing to run the thread.
     if (adopting.agentId === undefined)
       return { isDelivered: false as const, reason: `Claude started no subagent to run the Delta thread "${name}".` }
     return { isDelivered: true as const }
   } finally {
     adoption = undefined
-    endSpawn()
   }
 }
 
-/** Record the subagent a thread's adoption spawned as that thread's, once. */
-export async function adoptThread($: Runtime, agentId: string) {
+/**
+ * Record the subagent `agentId` a thread's running adoption spawned as that thread's, once, and return
+ * it; undefined when no adoption is running. Saving is the child's first step, so none of its steps can
+ * run before its state exists.
+ */
+export function adoptThread($: Runtime, agentId: string): ChildRuntime | undefined {
   const adopting = adoption
-  if (!adopting) return
+  if (!adopting || (adopting.agentId !== undefined && adopting.agentId !== agentId)) return
   adopting.agentId = agentId
-  if (children.has(agentId)) return
+  adopting.adopted?.()
+  const known = children.get(agentId)
+  if (known) return known
   const child = addChild(adopting.session, agentId, adopting.binding.parent, false)
   child.promptText = adopting.text
-  // Taken now: the spawn may resolve, and the held steps be cleared, while the binding saves.
-  const held = earlyChildSteps.get(agentId) ?? []
-  earlyChildSteps.delete(agentId)
   void childStep($, child, async () => {
     await saveChild($, { ...adopting.binding, agentId })
     await rememberChild($, adopting.session, agentId)
   })
-  for (const step of held) void childStep($, child, () => step(child))
   void deliverChild($, child)
+  return child
 }
 
 /** Tell the parent the reply of a thread it is waiting on, as Claude tells it a subagent's. */
@@ -378,6 +397,8 @@ async function reportDeltaTurn($: Runtime, session: string, thread: WatchChild) 
 export async function releaseThreadMounts($: Runtime, session: string, agentIds: readonly string[]) {
   for (const agentId of agentIds) {
     const binding = await loadChild($, { session, agentId }).catch(() => undefined)
+    // Claude's worktree takes back its place before the fork its link leads to goes.
+    if (binding?.claudeWorktree) await restoreClaudeWorktree($, binding.claudeWorktree).catch((error) => report($, error))
     if (binding?.mountOwner && binding.reference) await unmountThread($, binding.reference, binding.mountOwner)
   }
 }
@@ -407,7 +428,7 @@ export async function restoreChildren($: Runtime, session: string, binding: Bind
 export async function adoptExistingChildren($: Runtime, session: string) {
   const recorded = new Set<string>()
   // Each agent is adopted after the agent that spawned it, whatever order the list has.
-  let waiting = (await existingAgents($)).filter((agent) => agent.teammateId === undefined && agent.type !== 'fork')
+  let waiting = (await existingAgents($)).filter(recordsSubagent)
   for (let progress = true; progress;) {
     progress = false
     const ready = waiting.filter((agent) => agent.parentId === undefined || recorded.has(agent.parentId))
@@ -438,7 +459,7 @@ async function existingAgents($: Runtime): Promise<ExistingAgent[]> {
   const agents = new Map((await $.agent.list()).map((agent) => [agent.id, agent] as const))
   for (const row of await $.session.messages()) {
     for (const use of row.toolUses) {
-      if (use.tool !== 'Agent' && use.tool !== 'Task') continue
+      if (!isAgentTool(use.tool)) continue
       const result = use.result as Record<string, unknown> | undefined
       const agentId = typeof result?.agentId === 'string' ? result.agentId : undefined
       if (!agentId || agents.has(agentId) || result?.teammate_id !== undefined) continue
@@ -501,7 +522,7 @@ async function spawnPlacement($: Runtime, agent: ExistingAgent): Promise<{ apart
   for (const row of rows) {
     for (const use of row.toolUses) {
       const result = use.result as Record<string, unknown> | undefined
-      if ((use.tool === 'Agent' || use.tool === 'Task') && result?.agentId === agent.id) {
+      if (isAgentTool(use.tool) && result?.agentId === agent.id) {
         const worktree = typeof result.worktreePath === 'string' && result.worktreePath ? result.worktreePath : undefined
         return { apart: use.input.isolation === 'worktree' || typeof use.input.cwd === 'string', ...worktree ? { worktree } : {} }
       }

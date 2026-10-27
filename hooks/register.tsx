@@ -1,8 +1,5 @@
 import type { HookFailure, On } from 'claude-code'
-import {
-  activate, beginCaptureDecision, decideCapture, forgetSessionStart, newSessionFor, rememberSessionStart,
-  rememberTranscript, reportedStart, startSession,
-} from './setup/activation'
+import { activate, followTranscript, forgetSessionStart, noticeStart } from './setup/activation'
 import { clearProgress, drawBand, forgetBarTheme } from './band/band'
 import {
   DELTA_USAGE, deltaMenu, installationUpdates, installUpdateHost, JOIN_USAGE, ORG_USAGE, registerCommands,
@@ -17,16 +14,17 @@ import { admitPrompt } from './recording/prompt'
 import { showAnswer, shownItemId } from './watch/row-delivery'
 import { drawEcho, drawRow } from './watch/rows'
 import {
-  activation, cancelRequestsOf, endActivationOf, forgetRuntime, forgetTranscriptPath, markEnded, report, requests,
-  resetRuntime, type Runtime, stateFor,
+  cancelRequestsOf, endActivationOf, forgetRuntime, forgetTranscriptPath, markEnded, report, requests,
+  resetRuntime, type HookEvent, type HookNext, type Runtime, stateFor,
 } from './core/session-state'
 import {
-  children, completeChildTurn, createSubagentWorktree, forgetSubagents, recordChildRow, recordChildToolCall,
-  recordsChildren, recordSpawn, removeSubagentWorktree, startChildTurn,
+  children, completeChildTurn, followAgentCall, forgetSubagents, recordChildRow, recordChildToolCall, recordsChildren,
+  startChildTurn,
 } from './subagents/subagents'
 import { errorText } from './core/text'
+import { isAgentTool } from './subagents/children'
 import { forgetThreadNotes, sendToThread } from './subagents/thread-runs'
-import { forgetTitleReader, recordTitle } from './recording/title'
+import { forgetTitleReader } from './recording/title'
 import { stopWatching } from './watch/watch'
 
 /**
@@ -42,20 +40,15 @@ async function logHookFailure($: Runtime, hook: string, failure: HookFailure) {
   catch {}
 }
 
+function recordAppended($: Runtime, e: HookEvent<'session.append'>, next: HookNext<'session.append'>) {
+  return e.agentId !== undefined ? recordChildRow($, e, e.agentId, next) : recordRow($, e, next)
+}
+
 export function register(on: On) {
   on('prompt.submit', ($, e, next) => admitPrompt($, e, next)).catch(async ($, e, next) => {
     await logHookFailure($, 'prompt.submit', next.error)
     return { drop: 'Delta could not safely prepare this shared turn. Retry after the watcher is ready.' }
   })
-
-  on('agent.spawn', ($, e, next) => recordSpawn($, e, next))
-    .catch(async ($, e, next) => { await logHookFailure($, 'agent.spawn', next.error); return next(e) })
-
-  on('classic.WorktreeCreate', ($, e, next) => createSubagentWorktree($, e, next))
-    .catch(async ($, e, next) => { await logHookFailure($, 'classic.WorktreeCreate', next.error); return next(e) })
-
-  on('classic.WorktreeRemove', ($, e, next) => removeSubagentWorktree($, e, next))
-    .catch(async ($, e, next) => { await logHookFailure($, 'classic.WorktreeRemove', next.error); return next(e) })
 
   // Claude 2.1.299+ raises turn.start inside a child agent's or teammate's own loop, with `agentId`
   // set. That loop is not the shared conversation: only the main loop's turns may bind
@@ -63,8 +56,15 @@ export function register(on: On) {
   on('turn.start', ($, e, next) => e.agentId !== undefined
     ? startChildTurn($, e, e.agentId, next) : startTurn($, e, next))
 
-  on('turn.complete', ($, e, next) => e.agentId !== undefined
-    ? completeChildTurn($, e, e.agentId, next) : completeTurn($, e, next))
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId !== undefined) return completeChildTurn($, e, e.agentId, next)
+    const result = await completeTurn($, e, next)
+    // Claude names a session in its transcript file, not through any hook, so the title is read there
+    // when a turn ends: the title Claude chose for the first prompt, or a `/rename` made since. A turn's
+    // end never waits for the transcript or its title, and neither can fail it.
+    void $.session.id().then((session) => followTranscript($, session)).catch(() => {})
+    return result
+  })
 
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => drawBand($, e, next))
 
@@ -80,7 +80,7 @@ export function register(on: On) {
   on('ui.render', { component: 'CommandOutput' }, ($, e, next) => drawRow($, e, next))
   on('session.end', async ($, e, next) => {
     const session = e.sessionId
-    await forgetSessionStart($, session)
+    await forgetSessionStart($, session, e.reason)
     cancelRequestsOf(session, e.reason)
     forgetSubagents(session)
     endActivationOf(session)
@@ -124,50 +124,12 @@ export function register(on: On) {
     // the Delta commands the join runs here are `$` calls, which that budget never counts. The
     // claim reports its own failure.
     await stateFor(session).handoffClaim
-    // Claude reports a session's start (`classic.SessionStart`) just before this hook, but not to a
-    // plugin enabled in a running session, as right after `/plugin install`. Such a session is
-    // offered setup now rather than at the next startup or `/clear`. The check waits a tick, so a
-    // start report that arrives just after this hook still counts, and a session that ended meanwhile
-    // is offered nothing.
-    $.clock.after(0, () => {
-      if (activation.session !== session || reportedStart(session) || requests.join) return
-      void startSession($, session, true).catch((error) => { void report($, error) })
-    })
+    // Claude reports how a session started only to `classic.SessionStart`, which the organization's
+    // built-in guard keeps from this plugin, so the start is worked out here; after `/clear` or `/resume`,
+    // which raise no `session.start`, the session's first activity works it out instead.
+    await noticeStart($, session)
     return result
   })
-
-  // Claude names a session in its transcript file, not through any hook, so the title is read there
-  // when a turn ends: the title Claude chose for the first prompt, or a `/rename` made since.
-  on('classic.Stop', async ($, e, next) => {
-    const result = await next(e)
-    // A path not remembered now is reported again at the next turn's end.
-    if (typeof e.transcript_path === 'string' && e.transcript_path)
-      void $.session.id().then((session) => rememberTranscript($, session, e.transcript_path)).catch(() => {})
-    // The turn's end never waits for the title, and nothing about the title can fail it.
-    if (typeof e.transcript_path === 'string' && e.transcript_path)
-      void $.session.id().then((session) => recordTitle($, session, e.transcript_path)).catch(() => {})
-    return result
-  }).catch(async ($, e, next) => { await logHookFailure($, 'classic.Stop', next.error); return next(e) })
-
-  on('classic.SessionStart', async ($, e, next) => {
-    rememberSessionStart(e.session_id, typeof e.source === 'string' ? e.source : '',
-      typeof e.transcript_path === 'string' && e.transcript_path ? e.transcript_path : undefined)
-    // A new session's capture boundary opens before anything can reach a hook, and `startSession`
-    // resolves it once the policy and contract decision is made.
-    if (newSessionFor(e.session_id)) beginCaptureDecision(e.session_id)
-    const result = await next(e)
-    if (requests.join) {
-      // A join runs its own transition and never auto-activates, so nothing waits on this session.
-      decideCapture(e.session_id)
-      return result
-    }
-    try { await activate($, e.session_id) }
-    catch (error) { await report($, error) }
-    // Only a new session (startup or clear) is auto-activated; a resume, compaction, or fork keeps
-    // whatever policy it had. The offer and activation never delay a prompt.
-    $.clock.after(0, () => { void startSession($, e.session_id).catch((error) => { void report($, error) }) })
-    return result
-  }).catch(async ($, e, next) => { await logHookFailure($, 'classic.SessionStart', next.error); return next(e) })
 
   on('command.run', { command: 'delta' }, async ($, e) => {
     const action = e.args.trim()
@@ -192,8 +154,12 @@ export function register(on: On) {
     ? runDeltaCommand($, `org ${e.args.trim()}`, 'dedicated_command')
     : deltaMenu($, 'team', ORG_USAGE, 'dedicated_command'))
 
-  on('session.append', ($, e, next) => e.agentId !== undefined
-    ? recordChildRow($, e, e.agentId, next) : recordRow($, e, next))
+  // Only the rows this plugin records, so no hook of its own is in the chain of a row the organization's
+  // built-in guard keeps from a person's plugins: what Claude adds for the model (attachments, a hook's
+  // context, a compaction, a skill's body the Skill tool hands over) and the organization's notes.
+  on('session.append', { door: ['prompt', 'command', 'response', 'tool-result', 'delivery'] }, recordAppended)
+    .catch(async ($, e, next) => { await logHookFailure($, 'session.append', next.error); return next(e) })
+  on('session.append', { door: 'tool-message', origin: { kind: 'tool', tool: /^(?!Skill$)/ } }, recordAppended)
     .catch(async ($, e, next) => { await logHookFailure($, 'session.append', next.error); return next(e) })
 
   on('session.send', async ($, e, next) => {
@@ -208,7 +174,9 @@ export function register(on: On) {
     }
   }).catch(async ($, e, next) => { await logHookFailure($, 'session.send', next.error); return next(e) })
 
-  on('tool.call', ($, e, next) => e.agentId !== undefined
-    ? recordChildToolCall($, e, e.agentId, next) : recordToolCall($, e, next))
-    .catch(async ($, e, next) => { await logHookFailure($, 'tool.call', next.error); return next(e) })
+  // An Agent call is followed while it runs, which tells a foreground subagent from a background one.
+  on('tool.call', async ($, e, next) => {
+    const run = () => e.agentId !== undefined ? recordChildToolCall($, e, e.agentId, next) : recordToolCall($, e, next)
+    return isAgentTool(e.tool) ? followAgentCall($, e, run) : run()
+  }).catch(async ($, e, next) => { await logHookFailure($, 'tool.call', next.error); return next(e) })
 }
