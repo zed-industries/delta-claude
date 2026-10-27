@@ -3,7 +3,7 @@
  * retries, turn executions, checkout verification, capture failures, and refused offline changes.
  */
 import type { ApiMessage } from 'claude-code'
-import { activationIncomplete, captureDecided, outbox } from '../setup/activation'
+import { activationIncomplete, captureDecided, noticeSession, outbox } from '../setup/activation'
 import type { Entry } from '../subagents/children'
 import { capturedMessage, isOmittedTool, messageUpdates, resultUpdate, toolInfo, type Update } from './content'
 import { deliveryFailure, deliveryRetryDelay } from './delivery-policy'
@@ -718,6 +718,7 @@ async function reportRefusal($: Runtime, session: string, error: unknown) {
  */
 export async function startTurn($: Runtime, e: HookEvent<'turn.start'>, next: HookNext<'turn.start'>) {
   const session = await $.session.id()
+  await noticeSession($, session)
   await captureDecided(session)
   const runtime = stateFor(session)
   runtime.currentTurnId = e.turnId
@@ -782,6 +783,9 @@ export async function completeTurn($: Runtime, e: HookEvent<'turn.complete'>, ne
 
 /** A row the main conversation kept is recorded, or held for the turn it belongs to. */
 export async function recordRow($: Runtime, e: HookEvent<'session.append'>, next: HookNext<'session.append'>) {
+  // A session Claude starts after `/clear` has no start hook of its own: its first row, the command's, is the first
+  // thing this plugin sees of it, and the rows after it wait on the capture boundary this opens.
+  await noticeSession($)
   // The plugin's own `show` run is stored rewritten, so neither the model nor a resumed session's
   // copy of these rows names the internal command or its item id. Its output row names the item
   // until then, which is how the row is tied to what it draws.

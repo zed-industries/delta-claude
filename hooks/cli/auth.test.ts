@@ -11,8 +11,8 @@ const test = testsWithHeldClockWait(kitTest)
 /** Start a fresh session under a repository's automatic private-sync policy. */
 async function startAutomatic($: Engine, fake: ReturnType<typeof fakeThreads>) {
   fake.files.set(`${CHECKOUT}/.delta/settings.json`, JSON.stringify({ threads: { mode: 'private', organization: 'org-1' } }))
+  fake.turns = 0
   await $.session.start(sessionStart)
-  await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: CHECKOUT, transcript_path: '' } as never)
   await fake.settle()
   await fake.advance(0)
   await fake.settle()
@@ -394,9 +394,9 @@ test('setup installs Delta and finishes browser sign-in before creating a team a
       : text.startsWith('Who should join') ? 'Invite later' : 'Private sync'
     return { result: { answers: { [text]: answer } } }
   }
-  // A resumed session, so the setup offer a newly loaded plugin makes stays out of the way.
+  // A resumed session in a repository already offered setup, so the offer stays out of the way.
+  fake.store.set(`setup-offered:${fake.gitCommonDir}`, true)
   await $.session.start(sessionStart)
-  await $.classic.SessionStart({ session_id: fake.session, source: 'resume', cwd: CHECKOUT } as never)
   await fake.settle()
   expect(fake.authCalls).toEqual([])
   const setup = $.command.run(typedDelta('setup'))
@@ -418,8 +418,8 @@ test('setup installs Delta and finishes browser sign-in before creating a team a
   expect(fake.server.thread).toBeUndefined()
   await $.session.end(sessionEnd(fake.session))
   fake.session = 'after-setup'
+  fake.turns = 0
   await $.session.start(sessionStart)
-  await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: CHECKOUT } as never)
   await fake.settle()
   await fake.advance(0)
   await fake.settle()

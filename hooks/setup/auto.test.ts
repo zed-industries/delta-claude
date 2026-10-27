@@ -45,9 +45,29 @@ function binding(fake: ReturnType<typeof fakeThreads>) {
   return fake.store.get(`session:${fake.session}`) as any
 }
 
+/** The row the `/clear` command leaves at the start of the session it makes. */
+const clearRow = {
+  door: 'command', origin: { kind: 'composer' }, uuid: 'clear-row',
+  message: { type: 'user', role: 'user', content: [{ type: 'text', text: '<command-name>/clear</command-name>' }] },
+} as const
+
+/**
+ * Start the fixture's session as Claude does from `source`: at launch with `session.start` and as many
+ * prompts as a new or resumed session holds, and after `/clear` with nothing but the command's own row.
+ */
 async function startAuto($: Engine, fake: ReturnType<typeof fakeThreads>, source = 'startup') {
-  await $.session.start(sessionStart)
-  await $.classic.SessionStart({ session_id: fake.session, source, cwd: CHECKOUT, transcript_path: '' } as never)
+  if (source === 'clear') {
+    // The session before it has history, so it records nothing; its `/clear` starts the new one.
+    await $.session.start(sessionStart)
+    await fake.advance(0)
+    await $.session.end({ ...sessionEnd(fake.session), reason: 'clear' })
+    fake.session = `${fake.session}-cleared`
+    // Claude counts the command's rows as turns, so only the end of the session before says this one is new.
+    await $.session.append(clearRow as never)
+  } else {
+    fake.turns = source === 'startup' ? 0 : 1
+    await $.session.start(sessionStart)
+  }
   await fake.settle()
   await fake.advance(0)
   await fake.settle()
@@ -135,8 +155,8 @@ describe('automatic activation', () => {
     // Hold the contract check itself, not create/attach: this is the window before staging.
     fake.holdRun = (operation) => operation === 'contract'
       ? new Promise<void>((resolve) => { release = resolve }) : undefined
+    fake.turns = 0
     await $.session.start(sessionStart)
-    await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: CHECKOUT } as never)
     await fake.settle()
     await fake.advance(0)
     await fake.settle()
@@ -203,8 +223,8 @@ describe('automatic activation', () => {
     const fake = fakeThreads(on)
     let answer!: (value: unknown) => void
     fake.answerQuestion = () => new Promise((resolve) => { answer = resolve })
+    fake.turns = 0
     await $.session.start(sessionStart)
-    await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: CHECKOUT } as never)
     await fake.settle()
     await fake.advance(0)
     await fake.settle()
@@ -280,8 +300,8 @@ describe('automatic activation', () => {
     let release!: () => void
     fake.holdRun = (operation) => operation === 'attach'
       ? new Promise<void>((resolve) => { release = resolve }) : undefined
+    fake.turns = 0
     await $.session.start(sessionStart)
-    await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: CHECKOUT } as never)
     await fake.settle()
     await fake.advance(0)
     await fake.settle()
@@ -615,8 +635,8 @@ describe('offline recording', () => {
     fake.files.set(POLICY, policy('organization', 'org-1'))
     let release!: () => void
     fake.holdRun = (operation) => operation === 'attach' ? new Promise<void>((resolve) => { release = resolve }) : undefined
+    fake.turns = 0
     await $.session.start(sessionStart)
-    await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: CHECKOUT } as never)
     await fake.settle()
     await fake.advance(0)
     await fake.settle()
@@ -959,8 +979,8 @@ describe('setup dialogs and notices', () => {
       result: { answers: { [question.questions[0].question]: 'Not now' } },
     })
     const startup = async () => {
+      fake.turns = 0
       await $.session.start(sessionStart)
-      await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: CHECKOUT } as never)
       await fake.settle()
       await fake.advance(0)
       await fake.settle()
@@ -980,7 +1000,7 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => ({
       result: { answers: { [question.questions[0].question]: 'Not now' } },
     })
-    // Claude reports no start (`classic.SessionStart`) to a plugin enabled in a running session.
+    // A plugin enabled in a running session starts in one that already has prompts.
     await $.session.start(sessionStart)
     await fake.settle()
     await fake.advance(0)

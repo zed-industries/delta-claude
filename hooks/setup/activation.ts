@@ -22,13 +22,14 @@ import {
 } from '../core/session-state'
 import { offerOnboarding, type OnboardingStore, releaseOnboarding } from './setup'
 import { checkoutRoot, joinedBindingAt } from '../sharing/share'
-import { storedChildBinding } from '../subagents/subagents'
+import { restoreAbandonedWorktrees, storedChildBinding } from '../subagents/subagents'
 import {
   classifyCommandFailure, ContractRefusalError, DeltaCommandError, permanentFailureAdvice,
 } from '../cli/thread-commands'
 import { errorText } from '../core/text'
 import { restoreChildren } from '../subagents/thread-runs'
-import { FS_READ_LIMIT, readFrom } from '../recording/title'
+import { FS_READ_LIMIT, readFrom, recordTitle } from '../recording/title'
+import { claudeConfigDir, expectedTranscript, findTranscript } from '../core/transcript'
 import { followUpload, startConversation, stopConversation } from '../watch/watch'
 
 /** The plugin's folder under Claude's configuration, shared by every Claude process on the machine. */
@@ -57,8 +58,7 @@ export async function activate($: Runtime, session: string, isCurrent = () => tr
   const ownsActivation = () => epoch === activation.epoch && isCurrent()
   activation.activating = session
   try {
-    const home = await $.env.get('HOME') ?? await $.env.get('USERPROFILE')
-    const config = await $.env.get('CLAUDE_CONFIG_DIR') ?? (home ? `${home}/.claude` : undefined)
+    const config = await claudeConfigDir($)
     if (!ownsActivation()) return
     if (!config) throw new Error('Cannot locate Claude configuration; set CLAUDE_CONFIG_DIR.')
     pluginData = `${config}/delta-plugin`
@@ -170,23 +170,155 @@ export async function finishRestoredActivation($: Runtime, session: string, bind
     void restoreChildren($, session, binding).catch((error) => report($, error))
 }
 
-/** The source `classic.SessionStart` reported for each session, until the session ends. */
-const sessionSources = new Map<string, string>()
+/**
+ * How each session started (`startup`, `clear` or `resume`), until the session ends. Claude reports it
+ * only to `classic.SessionStart`, which the organization's built-in guard (`cc-plugin-sec-default`)
+ * keeps from every plugin a person installs, so `noticeSession` works it out instead. A fork of a
+ * conversation cannot be told from a resume, so it counts as one.
+ */
+const sessionStarts = new Map<string, string>()
+/** The session this process started last: while it is set, a hook knows no other session has begun. */
+let startedSession: string | undefined
+/** The session that ended last; a hook still running for it starts nothing. */
+let endedSession: string | undefined
+/**
+ * How the session after the one that ended starts: `/clear` makes a new one, `/resume` and `/branch` one
+ * with history, and the `/clear` a join runs makes the one the join takes over.
+ */
+let successor: 'clear' | 'resume' | 'join' | undefined
+/** The starts being worked out, so two hooks that notice one session wait for the same work. */
+const noticing = new Map<string, Promise<boolean>>()
+/** How often a session's transcript was looked for and not found, which stops the looking at {@link MAX_TRANSCRIPT_MISSES}. */
+const transcriptMisses = new Map<string, number>()
+const MAX_TRANSCRIPT_MISSES = 3
 
-/** Remember what Claude reported when a session started: how it started, and its transcript. */
-export function rememberSessionStart(session: string, source: string, transcript: string | undefined) {
-  sessionSources.set(session, source)
-  if (transcript) rememberTranscriptPath(session, transcript)
+/**
+ * `session.start` ran for a session, which has been activated by now: work out how it started. A session
+ * that ended while the hook ran starts nothing.
+ */
+export async function noticeStart($: Runtime, session: string) {
+  if (activation.session !== session) return
+  // A session started again under the id of one that ended starts anew.
+  if (endedSession === session) endedSession = undefined
+  await noticeSession($, session)
 }
 
-/** Whether Claude reported this session's start, which it does not to a plugin enabled mid-session. */
-export function reportedStart(session: string): boolean {
-  return sessionSources.has(session)
+/**
+ * Begin a session this process has not started yet: one starting at launch or when the plugin is
+ * enabled (`session.start`), or one Claude starts after `/clear` or `/resume`, which raise no
+ * `session.start`. Its source is what the end of the session before it said, else `startup` for a
+ * session with no prompts yet and `resume` for one with history.
+ *
+ * The first activity of a session calls this before it waits on the session's capture boundary, so it
+ * returns at once once the session has begun. It waits only until the source is known and the boundary
+ * open: the rest of the start (`activate`) appends rows of its own, whose hooks call this too.
+ */
+export async function noticeSession($: Runtime, session?: string) {
+  if (startedSession !== undefined && (session === undefined || session === startedSession)) return
+  const id = session ?? await $.session.id()
+  if (id === endedSession) return
+  const running = noticing.get(id)
+  if (running) {
+    await running
+    return
+  }
+  if (sessionStarts.has(id)) {
+    startedSession = id
+    return
+  }
+  const deciding = decideStart($, id)
+  noticing.set(id, deciding)
+  let begins: boolean
+  try { begins = await deciding } finally { noticing.delete(id) }
+  if (begins) void beginSession($, id).catch((error) => report($, error))
+}
+
+/**
+ * Work out how a session started, and open its capture boundary when it is new. Whether its start is
+ * still to run: the session a join's `/clear` starts is the join's.
+ */
+async function decideStart($: Runtime, session: string): Promise<boolean> {
+  const after = successor
+  successor = undefined
+  let source: string = after === 'join' ? 'clear' : after ?? 'resume'
+  if (!after) {
+    // A failed read must not take a session that may hold history for a new one, which records from now on.
+    try { source = await $.session.turns() === 0 ? 'startup' : 'resume' } catch {}
+  }
+  sessionStarts.set(session, source)
+  startedSession = session
+  if (after === 'join') return false
+  // A join, running or done, as a hand-off's is by now, decides what its session records.
+  if (newSessionFor(session) && !requests.join && !sessions.get(session)?.binding?.joined) beginCaptureDecision(session)
+  return true
+}
+
+/**
+ * What a session's start does once its source is known: load its binding, then offer or begin
+ * recording off the hook's critical path. Only a new session (startup or clear) is recorded
+ * automatically; one with history is offered setup and keeps whatever policy it had.
+ */
+async function beginSession($: Runtime, session: string) {
+  // A session that ended without its end hook left its isolated subagents' worktrees beside links.
+  void restoreAbandonedWorktrees($).catch((error) => report($, error))
+  // Claude names a transcript by its working directory and session. A new session's file appears with
+  // its first row, and the first turn's end finds it then.
+  try {
+    const expected = await expectedTranscript($, session)
+    if (expected && !transcriptPathOf(session) && await $.fs.exists(expected)) rememberTranscriptPath(session, expected)
+  } catch { /* the first turn's end looks for the transcript again */ }
+  // A session that ended meanwhile, which forgets its start, starts nothing.
+  if (!sessionStarts.has(session)) return
+  if (requests.join) {
+    // A join runs its own transition and never auto-activates, so nothing waits on this session.
+    decideCapture(session)
+    return
+  }
+  const binding = sessions.get(session)?.binding
+  // `session.start` or a prompt may have activated the session already; activating it again would stop
+  // what that activation started, such as a setup. One that continues another session's conversation
+  // is activated again, which takes the conversation over now that its start is known.
+  let activates = activation.session !== session || !binding
+  if (!activates && binding && continuationCandidate(session, binding)) {
+    try { activates = await continuedFrom($, session) !== undefined }
+    catch (error) { await report($, error) }
+  }
+  if (activates) {
+    try { await activate($, session) }
+    catch (error) { await report($, error) }
+  }
+  // The offer and activation never delay a prompt.
+  const midSession = !newSessionFor(session)
+  $.clock.after(0, () => {
+    if (midSession && (activation.session !== session || requests.join)) return
+    void startSession($, session, midSession).catch((error) => { void report($, error) })
+  })
+}
+
+/**
+ * Remember where a turn left the transcript and its title. Looking for the file stops after a few
+ * misses, as a session that keeps no transcript would otherwise search for it at every turn.
+ */
+export async function followTranscript($: Runtime, session: string) {
+  if ((transcriptMisses.get(session) ?? 0) >= MAX_TRANSCRIPT_MISSES) return
+  const path = await findTranscript($, session, transcriptPathOf(session))
+  if (!path) {
+    transcriptMisses.set(session, (transcriptMisses.get(session) ?? 0) + 1)
+    return
+  }
+  await rememberTranscript($, session, path)
+  await recordTitle($, session, path)
 }
 
 /** A session that ended forgets how it started and its open setup offer, and releases its capture boundary. */
-export async function forgetSessionStart($: Runtime, session: string) {
-  sessionSources.delete(session)
+export async function forgetSessionStart($: Runtime, session: string, reason: string) {
+  sessionStarts.delete(session)
+  transcriptMisses.delete(session)
+  // Claude starts the session after this one with no `session.start`, so the reason it ended says how.
+  endedSession = session
+  startedSession = undefined
+  successor = reason === 'clear' && requests.join ? 'join'
+    : reason === 'clear' || reason === 'resume' ? reason : undefined
   // A setup offer still open when its session ends was never decided, so the next session offers it again.
   const offer = openOnboarding.get(session)
   openOnboarding.delete(session)
@@ -229,11 +361,11 @@ async function continuationOf($: Runtime, transcript: string): Promise<string | 
 }
 
 /**
- * Whether `session` may continue another session's conversation: Claude Code reports a
- * continuation's start as a `fork` of the conversation, and it has recorded nothing of its own.
+ * Whether `session` may continue another session's conversation: it started with the conversation's
+ * history, as a continuation does, and it has recorded nothing of its own.
  */
 export function continuationCandidate(session: string, binding: Binding): boolean {
-  return sessionSources.get(session) === 'fork' && !binding.thread && !binding.snapshot && !binding.joinTransition
+  return sessionStarts.get(session) === 'resume' && !binding.thread && !binding.snapshot && !binding.joinTransition
 }
 
 /** The recording session whose conversation Claude Code continued as `session`, if any. */
@@ -311,7 +443,7 @@ export async function handedOff($: Runtime, session: string): Promise<boolean> {
 }
 
 export function newSessionFor(session: string): boolean {
-  const source = sessionSources.get(session)
+  const source = sessionStarts.get(session)
   return source === 'startup' || source === 'clear'
 }
 

@@ -1,7 +1,7 @@
 /**
  * The `/delta` command and its dedicated forms: parsing, the menu, and running each action.
  */
-import { activate, refreshReminder } from './activation'
+import { activate, noticeSession, refreshReminder } from './activation'
 import { setProgress } from '../band/band'
 import { type CommandForm, orgCommand } from '../cli/delta-cli'
 import { chooseDeltaAction, type MenuStart } from './delta-menu'
@@ -87,6 +87,7 @@ export function installUpdateHost($: Runtime): UpdateHost {
 
 /** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
 export async function runDeltaCommand($: Runtime, action: string, form: CommandForm): Promise<{ text?: string }> {
+  await noticeSession($)
   if (action === 'update') return { text: await installationUpdates.update(installUpdateHost($), form) }
   if (action === 'org manage') return { text: await manageOrganization($) }
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.

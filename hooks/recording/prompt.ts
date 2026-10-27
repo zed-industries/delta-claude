@@ -2,7 +2,7 @@
 
 import {
   activate, activationIncomplete, adoptContinuation, captureDecided, continuationCandidate, continuedFrom,
-  retryAutomaticActivation,
+  noticeSession, retryAutomaticActivation,
 } from '../setup/activation'
 import { recordsOffline, verifyCheckout } from './delivery'
 import { beginRestoreCheckout, checkoutNeedsMount } from '../sharing/checkout'
@@ -26,7 +26,10 @@ export async function admitPrompt($: Runtime, e: HookEvent<'prompt.submit'>, nex
   // A hand-off's opening line only started this session, which has joined by now. It becomes a
   // one-word turn that the thread never records, rather than a message to the thread or a
   // dropped prompt Desktop would show as blocked.
-  const opening = stateFor(await $.session.id())
+  const current = await $.session.id()
+  // The first prompt after `/clear` can reach this hook before any report of the session's start.
+  await noticeSession($, current)
+  const opening = stateFor(current)
   if (opening.handoffClaim) {
     const claim = opening.handoffClaim
     await claim

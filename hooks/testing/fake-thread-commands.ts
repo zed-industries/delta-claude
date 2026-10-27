@@ -370,6 +370,7 @@ export function fakeThreads(hostOn: On, options: {
     holdCommandListFor: undefined as ((session: string) => Promise<void> | undefined) | undefined,
     root: undefined as string | undefined,
     claudeVersion: MINIMUM_CLAUDE_VERSION,
+    /** The agents `$.agent.list()` names, which a spawn adds to before its agent's loop raises anything. */
     agents: [] as AgentInfo[],
     endSession: undefined as ((session: string) => Promise<unknown>) | undefined,
     clock: mock.clock(on) as MockClock,
@@ -437,10 +438,32 @@ export function fakeThreads(hostOn: On, options: {
     },
     /** The messages the host delivered for SendMessage, after the plugin's hooks. */
     sends: [] as { to: string; text: string }[],
-    /** Every agent the host started or resumed, and what with. */
-    spawned: [] as { agentId: string; prompt: string; cwd?: string; resumed: boolean }[],
     /** The agent ID the host gives the next spawn. */
     spawns: 0,
+    /**
+     * The prompts and commands the main conversation holds, as `session.turns()` counts them. A session
+     * that starts with none is new, so a test stands for a resumed session, or a plugin loaded into a
+     * running one, unless it sets this to 0.
+     */
+    turns: 1,
+    /** Every folder the plugin listed, in order. */
+    listed: [] as string[],
+    /** Directory links the plugin made, by path, each to its target. */
+    links: new Map<string, string>(),
+    /** Links whose target is gone, as a fork's is once its mount went with a session that did not end. */
+    danglingLinks: new Set<string>(),
+    /** The `mv`, `ln`, and link `rm` commands the plugin ran, in order. */
+    linkCommands: [] as string[],
+    /** Makes `ln` fail, as on a file system that refuses links. */
+    failLink: false,
+    /** Directories that exist besides the files, such as a git worktree Claude made for a subagent. */
+    worktreeDirectories: new Set<string>(),
+    /** Every Agent tool call as it reached Claude, after the plugin's hooks. */
+    agentCalls: [] as Record<string, unknown>[],
+    /** Stands in for Claude running an Agent call's subagent, which it starts and, in the foreground, waits for inside the call. */
+    spawnForAgentCall: undefined as ((call: { tool_use_id: string; description?: string; name?: string }) => Promise<{ agentId?: string }>) | undefined,
+    /** The organization's managed settings, as `$.settings.read({ source: 'policy' })` reads them. */
+    policy: {} as Record<string, unknown>,
     /** The main conversation's rows with their tool uses, as `session.messages()` summarizes them. */
     summaries: [] as { role: string; text: string; toolUses: { tool_use_id: string; tool: string; input: Record<string, unknown>; result?: unknown }[] }[],
     /** Each subagent's transcript, which `session.messages({ agentId })` reads. */
@@ -453,8 +476,6 @@ export function fakeThreads(hostOn: On, options: {
     taskStops: [] as string[],
     /** Holds a spawn's answer, as Claude does while the agent's first hooks already run. */
     holdSpawn: undefined as Promise<void> | undefined,
-    /** A hook answers `agent.spawn` itself, so no subagent starts and no `agentId` comes back. */
-    spawnStartsNone: false,
     /** Every subagent append fails before accepting anything until cleared. */
     childAppendOffline: false,
     /** Turn sequences a subagent's thread fences, as if someone in Delta took the turn over. */
@@ -805,19 +826,22 @@ export function fakeThreads(hostOn: On, options: {
   // harmless when the running kit does not know the event.
   try { on('store.keys', () => ({ value: [...fake.store.keys()] })) } catch {}
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('classic.SessionStart', () => ({}))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: fake.session }))
   on('session.cwd', () => ({ value: fake.cwd }))
+  on('session.turns', () => ({ value: fake.turns }))
   on('session.root', () => ({ value: fake.root ?? fake.cwd }))
   on('session.surfaces', () => ({ value: fake.surfaces }))
   on('session.version', () => ({ value: { version: fake.claudeVersion } }))
   on('agent.list', () => ({ value: fake.agents }))
   on('agent.spawn', async ($, e) => {
-    if (fake.spawnStartsNone) return { model: 'test-model' }
     const agentId = e.resume?.agentId ?? `agent${++fake.spawns}`
+    if (!e.resume && !e.workflow) fake.agents.push({
+      id: agentId, description: e.description, type: e.fork ? 'fork' : e.subagentType, status: 'running',
+      ...e.parentAgentId ? { parentId: e.parentAgentId } : {}, ...e.name ? { name: e.name } : {},
+      ...e.isTeammate ? { teammateId: `${e.name ?? agentId}@team` } : {},
+    })
     if (fake.holdSpawn) await fake.holdSpawn
-    fake.spawned.push({ agentId, prompt: e.prompt, cwd: e.cwd, resumed: e.resume !== undefined })
     return { model: 'test-model', agentId }
   })
   on('session.send', ($, e) => {
@@ -931,9 +955,17 @@ export function fakeThreads(hostOn: On, options: {
         return { result: { answers: { [question.question]: question.options[0].label } } } as never
       return { deny: 'the person dismissed the question' } as never
     }
+    if (e.tool === 'Agent') {
+      fake.agentCalls.push({ ...e } as Record<string, unknown>)
+      const spawned = await fake.spawnForAgentCall?.(e as never)
+      const background = (e as Record<string, unknown>).run_in_background === true
+      return { result: { status: background ? 'async_launched' : 'completed', agentId: spawned?.agentId } } as any
+    }
     if (fake.holdTool) await fake.holdTool
     return { result: fake.toolResult } as any
   })
+  // Managed settings, which a test sets as the organization's policy; none by default.
+  on('settings.read', ($, e) => ({ value: e.source === 'policy' ? fake.policy : {} }) as never)
   on('fs.write', ($, e) => {
     if (fake.failWrite) throw new Error('disk full')
     fake.files.set(e.path, e.text)
@@ -946,23 +978,32 @@ export function fakeThreads(hostOn: On, options: {
     return { value }
   })
   on('fs.stat', ($, e) => {
+    if (fake.danglingLinks.has(e.path)) throw new Error(`ENOENT: ${e.path}`)
+    if (fake.links.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: true } }
+    if (fake.worktreeDirectories.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } }
     const text = fake.files.get(e.path)
     if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file' as const, size: new TextEncoder().encode(text).byteLength, mtimeMs: 0, isLink: false } }
   })
-  on('fs.exists', ($, e) => ({ value: [...fake.files.keys()].some((path) =>
-    path === fixturePath(e.path) || path.startsWith(`${fixturePath(e.path)}/`)) }))
+  on('fs.exists', ($, e) => ({ value: fake.links.has(e.path) || fake.worktreeDirectories.has(e.path) ||
+    [...fake.files.keys()].some((path) => path === fixturePath(e.path) || path.startsWith(`${fixturePath(e.path)}/`)) }))
   on('fs.list', async ($, e) => {
+    fake.listed.push(e.path)
     if (fake.holdListing) await fake.holdListing
     const prefix = `${fixturePath(e.path)}/`
-    return { value: [...fake.files.keys()].filter((path) => path.startsWith(prefix) && !path.slice(prefix.length).includes('/'))
-      .map((path) => ({ name: path.slice(prefix.length), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })) }
+    const below = [...fake.files.keys()].filter((path) => path.startsWith(prefix)).map((path) => path.slice(prefix.length))
+    // A file deeper down makes a folder here, listed once.
+    const folders = [...new Set(below.filter((name) => name.includes('/')).map((name) => name.slice(0, name.indexOf('/'))))]
+    // Links and worktrees directly in the folder, as a link stands, not what it leads to.
+    const within = (paths: Iterable<string>) => [...paths].filter((path) => path.startsWith(prefix) && !path.slice(prefix.length).includes('/'))
+      .map((path) => path.slice(prefix.length))
+    return { value: [
+      ...below.filter((name) => !name.includes('/')).map((name) => ({ name, kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
+      ...folders.map((name) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
+      ...within(fake.worktreeDirectories.keys()).map((name) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
+      ...within(fake.links.keys()).map((name) => ({ name, kind: 'other' as const, size: 0, mtimeMs: 0, isLink: true })),
+    ] }
   })
-  // Claude runs no settings hook beneath the plugin's: an empty Stop answer lets the turn end.
-  on('classic.Stop', () => ({}))
-  // Unhooked, Claude makes and removes a subagent's isolated git worktree itself.
-  on('classic.WorktreeCreate', () => ({}))
-  on('classic.WorktreeRemove', () => ({}))
   /** Delta's telemetry counts each integration's commands, so every Delta command the plugin runs says it is Claude Code's. */
   const expectLabelled = (argv: readonly string[], env: Record<string, string> | undefined) => {
     if (/(^|[\\/])delta(\.exe)?$/i.test(argv[0] ?? '') && env?.DELTA_CLI_INTEGRATION !== 'claude_code')
@@ -1059,6 +1100,10 @@ export function fakeThreads(hostOn: On, options: {
       if (fake.failGit) return output('', 128, 'not a git repository')
       if (argv[1] === 'remote') return output(fake.gitRemotes.map((name) => `${name}\n`).join(''))
       if (argv.includes('--git-common-dir')) return output(`${fake.gitCommonDir}\n`)
+      // Claude names the branch of a worktree it makes for a subagent after the agent.
+      if (argv[1] === 'worktree' && argv[2] === 'list') return output([...fake.worktreeDirectories]
+        .filter((path) => !path.endsWith('.claude-worktree'))
+        .map((path) => `worktree ${path}\nHEAD 0000000000000000000000000000000000000000\nbranch refs/heads/claude/${path.slice(path.lastIndexOf('/') + 1)}\n\n`).join(''))
       // A subagent's isolated worktree is a checkout of its own.
       const cwd = String((e as any).init?.cwd ?? '')
       if (cwd.includes('/.claude/worktrees/')) return output(`${cwd}\n`)
@@ -1068,6 +1113,18 @@ export function fakeThreads(hostOn: On, options: {
     if (argv[0] === 'open') {
       if (fake.failOpen) return output('', 1, 'open: command not found')
       fake.opened.push(argv[1]!)
+      return output('')
+    }
+    // Moving Claude's worktree aside and linking its path to a fork, as a subagent's own definition isolates it.
+    if (argv[0] === 'mv' || argv[0] === 'ln' || (argv[0] === 'rm' && fake.links.has(argv[2]!))) {
+      fake.linkCommands.push(argv.join(' '))
+      if (fake.failLink && argv[0] === 'ln') return output('', 1, 'ln: Operation not permitted')
+      if (argv[0] === 'ln') fake.links.set(argv[4]!, argv[3]!)
+      if (argv[0] === 'mv' && fake.worktreeDirectories.delete(argv[2]!)) fake.worktreeDirectories.add(argv[3]!)
+      if (argv[0] === 'rm') {
+        fake.links.delete(argv[2]!)
+        fake.danglingLinks.delete(argv[2]!)
+      }
       return output('')
     }
     if (argv[0] === 'rm') {
@@ -1346,7 +1403,8 @@ export function fakeThreads(hostOn: On, options: {
       if (!forked.isolatedWorktrees || !matchesCommand(e.argv, ['thread', 'mount', forked.reference], { '--owner': owner }))
         fake.violations.push(`unexpected child mount: ${e.argv.join(' ')}`)
       forked.mountedFor = owner
-      const checkout = `${MOUNTS}/${owner}`
+      // Delta checks a fork's worktree out inside the checkout it was forked from.
+      const checkout = `${CHECKOUT}/.delta/worktrees/${owner}/repo`
       const directory = `${FOLDERS}/${owner}`
       const mounted = cliFixture('mount', {
         thread_id: forked.thread, owner, directory,
@@ -1513,6 +1571,8 @@ export function fakeThreads(hostOn: On, options: {
         fake.violations.push(`a child created under an unknown parent: ${parent}`)
         return output(JSON.stringify(cliFixture('error', faultEnvelope({ code: 'invalid_reference', message: 'unknown parent' }))), 2)
       }
+      const fault = fake.commandFault?.operation === 'create' ? fake.commandFault : undefined
+      if (fault) return output(JSON.stringify(cliFixture('error', faultEnvelope(fault))), fault.exitCode ?? 2)
       const existing = fake.server.subagents.get(agentId)
       const child = existing ?? {
         thread: `child-${agentId}`, reference: `${fake.server.thread}#s=${agentId}`, parent,

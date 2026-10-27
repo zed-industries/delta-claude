@@ -6,6 +6,7 @@ import {
 import { itemFingerprint } from '../watch/conversation'
 import { cliFixture } from '../testing/cli-fixtures'
 import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink } from './handoff'
+import { transcriptCandidate } from '../core/transcript'
 
 tier('user')
 
@@ -232,8 +233,6 @@ describe('joining', () => {
     fake.holdRun = (operation) => operation === 'mount' ? new Promise<void>((resolve) => { release = resolve }) : undefined
     const starting = startInThreadFolder($, fake, offer.folder)
     await fake.settle()
-    // Claude raises its classic startup hook too, while the hand-off's mount is still running.
-    await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: offer.folder } as never)
     await fake.settle()
     await fake.advance(0)
     await fake.settle()
@@ -343,9 +342,10 @@ describe('joining', () => {
       await finishJoin(fake)
       const parent = fake.session
       const directory = `${MOUNTS}/${parent}/delta`
-      const transcript = `/claude/projects/${parent}.jsonl`
+      const transcript = transcriptCandidate(CONFIG, fake.cwd, parent)
       fake.files.set(transcript, '{"type":"user"}\n')
-      await $.classic.Stop({ transcript_path: transcript, stop_hook_active: false } as any)
+      await $.turn.start(turnStart('parent-turn', 'before the move'))
+      await $.turn.complete(turnComplete('parent-turn'))
       await fake.settle()
       expect((fake.store.get(`session:${parent}`) as any).transcript).toBe(transcript)
       // Claude Code moves the conversation to a new session and says so at the end of the old transcript.
@@ -360,7 +360,6 @@ describe('joining', () => {
       fake.session = 'continued'
       fake.producer = parent
       await $.session.start({ ...sessionStart, cwd: directory })
-      await $.classic.SessionStart({ session_id: 'continued', source: 'fork', cwd: directory, transcript_path: '/claude/projects/continued.jsonl' } as never)
       await fake.advance(0)
       expect(fake.store.get('session:continued')).toMatchObject({
         thread: fake.threadId, joined: true, producer: parent, owner: parent, directory,
@@ -1074,6 +1073,8 @@ async function offerFromDesktopTab($: Engine, fake: ReturnType<typeof fakeThread
 async function startInThreadFolder($: Engine, fake: ReturnType<typeof fakeThreads>, folder: string) {
   fake.session = 'opened-from-link'
   fake.cwd = folder
+  // Desktop opens a new session there.
+  fake.turns = 0
   await $.session.start({ ...sessionStart, surface: 'desktop', cwd: folder })
 }
 
