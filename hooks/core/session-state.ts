@@ -38,6 +38,11 @@ export type Binding = {
   /** Last confirmed location of a shared session's attached checkout, not proof that the thread still owns it. */
   checkout?: string
   checkoutReference?: string
+  /**
+   * The checkout this session worked in until it and the thread both changed while the session was
+   * closed. Delta left it untouched and moved the session to a checkout of the thread's own.
+   */
+  movedFrom?: string
   /** Local identity saved before membership, so a lost attach receipt cannot create another worktree. */
   pendingWorktree?: { directory: string; reference: string }
   /**

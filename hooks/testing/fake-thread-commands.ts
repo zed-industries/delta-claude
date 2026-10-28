@@ -483,6 +483,8 @@ export function fakeThreads(hostOn: On, options: {
     failLink: false,
     /** Directories that exist besides the files, such as a git worktree Claude made for a subagent. */
     worktreeDirectories: new Set<string>(),
+    /** Checkouts `worktree release` made Delta forget, in order. */
+    releasedCheckouts: [] as string[],
     /** Every Agent tool call as it reached Claude, after the plugin's hooks. */
     agentCalls: [] as Record<string, unknown>[],
     /** Stands in for Claude running an Agent call's subagent, which it starts and, in the foreground, waits for inside the call. */
@@ -686,7 +688,7 @@ export function fakeThreads(hostOn: On, options: {
       return fake.delta().map((argv) => {
         const parsed = cliArguments(argv)
         const operation = parsed?.positionals[1]
-        return parsed?.positionals[0] === 'worktree' && ['create', 'mount', 'list'].includes(operation ?? '')
+        return parsed?.positionals[0] === 'worktree' && ['create', 'mount', 'list', 'release'].includes(operation ?? '')
           ? `worktree ${operation}` : operation
       })
     },
@@ -1268,6 +1270,14 @@ export function fakeThreads(hostOn: On, options: {
       }
       return fault ? output(JSON.stringify(cliFixture('error', faultEnvelope(fault))), fault.exitCode ?? 2)
         : output(JSON.stringify({ operation: 'attached', thread_id: thread, reference, ...fake.attachmentPatch }))
+    }
+    if (parsed?.positionals[0] === 'worktree' && operation === 'release') {
+      const [reference, directory] = [parsed.positionals[2]!, parsed.positionals[3]!]
+      if (!matchesCommand(argv, ['worktree', 'release', reference, directory], {}))
+        fake.violations.push(`unexpected worktree release: ${argv.join(' ')}`)
+      if (fake.activeCheckouts.has(directory)) fake.violations.push(`released a mounted checkout: ${argv.join(' ')}`)
+      fake.releasedCheckouts.push(directory)
+      return output(JSON.stringify({ operation: 'released', reference, directory }))
     }
     if (operation === 'unmount') {
       fake.violations.push(`obsolete unmount command: ${argv.join(' ')}`)

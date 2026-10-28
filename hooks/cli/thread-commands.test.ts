@@ -1,10 +1,10 @@
 import { describe, expect, test, tier } from 'claude-code/testing'
 import { cliFixture } from '../testing/cli-fixtures'
 import {
-  appendFailure, classifyCommandFailure, contractRefusal, contractVersion, DeltaCommandError, JoinNotReadyError,
-  parseAppendReceipt, parseThreadContract, parseThreadFork, parseThreadMount, parseThreadStatus, parseWatchEvent,
-  permanentFailureAdvice, type ThreadReady, type ThreadStatus, validateJoinedMounts, validateThreadCheckout,
-  validateThreadFrontier,
+  appendFailure, CheckoutInactiveError, classifyCommandFailure, contractRefusal, contractVersion, DeltaCommandError,
+  JoinNotReadyError, parseAppendReceipt, parseThreadContract, parseThreadFork, parseThreadMount, parseThreadStatus,
+  parseWatchEvent, permanentFailureAdvice, type ThreadReady, type ThreadStatus, validateJoinedMounts,
+  validateThreadCheckout, validateThreadFrontier,
 } from './thread-commands'
 
 tier('user')
@@ -121,6 +121,15 @@ describe('thread watch', () => {
       .toThrow(unavailable.error.code)
     expect(() => validateThreadCheckout({ ...common, worktrees: empty }, binding)).toThrow('missing')
     expect(binding).toEqual({ checkout: '/repo', checkoutReference: 'history#t=0' })
+  })
+
+  test('a bound checkout Delta stopped synchronizing is told apart from one that is gone', () => {
+    const binding = { checkout: '/repo', checkoutReference: 'history#t=0' }
+    const inventory = (state: 'inactive' | 'missing') => ({ ...status(), worktrees: { status: 'available' as const,
+      items: [{ reference: 'history#t=0', checkouts: [{ directory: '/repo', state }] }] } })
+    expect(() => validateThreadCheckout(inventory('inactive'), binding)).toThrow(CheckoutInactiveError)
+    expect(() => validateThreadCheckout(inventory('missing'), binding)).toThrow('missing')
+    expect(() => validateThreadCheckout(inventory('missing'), binding)).not.toThrow(CheckoutInactiveError)
   })
 
   test('checkout selection uses reference and directory independently of inventory order', () => {

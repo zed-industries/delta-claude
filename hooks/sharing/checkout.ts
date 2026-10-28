@@ -5,8 +5,9 @@
  */
 import { finishProgress, setProgress } from '../band/band'
 import {
-  hasWorktreeMount, requireContract, worktreeAttach, worktreeCreate, worktreeList, worktreeMount,
+  hasWorktreeMount, requireContract, worktreeAttach, worktreeCreate, worktreeList, worktreeMount, worktreeRelease,
 } from '../cli/delta-cli'
+import { DeltaCommandError } from '../cli/thread-commands'
 import { samePath } from '../core/paths'
 import {
   activation, type Binding, load, recoveryCommand, save, serial, sessions, stateFor,
@@ -15,7 +16,7 @@ import type { Host } from '../core/host'
 import { errorText } from '../core/text'
 import { recordsOffline } from '../recording/delivery'
 import { finishRestoredActivation } from '../setup/activation'
-import { startParticipation } from './join'
+import { beginRestore, mountThread, requireMounted, startParticipation } from './join'
 
 /** Reuse a checkout already bound on this machine, or create a new local worktree identity. */
 async function checkoutReference(
@@ -63,15 +64,15 @@ export function checkoutNeedsMount(session: string, binding: Binding): boolean {
 }
 
 /**
- * Reclaim a saved user checkout before resuming recording in its directory. A session that records
- * offline keeps taking prompts meanwhile: their records queue, and mounting the existing checkout
- * imports the edits they make. Delta waits for a connection before mounting a shared checkout, so
- * holding prompts for the mount would hold them for as long as the session is offline.
+ * Reclaim a saved user checkout before resuming recording in its directory. Others may have changed a
+ * thread they can open while the session was closed, so prompts wait until Delta has compared the
+ * checkout with it, for as long as reaching Delta takes. A private thread's session that records
+ * offline keeps taking prompts meanwhile: their records queue, and the mount imports their edits.
  */
 export function beginRestoreCheckout(host: Host, session: string) {
   const runtime = stateFor(session)
   if (runtime.restoring || runtime.restoringCheckout) return
-  const background = recordsOffline(session, runtime.binding)
+  const background = recordsOffline(session, runtime.binding) && runtime.binding?.visibility === 'private'
   if (background) runtime.restoringCheckout = true
   else runtime.restoring = true
   setProgress(host, 'Restoring this checkout’s synchronization…', 'active')
@@ -99,6 +100,16 @@ export function beginRestoreCheckout(host: Host, session: string) {
       await finishRestoredActivation(host, session, binding, owns)
     } catch (error) {
       if (!owns()) return
+      if (error instanceof DeltaCommandError && error.reason === 'worktree_directory_diverged') {
+        await moveToThreadCheckout(host, session, owns).catch(async (moveError) => {
+          if (!owns()) return
+          const text = `Delta couldn't move this session to a checkout of the thread: ${errorText(moveError)}. Retry ${recoveryCommand(runtime.binding)}; the prompt was not submitted.`
+          runtime.joinFailure = text
+          setProgress(host, text, 'error')
+          await host.ui.log(text, { to: 'transcript' })
+        })
+        return
+      }
       // Prompts that record offline keep going, and the next one retries the restore.
       const text = background
         ? `Delta couldn't restore this checkout's synchronization: ${errorText(error)}. Prompts still record locally, and the next one retries.`
@@ -111,4 +122,43 @@ export function beginRestoreCheckout(host: Host, session: string) {
       else runtime.restoring = undefined
     }
   })
+}
+
+/**
+ * Move a session whose checkout and thread both changed while it was closed into a checkout of the
+ * thread's own, where it works as a joined session does. Delta leaves the old checkout and its
+ * changes as they are and forgets it, so a later session there starts afresh instead of mounting it
+ * over the thread. Claude Code Desktop has no `/cd`, so there the session pauses until the person joins.
+ */
+async function moveToThreadCheckout(host: Host, session: string, owns: () => boolean) {
+  const runtime = stateFor(session)
+  const binding = await serial(() => load(host, session))
+  const { checkout, checkoutReference, thread } = binding
+  if (!checkout || !checkoutReference || !thread) throw new Error('This session has no attached checkout to move from')
+  const locator = binding.locator ?? thread
+  if ((await host.session.surfaces()).includes('desktop')) {
+    const text = `${checkout} and this Delta thread both changed while Claude was closed, so Delta left both as they are. Run /delta-join ${locator} to continue the thread in a checkout of its own; ${checkout} keeps its changes.`
+    runtime.joinFailure = text
+    setProgress(host, text, 'error')
+    await host.ui.log(text, { to: 'transcript' })
+    return
+  }
+  setProgress(host, 'Moving this session to a checkout of the thread…', 'active')
+  const mounted = await mountThread(host, { session, thread, locator, owner: session })
+  if (!owns()) return
+  requireMounted(mounted, thread)
+  await serial(async () => {
+    if (!owns()) return
+    await save(host, {
+      ...await load(host, session), joined: true, owner: session, locator, directory: mounted.directory,
+      mounts: mounted.worktrees, checkout: undefined, checkoutReference: undefined, movedFrom: checkout,
+    })
+  })
+  if (!owns()) return
+  // A checkout Delta failed to forget stays safe: mounting it again finds it diverged.
+  await worktreeRelease(host, checkoutReference, checkout).catch((error) =>
+    host.ui.log(`Delta couldn't forget the checkout ${checkout}: ${errorText(error)}`, { to: 'debug' }))
+  await host.ui.log(`${checkout} and this Delta thread both changed while Claude was closed. Delta left ${checkout} as it is, with changes the thread doesn't have, and moved this session to ${mounted.directory}, which holds the thread's version.`, { to: 'transcript' })
+  // The joined restore moves Claude there; it starts once this restore has ended.
+  host.clock.after(0, () => { if (owns()) beginRestore(host, session) })
 }

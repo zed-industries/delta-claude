@@ -908,11 +908,33 @@ describe('sharing', () => {
     fake.expectClean()
   })
 
-  test('resume takes prompts while its checkout mount waits for Delta, and delivers them once it is back', async ($, on) => {
+  test('resume of a shared thread holds prompts until its checkout mount is back, then takes them', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
     await $.session.end(sessionEnd(fake.session))
+    // Others may have changed the thread meanwhile, so Delta compares the checkout with it first.
+    let connect = () => {}
+    fake.holdCheckoutMount = new Promise((resolve) => { connect = resolve })
+    await $.session.start(sessionStart)
+    await fake.advance(0)
+    expect(fake.activeCheckouts.size).toBe(0)
+    expect((await $.prompt.submit(prompt('while the checkout restores'))).drop).toContain('restoring')
+    connect()
+    fake.holdCheckoutMount = undefined
+    await fake.settleUntil(() => fake.activeCheckouts.size === 1)
+    await fake.advance(0)
+    expect((await $.prompt.submit(prompt('after the restore'))).drop).toBeUndefined()
+    fake.expectClean()
+  })
+
+  test('resume of a private thread takes prompts while its checkout mount waits for Delta, and delivers them once it is back', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('one')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    const key = `session:${fake.session}`
+    fake.store.set(key, { ...fake.store.get(key) as object, visibility: 'private' })
     // Offline, Delta holds a shared checkout's mount until it can connect.
     let connect = () => {}
     fake.holdCheckoutMount = new Promise((resolve) => { connect = resolve })

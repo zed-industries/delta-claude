@@ -14,7 +14,8 @@ import {
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import { errorText } from '../core/text'
-import { classifyCommandFailure, JoinNotReadyError } from '../cli/thread-commands'
+import { CheckoutInactiveError, classifyCommandFailure, JoinNotReadyError } from '../cli/thread-commands'
+import { stopWorktreeMount } from '../cli/delta-cli'
 import { liveFor, startConversation } from '../watch/watch'
 import { settleRemote, settling } from '../watch/rows'
 
@@ -115,6 +116,12 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
       if (isPaused(runtime)) throw new Error(pauseNotice(runtime))
     }
   } catch (error) {
+    // A checkout whose mount stopped mid-session is mounted again, as when the session resumes.
+    if (error instanceof CheckoutInactiveError && runtime.binding.checkout) {
+      await stopWorktreeMount(session, runtime.binding.checkout)
+      beginRestoreCheckout(host, session)
+      return { drop: "Delta is restoring this checkout's synchronization. Wait for the band to say it is restored, then try again. The prompt was not submitted." }
+    }
     // Offline, an unanswered checkout check says nothing about the checkout: the records stay
     // queued and retry, so the prompt proceeds rather than being dropped. A non-retryable refusal
     // or a local persistence failure still stops it.

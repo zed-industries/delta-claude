@@ -1,7 +1,7 @@
 import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import {
   abovePrompt, bash, CHECKOUT, CONFIG, drawBandText, fakeThreads, FOLDERS, LIVE, MOUNTS, prompt, remoteItem, sessionEnd,
-  sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart,
+  sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart, userText,
 } from '../testing/fake-thread-commands'
 import { itemFingerprint } from '../watch/conversation'
 import { cliFixture } from '../testing/cli-fixtures'
@@ -428,6 +428,41 @@ describe('joining', () => {
     expect(fake.server.groups.has(session)).toBe(true)
     fake.expectClean()
     await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('a resume whose checkout and thread both changed moves Claude to a checkout of the thread and forgets the old one', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('one')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    const session = fake.session
+    const reference = fake.server.mount!.reference
+    await $.session.end({ ...sessionEnd(session), reason: 'prompt_input_exit' })
+    fake.server.worktrees = [{ reference, name: 'repo' }]
+    fake.mountReply = (owner) => {
+      const worktrees = [{ reference, name: 'repo', directory: `${MOUNTS}/${owner}/repo`, state: 'mounted' }]
+      fake.worktreeItems = [{ reference, checkouts: [{ directory: worktrees[0]!.directory, state: 'detached' as const, active: true }] }]
+      return cliFixture('mount', { thread_id: fake.threadId, owner, directory: worktrees[0]!.directory, worktrees })
+    }
+    fake.commandFault = {
+      operation: 'worktree mount', code: 'failed', reason: 'worktree_directory_diverged',
+      message: `${CHECKOUT} and its worktree both changed while it was unmounted`,
+    }
+    await $.session.start(sessionStart)
+    await fake.settleUntil(() => fake.cwd !== CHECKOUT)
+    fake.commandFault = undefined
+    await fake.advance(0)
+
+    const binding = fake.store.get(`session:${session}`) as any
+    expect(binding).toMatchObject({ joined: true, owner: session, movedFrom: CHECKOUT, directory: `${MOUNTS}/${session}/repo` })
+    expect(binding.checkout).toBeUndefined()
+    expect(fake.cwd).toBe(binding.directory)
+    // Delta forgets the old checkout and leaves its files alone.
+    expect(fake.releasedCheckouts).toEqual([CHECKOUT])
+    expect(fake.logs.some((log) => log.includes('both changed while Claude was closed'))).toBe(true)
+    expect((await $.prompt.submit(prompt('after the move'))).drop).toBeUndefined()
+    expect(await fake.share($)).toContain('moved to a checkout of the thread')
+    fake.expectClean()
+    await $.session.end(sessionEnd(session))
   })
 
   test('a failed mount after the clear keeps the fresh session in its saved transition until a retry mounts it', async ($, on) => {

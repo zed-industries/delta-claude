@@ -101,6 +101,8 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   const runtime = stateFor(session)
   if (runtime.currentTurnId) throw new Error('Wait for the current Claude turn to finish before sharing or reattaching')
   let binding = await serial(() => load(host, session))
+  if (binding.movedFrom)
+    throw new Error(`This session moved to a checkout of the thread because ${binding.movedFrom} and the thread both changed while Claude was closed. Retry ${recoveryCommand(binding)} to reconnect; ${binding.movedFrom} is no longer attached.`)
   if (binding.joined || binding.joinTransition)
     throw new Error(`This session joined an already shared thread. Retry ${recoveryCommand(binding)} to reconnect; joining never attaches or republishes a checkout.`)
   if (runtime.unsaved.length) await flushUnsaved(host, session)

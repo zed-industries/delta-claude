@@ -505,6 +505,16 @@ export async function worktreeMount(host: Host, mount: {
   return mounted
 }
 
+/**
+ * Forget the checkout `directory` that `worktree mount --existing-checkout` adopted as `reference`,
+ * leaving its files and Git state as they are. Its mount must have ended.
+ */
+export async function worktreeRelease(
+  host: Host, reference: string, directory: string, check?: () => Promise<void>,
+): Promise<void> {
+  await command(host, ['worktree', 'release', reference, directory], 'worktree release', { check })
+}
+
 /** Whether `session` has a ready `worktree mount` for the checkout `directory`. */
 export function hasWorktreeMount(session: string, directory: string): boolean {
   return mountProcesses.has(`worktree:${session}:${directory}`)

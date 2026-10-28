@@ -489,10 +489,17 @@ export function validateThreadCheckout(
       ((checkout.state === 'attached' && checkout.active !== false) ||
         (checkout.state === 'detached' && checkout.active === true)))
     .map((checkout) => ({ directory: checkout.directory, reference: worktree.reference })))
+  if (matches.length !== 1 && state.worktrees.items.some((worktree) => worktree.reference === binding.checkoutReference &&
+    worktree.checkouts.some((checkout) => binding.checkout !== undefined && samePath(checkout.directory, binding.checkout) &&
+      checkout.state === 'inactive')))
+    throw new CheckoutInactiveError("The checkout's synchronization stopped")
   if (matches.length !== 1)
     throw new Error('The bound checkout is detached, inactive, missing, ambiguous, or has a different reference; the existing binding was preserved. Run /delta-share from the intended checkout.')
   return matches[0]!
 }
+
+/** A session's own checkout is still bound to its thread, but Delta no longer synchronizes it. */
+export class CheckoutInactiveError extends Error {}
 
 /** One worktree of a joined thread, as `thread mount` placed it on this machine. */
 export type ThreadMount = { reference: string; name: string; directory: string; state: string }
