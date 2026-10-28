@@ -16,7 +16,7 @@ import type { Host } from '../core/host'
 import { errorText } from '../core/text'
 import { recordsOffline } from '../recording/delivery'
 import { finishRestoredActivation } from '../setup/activation'
-import { beginRestore, mountThread, requireMounted, startParticipation } from './join'
+import { beginRestore, mountThread, requireMounted, startParticipation, unmountThread } from './join'
 
 /** Reuse a checkout already bound on this machine, or create a new local worktree identity. */
 async function checkoutReference(
@@ -59,8 +59,15 @@ export async function mountCheckout(
 
 /** Whether `binding`'s saved user checkout has no mount command in this process. */
 export function checkoutNeedsMount(session: string, binding: Binding): boolean {
-  return !binding.joined && !!binding.checkout && !!binding.checkoutReference &&
+  // A conversation that continued in another session left its checkout to that session, which may
+  // have moved off it and made Delta forget it: mounting it here would adopt it afresh.
+  return !binding.joined && !binding.continuedIn && !!binding.checkout && !!binding.checkoutReference &&
     !hasWorktreeMount(session, binding.checkout)
+}
+
+/** Whether only this person can open `binding`'s thread, including an automatic one before its first upload. */
+function privateThread(binding: Binding | undefined): boolean {
+  return binding?.visibility === 'private' || (binding?.visibility === undefined && binding?.autoUpload?.mode === 'private')
 }
 
 /**
@@ -72,11 +79,13 @@ export function checkoutNeedsMount(session: string, binding: Binding): boolean {
 export function beginRestoreCheckout(host: Host, session: string) {
   const runtime = stateFor(session)
   if (runtime.restoring || runtime.restoringCheckout) return
-  const background = recordsOffline(session, runtime.binding) && runtime.binding?.visibility === 'private'
+  const background = recordsOffline(session, runtime.binding) && privateThread(runtime.binding)
   if (background) runtime.restoringCheckout = true
   else runtime.restoring = true
   setProgress(host, 'Restoring this checkout’s synchronization…', 'active')
   const owns = () => activation.session === session && sessions.get(session) === runtime
+  // A move to a checkout of the thread hands `restoring` on to the joined restore it starts.
+  let handedOn = false
   host.clock.after(0, async () => {
     try {
       const binding: Binding = await serial(() => load(host, session))
@@ -101,13 +110,17 @@ export function beginRestoreCheckout(host: Host, session: string) {
     } catch (error) {
       if (!owns()) return
       if (error instanceof DeltaCommandError && error.reason === 'worktree_directory_diverged') {
-        await moveToThreadCheckout(host, session, owns).catch(async (moveError) => {
+        // Prompts wait during the move even for a private thread: Claude is still in the old folder.
+        runtime.restoring = true
+        try { handedOn = await moveToThreadCheckout(host, session, owns) }
+        catch (moveError) {
           if (!owns()) return
-          const text = `Delta couldn't move this session to a checkout of the thread: ${errorText(moveError)}. Retry ${recoveryCommand(runtime.binding)}; the prompt was not submitted.`
+          const locator = runtime.binding?.locator ?? runtime.binding?.thread
+          const text = `Delta couldn't move this session to a checkout of the thread: ${errorText(moveError)}. Run /delta-join ${locator} to continue the thread there; the prompt was not submitted.`
           runtime.joinFailure = text
           setProgress(host, text, 'error')
           await host.ui.log(text, { to: 'transcript' })
-        })
+        }
         return
       }
       // Prompts that record offline keep going, and the next one retries the restore.
@@ -119,7 +132,7 @@ export function beginRestoreCheckout(host: Host, session: string) {
       await host.ui.log(text, { to: 'transcript' })
     } finally {
       if (background) runtime.restoringCheckout = undefined
-      else runtime.restoring = undefined
+      if (!handedOn) runtime.restoring = undefined
     }
   })
 }
@@ -129,8 +142,9 @@ export function beginRestoreCheckout(host: Host, session: string) {
  * thread's own, where it works as a joined session does. Delta leaves the old checkout and its
  * changes as they are and forgets it, so a later session there starts afresh instead of mounting it
  * over the thread. Claude Code Desktop has no `/cd`, so there the session pauses until the person joins.
+ * Says whether it started the joined restore, which then owns the session's `restoring` state.
  */
-async function moveToThreadCheckout(host: Host, session: string, owns: () => boolean) {
+async function moveToThreadCheckout(host: Host, session: string, owns: () => boolean): Promise<boolean> {
   const runtime = stateFor(session)
   const binding = await serial(() => load(host, session))
   const { checkout, checkoutReference, thread } = binding
@@ -141,12 +155,17 @@ async function moveToThreadCheckout(host: Host, session: string, owns: () => boo
     runtime.joinFailure = text
     setProgress(host, text, 'error')
     await host.ui.log(text, { to: 'transcript' })
-    return
+    return false
   }
   setProgress(host, 'Moving this session to a checkout of the thread…', 'active')
   const mounted = await mountThread(host, { session, thread, locator, owner: session })
-  if (!owns()) return
-  requireMounted(mounted, thread)
+  try {
+    if (!owns()) throw new Error('The session ended while it was being moved')
+    requireMounted(mounted, thread)
+  } catch (error) {
+    await unmountThread(host, thread, session)
+    throw error
+  }
   await serial(async () => {
     if (!owns()) return
     await save(host, {
@@ -154,11 +173,13 @@ async function moveToThreadCheckout(host: Host, session: string, owns: () => boo
       mounts: mounted.worktrees, checkout: undefined, checkoutReference: undefined, movedFrom: checkout,
     })
   })
-  if (!owns()) return
+  if (!owns()) return false
   // A checkout Delta failed to forget stays safe: mounting it again finds it diverged.
   await worktreeRelease(host, checkoutReference, checkout).catch((error) =>
     host.ui.log(`Delta couldn't forget the checkout ${checkout}: ${errorText(error)}`, { to: 'debug' }))
   await host.ui.log(`${checkout} and this Delta thread both changed while Claude was closed. Delta left ${checkout} as it is, with changes the thread doesn't have, and moved this session to ${mounted.directory}, which holds the thread's version.`, { to: 'transcript' })
-  // The joined restore moves Claude there; it starts once this restore has ended.
-  host.clock.after(0, () => { if (owns()) beginRestore(host, session) })
+  // The joined restore moves Claude there, taking over `restoring` so no prompt slips in between.
+  runtime.restoring = undefined
+  beginRestore(host, session)
+  return true
 }

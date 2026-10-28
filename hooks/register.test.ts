@@ -908,50 +908,58 @@ describe('sharing', () => {
     fake.expectClean()
   })
 
-  test('resume of a shared thread holds prompts until its checkout mount is back, then takes them', async ($, on) => {
+  test("resume holds prompts while a shared thread's checkout restores, but a private thread's records them meanwhile", async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
-    await $.session.end(sessionEnd(fake.session))
-    // Others may have changed the thread meanwhile, so Delta compares the checkout with it first.
-    let connect = () => {}
-    fake.holdCheckoutMount = new Promise((resolve) => { connect = resolve })
-    await $.session.start(sessionStart)
-    await fake.advance(0)
-    expect(fake.activeCheckouts.size).toBe(0)
-    expect((await $.prompt.submit(prompt('while the checkout restores'))).drop).toContain('restoring')
-    connect()
-    fake.holdCheckoutMount = undefined
-    await fake.settleUntil(() => fake.activeCheckouts.size === 1)
-    await fake.advance(0)
-    expect((await $.prompt.submit(prompt('after the restore'))).drop).toBeUndefined()
+    const key = `session:${fake.session}`
+    for (const visibility of ['organization', 'private'] as const) {
+      await $.session.end(sessionEnd(fake.session))
+      fake.store.set(key, { ...fake.store.get(key) as object, visibility })
+      // Offline, Delta holds a shared checkout's mount until it can connect.
+      let connect = () => {}
+      fake.holdCheckoutMount = new Promise((resolve) => { connect = resolve })
+      await $.session.start(sessionStart)
+      await fake.advance(0)
+      expect(fake.activeCheckouts.size).toBe(0)
+      const submitted = await $.prompt.submit(prompt(`while the ${visibility} checkout restores`))
+      if (visibility === 'organization') {
+        // Others may have changed the thread meanwhile, so Delta compares the checkout with it first.
+        expect(submitted.drop).toBeDefined()
+        connect()
+        fake.holdCheckoutMount = undefined
+        await fake.settleUntil(() => fake.activeCheckouts.size === 1)
+        await fake.advance(0)
+        expect((await $.prompt.submit(prompt('after the restore'))).drop).toBeUndefined()
+        continue
+      }
+      expect(submitted.drop).toBeUndefined()
+      await $.tool.call(bash('while-restoring', 'echo while restoring'))
+      await fake.advance(0)
+      // The records queue until the checkout syncs again.
+      const delivered = fake.records().length
+      connect()
+      fake.holdCheckoutMount = undefined
+      await fake.settleUntil(() => fake.records().length > delivered)
+      expect(fake.activeCheckouts.size).toBe(1)
+      expect(fake.records().at(-1)?.update).toMatchObject({ toolCallId: 'while-restoring' })
+      expect((fake.store.get(key) as any).pending).toEqual([])
+    }
     fake.expectClean()
   })
 
-  test('resume of a private thread takes prompts while its checkout mount waits for Delta, and delivers them once it is back', async ($, on) => {
+  test('a checkout whose mount stopped mid-session is mounted again at the next prompt', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
-    await $.session.end(sessionEnd(fake.session))
-    const key = `session:${fake.session}`
-    fake.store.set(key, { ...fake.store.get(key) as object, visibility: 'private' })
-    // Offline, Delta holds a shared checkout's mount until it can connect.
-    let connect = () => {}
-    fake.holdCheckoutMount = new Promise((resolve) => { connect = resolve })
-    await $.session.start(sessionStart)
-    await fake.advance(0)
-    expect(fake.activeCheckouts.size).toBe(0)
-    expect((await $.prompt.submit(prompt('while the checkout restores'))).drop).toBeUndefined()
-    await $.tool.call(bash('while-restoring', 'echo while restoring'))
-    await fake.advance(0)
-    // The records queue until the checkout syncs again.
-    expect(fake.records().map((record) => record.sequence)).toEqual([1])
-    connect()
-    fake.holdCheckoutMount = undefined
-    await fake.settleUntil(() => fake.records().length === 2)
-    expect(fake.activeCheckouts.size).toBe(1)
-    expect(fake.records()[1]?.update).toMatchObject({ toolCallId: 'while-restoring' })
-    expect((fake.store.get(`session:${fake.session}`) as any).pending).toEqual([])
+    const checkoutMounts = () => fake.commands.filter((argv) => argv.includes('--existing-checkout')).length
+    const before = checkoutMounts()
+    // Delta stopped synchronizing the checkout while the plugin's mount command stays connected.
+    fake.server.checkout = 'inactive'
+    expect((await $.prompt.submit(prompt('after the mount stopped'))).drop).toBeDefined()
+    await fake.settleUntil(() => fake.server.checkout === 'attached')
+    expect(checkoutMounts()).toBe(before + 1)
+    expect((await $.prompt.submit(prompt('once it is back'))).drop).toBeUndefined()
     fake.expectClean()
   })
 

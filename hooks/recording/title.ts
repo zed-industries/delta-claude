@@ -117,13 +117,14 @@ export function forgetTitleReader(session: string) {
  */
 export async function recordTitle(host: Host, session: string, transcript: string) {
   const binding = stateFor(session).binding
-  if (!binding?.snapshot || binding.joined || !binding.thread) return
+  // A session Delta moved to a checkout of its own thread still names that thread.
+  if (!binding?.snapshot || (binding.joined && !binding.movedFrom) || !binding.thread) return
   try {
     const title = await readTitle(host, session, transcript)
     if (title === undefined || title === stateFor(session).binding?.title) return
     const staged = await serial(async () => {
       const current = await load(host, session)
-      if (!current.snapshot || current.joined || current.title === title) return false
+      if (!current.snapshot || (current.joined && !current.movedFrom) || current.title === title) return false
       await save(host, { ...await stageRecord(host, current, { update: { sessionUpdate: 'session_info_update', title } }), title })
       return true
     })

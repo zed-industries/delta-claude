@@ -48,10 +48,10 @@ let resolving = false
  * server. An automatic or shared session does once its CLI is verified: it writes to its own thread,
  * and Delta's background uploader pushes what it acknowledged locally. A joined session writes into
  * someone else's thread, so it keeps server-confirmed delivery and holds Claude while Delta is
- * unreachable.
+ * unreachable. A session Delta moved to a checkout of its own thread still writes to that thread.
  */
 export function recordsOffline(session: string, binding: Binding | undefined): boolean {
-  return !!binding && !binding.joined && verifiedContract(session) !== undefined
+  return !!binding && (!binding.joined || !!binding.movedFrom) && verifiedContract(session) !== undefined
 }
 
 export function rememberToolResults(tools: ToolRecords, message: ApiMessage) {
@@ -250,7 +250,7 @@ export async function verifyCheckout(host: Host, binding: Binding) {
   if (binding.joined) await requireJoinedDirectory(host, binding)
   const status = await threadStatus(host, binding.locator ?? binding.thread!, producerOf(binding))
   validateThreadFrontier(status, binding)
-  if (binding.joined) validateJoinedMounts(status, binding.mounts ?? [])
+  if (binding.joined) validateJoinedMounts(status, binding.mounts ?? [], binding)
   else validateThreadCheckout(status, binding)
   if (binding.joined) {
     try { await requireJoinedDirectory(host, binding) }

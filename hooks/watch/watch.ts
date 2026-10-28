@@ -365,7 +365,7 @@ async function consumeConversation(
           if (current.joined) {
             // Access only: a worktree changed while disconnected is reconciled by its `worktrees`
             // event, and every prompt and delivery checks each mount.
-            validateJoinedMounts(status, [])
+            validateJoinedMounts(status, [], current)
             await save(host, { ...current, ...statusFields(status) }, ownsConnection)
           } else {
             const checkout = validateThreadCheckout(status, current)

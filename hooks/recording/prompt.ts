@@ -116,16 +116,19 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
       if (isPaused(runtime)) throw new Error(pauseNotice(runtime))
     }
   } catch (error) {
-    // A checkout whose mount stopped mid-session is mounted again, as when the session resumes.
+    // A checkout whose mount stopped mid-session is mounted again, as when the session resumes, and
+    // the prompt waits or records locally as it would on resume.
     if (error instanceof CheckoutInactiveError && runtime.binding.checkout) {
-      await stopWorktreeMount(session, runtime.binding.checkout)
-      beginRestoreCheckout(host, session)
-      return { drop: "Delta is restoring this checkout's synchronization. Wait for the band to say it is restored, then try again. The prompt was not submitted." }
-    }
-    // Offline, an unanswered checkout check says nothing about the checkout: the records stay
-    // queued and retry, so the prompt proceeds rather than being dropped. A non-retryable refusal
-    // or a local persistence failure still stops it.
-    if (!(offline && classifyCommandFailure(error) === 'transient' && !isPaused(runtime))) {
+      if (!runtime.restoring && !runtime.restoringCheckout) {
+        await stopWorktreeMount(session, runtime.binding.checkout)
+        beginRestoreCheckout(host, session)
+      }
+      if (!runtime.restoringCheckout)
+        return { drop: "Delta is restoring this checkout's synchronization. Wait for the band to say it is restored, then try again. The prompt was not submitted." }
+    } else if (!(offline && classifyCommandFailure(error) === 'transient' && !isPaused(runtime))) {
+      // Offline, an unanswered checkout check says nothing about the checkout: the records stay
+      // queued and retry, so the prompt proceeds rather than being dropped. A non-retryable refusal
+      // or a local persistence failure still stops it.
       const text = `Delta is not ready for this prompt: ${errorText(error)}. The prompt was not submitted.`
       // The band names a worktree or directory that is not ready, until a prompt finds it ready.
       if (error instanceof JoinNotReadyError) pauseCheckout(runtime, 'verification', error.message)

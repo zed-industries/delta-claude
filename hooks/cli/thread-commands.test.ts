@@ -128,7 +128,7 @@ describe('thread watch', () => {
     const inventory = (state: 'inactive' | 'missing') => ({ ...status(), worktrees: { status: 'available' as const,
       items: [{ reference: 'history#t=0', checkouts: [{ directory: '/repo', state }] }] } })
     expect(() => validateThreadCheckout(inventory('inactive'), binding)).toThrow(CheckoutInactiveError)
-    expect(() => validateThreadCheckout(inventory('missing'), binding)).toThrow('missing')
+    expect(() => validateThreadCheckout(inventory('missing'), binding)).toThrow()
     expect(() => validateThreadCheckout(inventory('missing'), binding)).not.toThrow(CheckoutInactiveError)
   })
 

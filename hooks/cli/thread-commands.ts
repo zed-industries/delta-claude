@@ -528,8 +528,12 @@ export function parseThreadMount(line: string, owner: string): MountedThread {
 }
 
 /** Check that the thread grants access and each joined worktree's checkout is active where it was mounted. */
-export function validateJoinedMounts(state: ThreadState, mounts: readonly { reference: string; name: string; directory: string }[]) {
-  if (state.access.state !== 'granted')
+export function validateJoinedMounts(
+  state: ThreadState, mounts: readonly { reference: string; name: string; directory: string }[],
+  binding: { autoUpload?: unknown; movedFrom?: string } = {},
+) {
+  // An automatic session Delta moved to a checkout of its own thread may still be local-only.
+  if (state.access.state !== 'granted' && !(binding.movedFrom && binding.autoUpload && state.access.state === 'local_only'))
     throw new Error('Access to the joined thread is not granted; check your Delta sign-in and thread access')
   if (state.worktrees.status === 'unavailable')
     throw new DeltaCommandError(state.worktrees.error.code, inspectionUnavailableMessage(state.worktrees.error), {}, state.worktrees.error.reason)

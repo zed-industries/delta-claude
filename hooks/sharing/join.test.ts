@@ -430,13 +430,17 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
-  test('a resume whose checkout and thread both changed moves Claude to a checkout of the thread and forgets the old one', async ($, on) => {
+  for (const surface of ['terminal', 'desktop'] as const) test(`a ${surface} resume whose checkout and thread both changed leaves the checkout's files alone and holds prompts`, async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
     const session = fake.session
+    const key = `session:${session}`
     const reference = fake.server.mount!.reference
     await $.session.end({ ...sessionEnd(session), reason: 'prompt_input_exit' })
+    // A private thread's prompts would otherwise record offline while its checkout restores.
+    fake.store.set(key, { ...fake.store.get(key) as object, visibility: 'private' })
+    if (surface === 'desktop') desktopHost(fake)
     fake.server.worktrees = [{ reference, name: 'repo' }]
     fake.mountReply = (owner) => {
       const worktrees = [{ reference, name: 'repo', directory: `${MOUNTS}/${owner}/repo`, state: 'mounted' }]
@@ -447,20 +451,36 @@ describe('joining', () => {
       operation: 'worktree mount', code: 'failed', reason: 'worktree_directory_diverged',
       message: `${CHECKOUT} and its worktree both changed while it was unmounted`,
     }
-    await $.session.start(sessionStart)
-    await fake.settleUntil(() => fake.cwd !== CHECKOUT)
-    fake.commandFault = undefined
+    let mount = () => {}
+    const mounting = new Promise<void>((resolve) => { mount = resolve })
+    fake.holdRun = (operation) => operation === 'mount' ? mounting : undefined
+    await $.session.start({ ...sessionStart, surface })
     await fake.advance(0)
+    // Claude is still in the old folder, so nothing may run there.
+    expect((await $.prompt.submit(prompt('during the move'))).drop).toBeDefined()
+    fake.commandFault = undefined
+    fake.holdRun = undefined
+    mount()
 
-    const binding = fake.store.get(`session:${session}`) as any
-    expect(binding).toMatchObject({ joined: true, owner: session, movedFrom: CHECKOUT, directory: `${MOUNTS}/${session}/repo` })
-    expect(binding.checkout).toBeUndefined()
-    expect(fake.cwd).toBe(binding.directory)
-    // Delta forgets the old checkout and leaves its files alone.
-    expect(fake.releasedCheckouts).toEqual([CHECKOUT])
-    expect(fake.logs.some((log) => log.includes('both changed while Claude was closed'))).toBe(true)
-    expect((await $.prompt.submit(prompt('after the move'))).drop).toBeUndefined()
-    expect(await fake.share($)).toContain('moved to a checkout of the thread')
+    if (surface === 'desktop') {
+      // Desktop cannot move Claude, so the session keeps its checkout and waits for /delta-join.
+      await fake.advance(0)
+      expect(fake.store.get(key)).toMatchObject({ checkout: CHECKOUT, checkoutReference: reference })
+      expect((fake.store.get(key) as any).joined).toBeUndefined()
+      expect(fake.releasedCheckouts).toEqual([])
+      expect(fake.cwd).toBe(CHECKOUT)
+      expect((await $.prompt.submit(prompt('still paused'))).drop).toBeDefined()
+    } else {
+      await fake.settleUntil(() => fake.cwd !== CHECKOUT)
+      await fake.advance(0)
+      const binding = fake.store.get(key) as any
+      expect(binding).toMatchObject({ joined: true, owner: session, movedFrom: CHECKOUT, directory: `${MOUNTS}/${session}/repo` })
+      expect(binding.checkout).toBeUndefined()
+      expect(fake.cwd).toBe(binding.directory)
+      // Delta forgets the old checkout and leaves its files alone.
+      expect(fake.releasedCheckouts).toEqual([CHECKOUT])
+      expect((await $.prompt.submit(prompt('after the move'))).drop).toBeUndefined()
+    }
     fake.expectClean()
     await $.session.end(sessionEnd(session))
   })
