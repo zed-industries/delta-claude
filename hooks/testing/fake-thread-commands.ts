@@ -569,7 +569,7 @@ export function fakeThreads(hostOn: On, options: {
     helperStopped: false,
     updateCanInstall: true,
     updateMessage: 'Update test',
-    updateFailure: undefined as undefined | 'old-cli' | 'network' | 'app-running' | 'app-working' | 'malformed' | 'crash',
+    updateFailure: undefined as undefined | 'old-cli' | 'old-options' | 'network' | 'app-running' | 'app-working' | 'malformed' | 'crash',
     holdUpdate: undefined as Promise<void> | undefined,
     holdCliSetup: undefined as ((install: boolean) => Promise<void> | undefined) | undefined,
     holdCliResolution: undefined as (() => Promise<void> | undefined) | undefined,
@@ -1059,6 +1059,8 @@ export function fakeThreads(hostOn: On, options: {
     await fake.holdUpdate
     if (fake.updateFailure === 'old-cli')
       return { stdout: '', exitCode: 2, stderr: "error: unrecognized subcommand 'update'" }
+    if (fake.updateFailure === 'old-options' && argv.includes('--download-only'))
+      return { stdout: '', exitCode: 2, stderr: "error: unexpected argument '--download-only' found\n\nUsage: delta.exe update [OPTIONS]\n" }
     if (fake.updateFailure === 'crash')
       return { stdout: '', exitCode: 101, stderr: "thread 'main' panicked at src/main.rs:1:1:\nboom\n" }
     if (fake.updateFailure === 'app-working')

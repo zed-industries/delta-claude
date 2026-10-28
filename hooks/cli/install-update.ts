@@ -148,7 +148,7 @@ export class InstallationUpdates {
         const argv = [executable, 'update', ...check ? ['--check'] : windows ? ['--download-only'] : [], '--json']
         const output = check ? await run(argv) : await stream(host, argv, env, live)
         if (output.exitCode !== 0 && /(?:unrecognized|unknown|unexpected|invalid).*(?:subcommand|argument|update|--check|--json)/i.test(output.stderr))
-          throw new UnsupportedUpdateCommandError(`This Delta CLI does not support installation updates. ${MANUAL_UPDATE}`)
+          throw new UnsupportedUpdateCommandError(output.stderr.trim())
         // Without a typed error the CLI crashed or was stopped; its stderr is a backtrace or progress, not advice.
         const result = parseOutput(output, (failed) => `Delta ${failed.exitCode === null ? 'was stopped'
           : `exited with code ${failed.exitCode}`} without reporting a result. Run \`delta update\` in a terminal to see why, then retry /delta-update.`)

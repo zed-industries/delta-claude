@@ -161,7 +161,7 @@ test('a stalled explicit update times out and allows a later retry', async ($, o
 
 /** What each failure's answer must say for the person to act on it. */
 const FAILURE_ADVICE = {
-  'old-cli': 'https://delta.dev',
+  'old-cli': "unrecognized subcommand 'update'",
   network: 'Check network access.',
   'app-running': 'Quit Delta and retry.',
   // The CLI's own advice names `delta update`; the plugin's names its own command.
@@ -183,6 +183,21 @@ for (const [failure, advice] of Object.entries(FAILURE_ADVICE) as [keyof typeof 
     expect(await fake.share($)).toContain('https://delta.dev/join/')
     fake.expectClean()
   })
+
+test('Windows update option failures preserve the CLI error even when update checks work', async ($, on) => {
+  const fake = fakeThreads(on, { env: { OS: 'Windows_NT' } })
+  fake.updateFailure = 'old-options'
+  fake.updateStatus = 'update_available'
+  await $.session.start(sessionStart)
+  await fake.advance(0)
+  await fake.settleUntil(() => fake.logs.some((text) => text.includes('1.1.0 is available')))
+  const result = await $.command.run(typedDelta('update'))
+  expect(result.text).toContain("error: unexpected argument '--download-only' found\n\nUsage: delta.exe update [OPTIONS]")
+  expect(result.text).not.toContain('This Delta CLI does not support')
+  expect(result.text).not.toContain('https://delta.dev')
+  expect(fake.installUpdates.map((entry) => entry.argv[0])).not.toContain(UPDATE_HELPER_ARGV[0])
+  fake.expectClean()
+})
 
 test('progress events are read by schema; other lines and unknown events are not progress', () => {
   expect(parseProgressEvent('{"schema_version":1,"type":"progress","phase":"downloading","version":"1.1","percent":45}'))
