@@ -73,6 +73,13 @@ export type FakeChild = {
 }
 
 export const CHECKOUT = '/repo'
+/** Where a checkout's Delta policy lives, which says how its new sessions sync. */
+export const POLICY = '/repo/.delta/settings.json'
+
+/** A checkout policy's text for `mode`, saving `organization` as its team. */
+export function policy(mode: 'manual' | 'private' | 'organization', organization?: string) {
+  return JSON.stringify({ threads: { mode, organization } })
+}
 /** The actor the fake Delta records a recorded subagent's output as. */
 export const childActor = (agentId: string) => `actor-${agentId}`
 export const CONFIG = '/sandbox/config'

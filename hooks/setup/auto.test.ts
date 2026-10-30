@@ -1,6 +1,6 @@
 import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import {
-  abovePrompt, CHECKOUT, drawBandText, fakeThreads, prompt, sessionEnd, sessionStart, shareCommand,
+  abovePrompt, CHECKOUT, drawBandText, fakeThreads, policy, POLICY, prompt, sessionEnd, sessionStart, shareCommand,
   testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
 } from '../testing/fake-thread-commands'
 import { ONBOARDING_DECLINED, ONBOARDING_QUESTION } from './setup'
@@ -8,7 +8,6 @@ import { ONBOARDING_DECLINED, ONBOARDING_QUESTION } from './setup'
 tier('user')
 
 const test = testsWithHeldClockWait(kitTest)
-const POLICY = '/repo/.delta/settings.json'
 /** A registered thread's status cannot reach the server while Delta is offline. */
 const OFFLINE_STATUS = { operation: 'status', code: 'app_unavailable', message: 'Cannot reach Delta' } as const
 
@@ -16,10 +15,6 @@ const OFFLINE_STATUS = { operation: 'status', code: 'app_unavailable', message: 
 /** The band as drawn when Claude gives it only `maxRows` rows. */
 const drawnInRows = async ($: Engine, maxRows: number) =>
   JSON.stringify(await $.ui.render({ ...abovePrompt, props: { ...abovePrompt.props, maxRows } }))
-
-function policy(mode: 'manual' | 'private' | 'organization', organization?: string) {
-  return JSON.stringify({ threads: { mode, organization } })
-}
 
 /** Store a session that ended long ago, with its ledger; `overrides` change any binding field. */
 function seedEnded(store: Map<string, unknown>, id: string, overrides: Record<string, unknown> = {}) {

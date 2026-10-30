@@ -6,9 +6,9 @@ import { transcriptCandidate } from './core/transcript'
 import { addRows, itemFingerprint, type PendingRow, RemoteView } from './watch/conversation'
 import {
   abovePrompt, ADA, bash, CHECKOUT, commandOutput, CONFIG, drawBandText, drawReady, expectNoSetupCommands,
-  expectOfferedItems, expectStagedRecords, fakeThreads, LIVE, localCommandCaveat, PENDING, prompt, remoteComment,
-  remoteItem, seedPending, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart,
-  typedDelta, userMessage, userText,
+  expectOfferedItems, expectStagedRecords, fakeThreads, LIVE, localCommandCaveat, PENDING, policy, POLICY, prompt,
+  remoteComment, remoteItem, seedPending, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait,
+  turnComplete, turnStart, typedDelta, userMessage, userText,
 } from './testing/fake-thread-commands'
 import { personColor, personKey } from './band/status'
 import { ACTIVATION_WAIT_MS, CHECK_INTERVAL_MS, REMINDER_INTERVAL_MS } from './plugin-update/catalog'
@@ -3394,6 +3394,65 @@ describe('recording titles', () => {
     const reads = fake.commands.filter((argv) => argv[0] === 'tail').map((argv) => Number(argv[2]!.slice(1)))
     expect(reads[0]).toBe(1)
     expect(reads.slice(1).every((start, index) => start > reads[index]!)).toBe(true)
+    fake.expectClean()
+  })
+
+  test("an automatic session takes Claude's title at its first reply, before its thread exists", { timeoutMs: 15_000 }, async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('organization', 'org-1'))
+    let release!: () => void
+    fake.holdRun = (operation) => operation === 'attach' ? new Promise<void>((resolve) => { release = resolve }) : undefined
+    fake.turns = 0
+    await $.session.start(sessionStart)
+    await fake.settle()
+    await fake.advance(0)
+    await fake.settle()
+    expect((await $.prompt.submit(prompt('fix the parser'))).drop).toBeUndefined()
+    await $.turn.start(turnStart('native-title'))
+    fake.files.set(transcriptCandidate(CONFIG, CHECKOUT, fake.session),
+      JSON.stringify({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session }) + '\n')
+    await $.session.append({
+      door: 'response', uuid: 'first-reply',
+      message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'On it.' }] },
+    } as never)
+    await fake.settle()
+    // Staged while the thread is still being attached, and before the turn ends.
+    const stored = fake.store.get(`session:${fake.session}`) as { thread?: unknown; title?: unknown }
+    expect(stored.thread).toBeUndefined()
+    expect(stored.title).toBe('Fix the parser')
+    release()
+    await fake.settle()
+    await fake.advance(120_000)
+    await fake.settle()
+    expect(fake.records().flatMap((record) =>
+      record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])).toEqual(['Fix the parser'])
+    fake.expectClean()
+  })
+
+  test('an untitled session reads its transcript at the first reply of each turn, not at every reply', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('initial')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    const transcript = transcriptCandidate(CONFIG, CHECKOUT, fake.session)
+    const reply = async (uuid: string) => {
+      fake.files.set(transcript, (fake.files.get(transcript) ?? '') + JSON.stringify({ type: 'assistant', uuid }) + '\n')
+      await $.session.append({
+        door: 'response', uuid,
+        message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: uuid }] },
+      } as never)
+      await fake.settle()
+    }
+    const reads = () => fake.commands.filter((argv) => argv[0] === 'tail').length
+    await $.turn.start(turnStart('turn-1', 'hello'))
+    await reply('first')
+    expect(reads()).toBe(1)
+    await reply('second')
+    expect(reads()).toBe(1)
+    await $.turn.complete(turnComplete('turn-1'))
+    await fake.settle()
+    await $.turn.start(turnStart('turn-2', 'again'))
+    await reply('third')
+    expect(reads()).toBe(3)
     fake.expectClean()
   })
 

@@ -193,6 +193,8 @@ const noticing = new Map<string, Promise<boolean>>()
 /** How often a session's transcript was looked for and not found, which stops the looking at {@link MAX_TRANSCRIPT_MISSES}. */
 const transcriptMisses = new Map<string, number>()
 const MAX_TRANSCRIPT_MISSES = 3
+/** The turn whose reply last looked for an untitled session's title, so a long turn reads its transcript once. */
+const titleTurns = new Map<string, string | undefined>()
 
 /**
  * `session.start` ran for a session, which has been activated by now: work out how it started. A session
@@ -313,10 +315,25 @@ export async function followTranscript(host: Host, session: string) {
   await recordTitle(host, session, path)
 }
 
+/**
+ * Read an untitled recorded session's title at the first reply of each turn. Claude writes a session's
+ * title before its first reply, so the thread is named during that turn rather than at its end. Once a
+ * title is recorded, only a turn's end reads again, for a later one such as a `/rename`.
+ */
+export async function followTitle(host: Host, session: string) {
+  const runtime = stateFor(session)
+  const binding = runtime.binding
+  if (!binding?.snapshot || binding.joined || binding.title !== undefined) return
+  if (titleTurns.has(session) && titleTurns.get(session) === runtime.currentTurnId) return
+  titleTurns.set(session, runtime.currentTurnId)
+  await followTranscript(host, session)
+}
+
 /** A session that ended forgets how it started and its open setup offer, and releases its capture boundary. */
 export async function forgetSessionStart(host: Host, session: string, reason: string) {
   sessionStarts.delete(session)
   transcriptMisses.delete(session)
+  titleTurns.delete(session)
   // Claude starts the session after this one with no `session.start`, so the reason it ended says how.
   endedSession = session
   startedSession = undefined

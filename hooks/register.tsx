@@ -1,5 +1,5 @@
 import type { EngineInterface, HookFailure, On } from 'claude-code'
-import { activate, followTranscript, forgetSessionStart, noticeStart } from './setup/activation'
+import { activate, followTitle, followTranscript, forgetSessionStart, noticeStart } from './setup/activation'
 import { clearProgress, drawBand, forgetBarTheme } from './band/band'
 import {
   DELTA_USAGE, deltaMenu, installationUpdates, installUpdateHost, JOIN_USAGE, ORG_USAGE, registerCommands,
@@ -44,7 +44,10 @@ async function logHookFailure($: EngineInterface, hook: string, failure: HookFai
 
 function recordAppended($: EngineInterface, e: HookEvent<'session.append'>, next: HookNext<'session.append'>) {
   const host = hostOf($)
-  return e.agentId !== undefined ? recordChildRow(host, e, e.agentId, next) : recordRow(host, e, next)
+  if (e.agentId !== undefined) return recordChildRow(host, e, e.agentId, next)
+  // A reply's row never waits for the title, and reading it cannot fail the row.
+  if (e.door === 'response') void host.session.id().then((session) => followTitle(host, session)).catch(() => {})
+  return recordRow(host, e, next)
 }
 
 /**

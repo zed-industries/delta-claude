@@ -112,12 +112,14 @@ export function forgetTitleReader(session: string) {
 
 /**
  * Record the session's title for its thread when it changed since the last one recorded. Only a
- * shared session names its thread; a joined session takes part in someone else's. Nothing here can fail a turn or sharing: a title that cannot be read or staged is skipped, and
- * the next turn's end tries again.
+ * shared session names its thread; a joined session takes part in someone else's. An automatic
+ * session stages its title before its thread exists, like its other records, so a turn that ends
+ * during activation still names the thread. Nothing here can fail a turn or sharing: a title that
+ * cannot be read or staged is skipped, and the next turn's end tries again.
  */
 export async function recordTitle(host: Host, session: string, transcript: string) {
   const binding = stateFor(session).binding
-  if (!binding?.snapshot || binding.joined || !binding.thread) return
+  if (!binding?.snapshot || binding.joined) return
   try {
     const title = await readTitle(host, session, transcript)
     if (title === undefined || title === stateFor(session).binding?.title) return
