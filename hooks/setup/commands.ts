@@ -24,6 +24,15 @@ import { errorText } from '../core/text'
 /** Run `/delta setup` for the active session and answer with what it did. */
 async function setupCommand(host: Host): Promise<string> {
   if (!hasInteractiveSurface(await host.session.surfaces())) return HEADLESS_REFUSAL
+  // The wizard stops once the activated session is not this one, so a session nothing has activated yet (a
+  // hot reload, or setup before the first prompt) is activated first, as share and join do. The session start
+  // this command's notice began can supersede that activation and still be underway, so activate again until
+  // this session is the activated one.
+  const session = await host.session.id()
+  try {
+    for (let attempt = 0; session !== activation.session && attempt < 3; attempt++) await activate(host, session)
+  }
+  catch (error) { return `Delta couldn't start setup: ${errorText(error)}` }
   const outcome = await runSetupWizard(setupEnv(host), claudeInteraction(host))
   if (outcome.status === 'wrote') await refreshReminder(host, await host.session.id())
   return outcome.text
@@ -98,7 +107,7 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
   if (action === 'org manage') return { text: await manageOrganization(host) }
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
   if (/^(?:setup|share|join)\b/.test(action) && await offerToStopWaiting(host)) return {}
-  // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
+  // The setup wizard only writes the checkout's policy; it needs no session binding.
   if (action === 'setup') return { text: await setupCommand(host) }
   const locator = /^join\s+(\S+)$/.exec(action)?.[1]
   const organization = /^org\s+(?:(list|current)|(switch)\s+(\S+))$/.exec(action)
