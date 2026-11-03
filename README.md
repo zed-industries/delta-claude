@@ -110,6 +110,8 @@ Headless sessions never open a browser.
 
 `/delta-share` asks who should see the session: your team, just you, or people
 you name by email address. `/delta-share ada@example.com` invites them directly.
+`/delta-unshare` makes the current thread private without stopping sync. People
+invited explicitly retain access.
 
 ### Commands
 
@@ -119,6 +121,7 @@ its own opens a menu of these actions.
 | Command | Description |
 | --- | --- |
 | `/delta-share [<email>…]` | Sync the current session and its checkout, and choose who sees it |
+| `/delta-unshare` | Make the current thread private while keeping sync and explicit invitations |
 | `/delta-join <link>` | Join a shared thread in a fresh session, in the thread's checkout |
 | `/delta-setup` | Choose this repository's team and which sessions sync |
 | `/delta-update` | Update the installed Delta app and CLI |

@@ -11,10 +11,12 @@ import { emailsIn, type Interaction, TYPE_SOMETHING } from './setup'
 
 const HEADER = 'Delta'
 const SHARE = 'Share this session'
+const UNSHARE = 'Make this session private'
 const JOIN = 'Join a shared session'
 const SETUP = 'Set up this repository'
 const MORE = 'More actions'
 const TEAM = 'Manage your team'
+const UPDATES = 'Update Delta'
 const PLUGIN_UPDATE = 'Update Claude Code plugin'
 const APP_UPDATE = 'Update Delta app and CLI'
 const INVITE = 'Invite people'
@@ -23,8 +25,8 @@ const MANAGE = 'Manage team in browser'
 const BACK = 'Back to the menu'
 const CANCEL = 'Cancel'
 
-/** Where the menu opens: its first question, or straight at joining or the team, as bare `/delta-join` and `/delta-org` do. */
-export type MenuStart = 'menu' | 'join' | 'team' | 'more'
+/** Where the menu opens: its first question, or joining, team management, or updates. */
+export type MenuStart = 'menu' | 'join' | 'team' | 'more' | 'updates'
 
 /**
  * Ask which Delta action to run and answer it as a `/delta` action, such as `share` or `join <link>`.
@@ -36,7 +38,7 @@ export async function chooseDeltaAction(interaction: Interaction, start: MenuSta
     if (step === 'menu') {
       const answer = await interaction.ask('What would you like to do with Delta?', {
         options: [SHARE, JOIN, SETUP, MORE], header: HEADER,
-        descriptions: { [JOIN]: 'Needs the link someone shared with you', [MORE]: 'Manage your team or update Delta' },
+        descriptions: { [JOIN]: 'Needs the link someone shared with you', [MORE]: 'Make a thread private, manage your team, or update Delta' },
       })
       if (answer === SHARE) return 'share'
       if (answer === SETUP) return 'setup'
@@ -47,13 +49,23 @@ export async function chooseDeltaAction(interaction: Interaction, start: MenuSta
     }
     if (step === 'more') {
       const answer = await interaction.ask('Which Delta action?', {
-        options: [TEAM, PLUGIN_UPDATE, APP_UPDATE, BACK], header: HEADER,
+        options: [UNSHARE, TEAM, UPDATES, BACK], header: HEADER,
+        descriptions: { [UNSHARE]: 'Keeps syncing; invited people retain access' },
+      })
+      if (answer === UNSHARE) return 'unshare'
+      if (answer === BACK) continue
+      if (answer === TEAM) step = 'team'
+      else if (answer === UPDATES) step = 'updates'
+      else return undefined
+    }
+    if (step === 'updates') {
+      const answer = await interaction.ask('What would you like to update?', {
+        options: [PLUGIN_UPDATE, APP_UPDATE, BACK], header: HEADER,
       })
       if (answer === PLUGIN_UPDATE) return 'plugin-update'
       if (answer === APP_UPDATE) return 'update'
       if (answer === BACK) continue
-      if (answer !== TEAM) return undefined
-      step = 'team'
+      return undefined
     }
     const chosen = step === 'join' ? await chooseThread(interaction) : await chooseTeamAction(interaction)
     if (chosen !== BACK) return chosen

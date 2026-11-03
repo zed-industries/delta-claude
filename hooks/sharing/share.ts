@@ -81,7 +81,7 @@ async function assertShareSession(host: Host, request: ShareRequest) {
 
 /**
  * Whether a session already syncs: it is on the server, or handed to Delta's background uploader. Such
- * a session keeps its audience when it reconnects and cannot become private to its owner again.
+ * a session keeps its audience when it reconnects; `/delta unshare` can make it private.
  */
 export function sessionSyncs(binding: Binding | undefined): boolean {
   return !!binding?.url || !!binding?.autoUpload

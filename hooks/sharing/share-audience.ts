@@ -29,7 +29,7 @@ export type AudienceChoices = {
   team?: string
   /**
    * The session already syncs: it is on the server or handed to Delta's background uploader. It can
-   * keep its audience but no longer become private to its owner.
+   * keep its audience through `/delta share`; changing it to private uses `/delta unshare`.
    */
   synced: boolean
 }

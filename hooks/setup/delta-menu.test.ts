@@ -10,8 +10,9 @@ test('each menu answer becomes the action its dedicated command runs', async () 
     [['More actions', 'Manage your team', 'List my teams'], 'org list'],
     [['More actions', 'Manage your team', 'Manage team in browser'], 'org manage'],
     [['More actions', 'Manage your team', 'Invite people', 'ada@example.com, bo@example.com'], 'org invite ada@example.com bo@example.com'],
-    [['More actions', 'Update Claude Code plugin'], 'plugin-update'],
-    [['More actions', 'Update Delta app and CLI'], 'update'],
+    [['More actions', 'Make this session private'], 'unshare'],
+    [['More actions', 'Update Delta', 'Update Claude Code plugin'], 'plugin-update'],
+    [['More actions', 'Update Delta', 'Update Delta app and CLI'], 'update'],
     [['More actions', 'Back to the menu', 'Share this session'], 'share'],
     // Text with no address still runs the invite, which says what it needs.
     [['More actions', 'Manage your team', 'Invite people', 'later'], 'org invite'],

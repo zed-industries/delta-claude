@@ -283,6 +283,13 @@ export function register(on: On) {
     const host = hostOf($)
     return runDeltaCommand(host, `share ${e.args.trim()}`.trim(), 'dedicated_command')
   }).catch(async ($, e, next) => { await logHookFailure($, '/delta-share', next.error); return next(e) })
+  on('command.run', { command: 'delta-unshare' }, async ($, e) => {
+    const host = hostOf($)
+    return runDeltaCommand(host, `unshare ${e.args.trim()}`.trim(), 'dedicated_command')
+  }).catch(async ($, _e, next) => {
+    await logHookFailure($, '/delta-unshare', next.error)
+    return { text: 'Delta could not make this thread private. Retry /delta-unshare.' }
+  })
   // Typed without its argument, a command asks for it instead of failing.
   on('command.run', { command: 'delta-join' }, async ($, e) => {
     const host = hostOf($)

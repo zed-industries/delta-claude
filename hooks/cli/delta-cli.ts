@@ -9,8 +9,8 @@ import type { ProcessRunResult, ProcessSpawnResult } from 'claude-code'
 import { DeltaCli } from './cli'
 import {
   checkoutStillSyncing, checkResult, type CreationReceipt, localWorktreesAt, type MembershipReceipt, type PublicationReceipt,
-  validateAttachmentReceipt, validateCreationReceipt, validatePublicationReceipt, validateWorktreeCreationReceipt,
-  validateWorktreeMembershipReceipt, type WorktreeCreationReceipt,
+  type UnshareReceipt, validateAttachmentReceipt, validateCreationReceipt, validatePublicationReceipt,
+  validateUnshareReceipt, validateWorktreeCreationReceipt, validateWorktreeMembershipReceipt, type WorktreeCreationReceipt,
 } from './command-outcomes'
 import { readCommandStream, readMountReady } from './command-reader'
 import { isJsonObject, type JsonObject } from '../core/json'
@@ -258,6 +258,16 @@ export async function threadShare(
     { check: options.check, env: commandFormEnv(options.form) })
   validatePublicationReceipt(shared, thread)
   return shared
+}
+
+/** Make an existing Cloud thread private without stopping its sync or removing invitations. */
+export async function threadUnshare(
+  host: Host, thread: string, form?: CommandForm,
+): Promise<JsonObject & UnshareReceipt> {
+  const unshared = await command(host, ['thread', 'unshare', thread], 'thread unshare',
+    { env: commandFormEnv(form) })
+  validateUnshareReceipt(unshared, thread)
+  return unshared
 }
 
 /** Invite `emails` to `thread`, which uploads it privately if it is not on the server yet. */

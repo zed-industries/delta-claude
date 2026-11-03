@@ -1,6 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 import { cliFixture } from '../testing/cli-fixtures'
-import { checkoutStillSyncing, reconnectDelay, validateAttachmentReceipt, validatePublicationReceipt } from './command-outcomes'
+import {
+  checkoutStillSyncing, reconnectDelay, validateAttachmentReceipt, validatePublicationReceipt, validateUnshareReceipt,
+} from './command-outcomes'
 
 test('a checkout is still syncing only while the list shows it mounted or restoring at that directory', () => {
   const listed = (state: string, directory = '/repo/.claude/worktrees/agent') => ({
@@ -30,6 +32,13 @@ test('publication receipts identify the same thread and carry a safe web link', 
   validatePublicationReceipt(cliFixture('share'), thread)
   for (const patch of [{ thread_id: 'other-thread' }, { url: 'javascript:alert(1)' }, { operation: 'invalid' }])
     expect(() => validatePublicationReceipt(cliFixture('share', patch), thread)).toThrow()
+})
+
+test('unshare receipts confirm private visibility for the requested thread', () => {
+  const unshared = { operation: 'unshared', thread_id: 'thread-1', visibility: 'private' }
+  validateUnshareReceipt(unshared, 'thread-1')
+  for (const patch of [{ operation: 'shared' }, { thread_id: 'another-thread' }, { visibility: 'organization' }])
+    expect(() => validateUnshareReceipt({ ...unshared, ...patch }, 'thread-1')).toThrow()
 })
 
 test('reconnecting uses capped backoff', () => {
