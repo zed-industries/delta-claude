@@ -26,6 +26,8 @@ export type CreationReceipt = { operation: 'created'; thread_id: string; created
 export type AttachmentReceipt = { operation: 'mounted'; reference: string; directory: string }
 /** What `thread share` answers: the shared thread and its link. */
 export type PublicationReceipt = { operation: 'shared'; thread_id: string; url: string }
+/** What `thread unshare` answers after the server confirms private visibility. */
+export type UnshareReceipt = { operation: 'unshared'; thread_id: string; visibility: 'private' }
 
 /** Require an idempotent producer creation receipt before saving its thread identity. */
 export function validateCreationReceipt(created: JsonObject): asserts created is JsonObject & CreationReceipt {
@@ -98,6 +100,14 @@ export function validatePublicationReceipt(
   if (shared.operation !== 'shared' || shared.thread_id !== thread ||
       typeof shared.url !== 'string' || !conversationWebLink(shared.url))
     throw new Error('Invalid publication receipt; saved records remain queued')
+}
+
+/** Require server-confirmed private visibility for the requested thread. */
+export function validateUnshareReceipt(
+  unshared: JsonObject, thread: string,
+): asserts unshared is JsonObject & UnshareReceipt {
+  if (unshared.operation !== 'unshared' || unshared.thread_id !== thread || unshared.visibility !== 'private')
+    throw new Error('Invalid unshare receipt; check this thread’s visibility in Delta and retry /delta-unshare')
 }
 
 /** Reconnecting backs off exponentially, capped at thirty seconds. */

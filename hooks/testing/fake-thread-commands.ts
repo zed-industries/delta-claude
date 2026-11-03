@@ -440,6 +440,8 @@ export function fakeThreads(hostOn: On, options: {
       /** The mounted checkouts of each owner that asked for them, and the directory each was told to work in. */
       groups: new Map<string, { directory: string; mounts: Map<string, { name: string; directory: string; active: boolean }> }>(),
       shared: false,
+      /** Cloud visibility can differ from the upload intent after an unshare. */
+      visibility: undefined as 'private' | 'organization' | undefined,
       /** Every address `thread invite` sent, in order. */
       invited: [] as string[],
       /** The upload intent `thread create` recorded, before or after the thread registers with the cloud. */
@@ -653,7 +655,7 @@ export function fakeThreads(hostOn: On, options: {
           state: shared || fake.server.registered ? 'granted' : 'local_only',
           is_owner: shared || fake.server.registered ? true : null,
         },
-        visibility: shared ? 'organization' : upload && fake.server.registered ? upload.visibility : null,
+        visibility: fake.server.visibility ?? (shared ? 'organization' : upload && fake.server.registered ? upload.visibility : null),
         upload: upload ? {
           state: fake.server.uploadFailure ? 'failed'
             : fake.server.confirmed ? 'uploaded'
@@ -1317,13 +1319,14 @@ export function fakeThreads(hostOn: On, options: {
     }
     const options = operation === 'attach' ? { '--thread': fake.server.thread }
       : operation === 'share' ? { '--visibility': 'organization' }
+      : operation === 'unshare' ? {}
       : operation === 'fork' || operation === 'discard' ? { ...operation === 'discard' ? { '--force': true as any } : {} }
       : operation === 'append' ? { ...source, '--producer-name': 'Claude Code' }
       : source
     // Create carries its upload intent for an automatic session, and omits it for an explicit share.
     const optional = operation === 'append' ? ['--acknowledge']
       : operation === 'create' ? ['--organization', '--visibility'] : []
-    if (!['create', 'attach', 'share', 'status', 'append', 'fork', 'discard'].includes(operation ?? '') ||
+    if (!['create', 'attach', 'share', 'unshare', 'status', 'append', 'fork', 'discard'].includes(operation ?? '') ||
         !matchesCommand(argv, [operation === 'attach' ? 'worktree' : 'thread', operation, ...positionals], options, optional)) {
       fake.violations.push(`forbidden command: ${argv.join(' ')}`)
       throw new Error(`forbidden command ${argv.join(' ')}`)
@@ -1363,9 +1366,21 @@ export function fakeThreads(hostOn: On, options: {
     }
     if (operation === 'share') {
       fake.server.shared = true
+      fake.server.visibility = 'organization'
       return fault ? failed() : output(JSON.stringify(cliFixture('share', {
         thread_id: thread, url: urlOf(), ...fake.publicationPatch,
       })))
+    }
+    if (operation === 'unshare') {
+      if (!fake.server.registered && !fake.server.shared)
+        return output(JSON.stringify(cliFixture('error', faultEnvelope({
+          code: 'not_shared', message: 'this thread has no Cloud record to unshare',
+        }))), 2)
+      if (fault && !fault.after) return failed()
+      fake.server.shared = false
+      fake.server.registered = true
+      fake.server.visibility = 'private'
+      return fault ? failed() : output(JSON.stringify({ operation: 'unshared', thread_id: thread, visibility: 'private' }))
     }
     if (operation === 'status') {
       const result = statusReply()

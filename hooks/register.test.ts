@@ -45,11 +45,21 @@ describe('startup and commands', () => {
       await fake.advance(0)
       expect(await link).toBe(`https://delta.dev/join/${fake.shareId}`)
     }
+    const records = fake.records()
+    for (const [command, args] of [['delta-unshare', ''], ['delta', 'unshare']]) {
+      expect((await run(command!, args!)).text).toContain('This thread is private')
+      expect(fake.server.shared).toBe(false)
+      expect(fake.server.registered).toBe(true)
+      expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ visibility: 'private' })
+    }
+    expect(fake.records()).toEqual(records)
     expect(fake.commandRuns).toEqual([])
-    // Only the command a share reports tells Delta which form ran it.
+    // Only the commands that change sharing tell Delta which form ran them.
     expect(fake.cliIntegrations.filter((call) => call.commandForm)).toEqual([
       { operation: 'share', integration: 'claude_code', commandForm: 'dedicated_command' },
       { operation: 'share', integration: 'claude_code', commandForm: 'delta_subcommand' },
+      { operation: 'unshare', integration: 'claude_code', commandForm: 'dedicated_command' },
+      { operation: 'unshare', integration: 'claude_code', commandForm: 'delta_subcommand' },
     ])
     fake.expectClean()
     await $.session.end(sessionEnd(fake.session))
@@ -512,6 +522,46 @@ describe('plugin updates', () => {
 })
 
 describe('sharing', () => {
+  test('unshare refuses an unbound session, reports CLI failure, and keeps a private thread private on reconnect', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('initial')] })
+    await $.session.start(sessionStart)
+    expect((await $.command.run(typedDelta('unshare'))).text).toContain('no Delta thread yet')
+    expect(fake.operations()).not.toContain('unshare')
+    await fake.share($)
+    fake.commandFault = { operation: 'unshare', code: 'remote_refused', message: 'only the owner can change visibility' }
+    expect((await $.command.run(typedDelta('unshare'))).text).toContain('remote_refused')
+    expect(fake.server.shared).toBe(true)
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ visibility: 'organization' })
+    fake.commandFault = undefined
+    fake.failStoreSet = true
+    expect((await $.command.run(typedDelta('unshare'))).text).toContain('thread is private on Delta, but its local sharing status could not be saved')
+    expect(fake.server.shared).toBe(false)
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ visibility: 'organization' })
+    fake.failStoreSet = false
+    expect((await $.command.run(typedDelta('unshare'))).text).toContain('This thread is private')
+    await $.prompt.submit(prompt('working'))
+    await $.turn.start(turnStart('busy', 'working'))
+    await fake.settle()
+    const band = await $.ui.mount({ ...abovePrompt, plugin: 'delta' })
+    expect(await band.find({ type: 'Button', text: 'Share after this turn' })).toBeDefined()
+    await band.press({ key: 'share' })
+    await fake.settle()
+    expect((await $.command.run(typedDelta('unshare'))).text).toContain('This thread is private')
+    await $.turn.complete(turnComplete('busy'))
+    await fake.settle()
+    await fake.advance(0)
+    expect(fake.server.shared).toBe(false)
+    fake.answerQuestion = (question: any) =>
+      ({ result: { answers: { [question.questions[0].question]: 'Keep current sharing' } } })
+    const before = fake.operations().length
+    await $.command.run(shareCommand)
+    await fake.advance(0)
+    expect(fake.operations().slice(before)).not.toContain('share')
+    expect(fake.server.shared).toBe(false)
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ visibility: 'private' })
+    fake.expectClean()
+  })
+
   test('resume with a missing CLI preserves the binding and asks for explicit setup', async ($, on) => {
     const fake = fakeThreads(on)
     fake.cliMissing = true

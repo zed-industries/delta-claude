@@ -19,6 +19,7 @@ import {
   openMembersPage, type Organization, runSetupWizard,
 } from './setup'
 import { shareFailureText, startShare } from '../sharing/share'
+import { unshare } from '../sharing/unshare'
 import { errorText } from '../core/text'
 
 /** Run `/delta setup` for the active session and answer with what it did. */
@@ -30,7 +31,7 @@ async function setupCommand(host: Host): Promise<string> {
 }
 
 /** Every `/delta` action, for a surface that can't show the menu and for an action it doesn't know. */
-export const DELTA_USAGE = 'Usage: /delta share [<email>…] | /delta join <shared-link-or-thread> | /delta setup | /delta update | /delta plugin-update [check | notifications on|off] | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage'
+export const DELTA_USAGE = 'Usage: /delta share [<email>…] | /delta unshare | /delta join <shared-link-or-thread> | /delta setup | /delta update | /delta plugin-update [check | notifications on|off] | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage'
 /** `/delta-join` typed without its link. */
 export const JOIN_USAGE = 'Usage: /delta-join <link>. Paste the Delta link someone shared with you, such as /delta-join https://delta.dev/join/…, or a thread ID.'
 /** `/delta-org` typed without an action. */
@@ -38,10 +39,11 @@ export const ORG_USAGE = 'Usage: /delta-org list (your teams), /delta-org curren
 
 /** Add `/delta`, and a command of its own for each of its actions, to Claude's slash-command menu. */
 export async function registerCommands(host: Host) {
-  await host.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, choose a team, or update Delta', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | update | plugin-update | org list | org current | org switch <ID> | org manage' })
+  await host.command.register({ name: 'delta', description: 'Share, unshare, or join a Delta session, set up syncing, choose a team, or update Delta', argumentHint: 'share [<email>…] | unshare | join <shared-link-or-thread> | setup | update | plugin-update | org list | org current | org switch <ID> | org manage' })
   // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
   // appears in the slash-command menu.
   await host.command.register({ name: 'delta-share', description: 'Delta: sync this session and its code to DeltaDB, and choose who sees it', argumentHint: '[<email>…]' })
+  await host.command.register({ name: 'delta-unshare', description: 'Delta: make this thread private; invited people retain access and syncing continues' })
   // Claude's menu shows a command's description but not its argument hint, so the description carries the format.
   await host.command.register({ name: 'delta-join', description: 'Delta: join a shared conversation. Needs its link: /delta-join <link>', argumentHint: '<shared-link-or-thread>' })
   await host.command.register({ name: 'delta-setup', description: 'Delta: choose which sessions in this repository sync to DeltaDB' })
@@ -107,10 +109,14 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
   const shareArguments = /^share(?:\s+(.*))?$/.exec(action)?.[1] ?? ''
   const shareEmails = emailsIn(shareArguments)
   const shareAction = /^share\b/.test(action) && (!shareArguments.trim() || shareEmails.length > 0)
-  if (!shareAction && !locator && !organization && invite === undefined)
+  if (action !== 'unshare' && !shareAction && !locator && !organization && invite === undefined)
     return { text: DELTA_USAGE }
   if (requests.join) return { text: 'A Delta join is already in progress. Wait for its result.' }
   if (requests.share) return { text: 'A Delta share is already in progress. Wait for its result.' }
+  if (action === 'unshare') {
+    try { return { text: await unshare(host, form) } }
+    catch (error) { return { text: `Delta could not confirm this thread is private: ${errorText(error)}. Check its visibility in Delta and retry /delta-unshare.` } }
+  }
   if (organization)
     return orgCommand(host, isOneOf(organization[1], ['list', 'current']) ? organization[1] : { switch: organization[3]! })
   if (invite !== undefined) {
