@@ -139,6 +139,15 @@ inputs and outputs and Claude's thinking, plus the files in your checkout
 until you share or join a session, or the repository's setting syncs it
 automatically.
 
+After a recorded turn, the plugin asks Claude Code's `haiku` model to summarize
+the turn and maintain a short search summary. It sends bounded turn prose
+and the previous description through your Claude Code session's credentials,
+not Delta's inference configuration. This uses your Claude plan, API, or configured
+provider and may be unavailable if Haiku is blocked or rate-limited. A summary
+that cannot finish before Claude Code exits is omitted; recording still works.
+The generated title is separate from your visible thread title and never replaces
+a manual rename.
+
 A shared or joined session shows you as connected through Claude Code. An open
 Delta view takes precedence.
 

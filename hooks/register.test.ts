@@ -978,6 +978,31 @@ describe('sharing', () => {
 })
 
 describe('recording', () => {
+  test('completed turn stages one Haiku summary with its own prose despite the next turn', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    fake.statusPatch = { version: 'actor.42' }
+    fake.summaryReply = JSON.stringify({
+      summary: 'Collected lemons', threadSearchSummary: {
+        generatedTitle: 'Lemon harvest', summary: 'Harvested lemons', keywords: ['lemons'], intents: ['harvest'],
+      },
+    })
+    await $.turn.start(turnStart('first', 'Collect lemons'))
+    await $.turn.complete({ ...turnComplete('first'), answer: 'Collected lemons' })
+    await $.turn.start(turnStart('second', 'Count oranges'))
+    await fake.settleUntil(() => fake.records().some((record) => record.summary !== undefined))
+    expect(fake.summaryRequests).toHaveLength(1)
+    expect(fake.summaryRequests[0]?.model).toBe('haiku')
+    expect(JSON.parse(fake.summaryRequests[0]!.prompt).completedTurn)
+      .toBe('user: Collect lemons\n\nassistant: Collected lemons')
+    expect(fake.records().find((record) => record.summary !== undefined))
+      .toMatchObject({ turnSequence: 1, summary: {
+        turnSummary: 'Collected lemons', sourceVersion: 'actor.42',
+      } })
+    fake.expectClean()
+  })
+
   test('marks recorded live Claude messages and tool activity', async ($, on) => {
     const fake = fakeThreads(on)
     await $.session.start(sessionStart)
@@ -3253,7 +3278,7 @@ describe('the recording contract', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 9, max: 10 }
+    fake.contractRange = { min: 10, max: 11 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -3290,7 +3315,7 @@ describe('the recording contract', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 9, max: 10 }
+    fake.contractRange = { min: 10, max: 11 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
@@ -3312,7 +3337,7 @@ describe('the recording contract', () => {
     const checksAtAppend: number[] = []
     fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
     // An incompatible CLI is refused before anything is appended.
-    fake.contractRange = { min: 9, max: 10 }
+    fake.contractRange = { min: 10, max: 11 }
     await $.session.start(sessionStart)
     await fake.settle()
     expect(checksAtAppend).toEqual([])
@@ -3420,12 +3445,16 @@ describe('recording titles', () => {
     const stored = fake.store.get(`session:${fake.session}`) as { thread?: unknown; title?: unknown }
     expect(stored.thread).toBeUndefined()
     expect(stored.title).toBe('Fix the parser')
+    fake.statusPatch = { version: 'actor.42' }
+    await $.turn.complete({ ...turnComplete('native-title'), answer: 'Fixed the parser' })
     release()
     await fake.settle()
     await fake.advance(120_000)
     await fake.settle()
     expect(fake.records().flatMap((record) =>
       record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])).toEqual(['Fix the parser'])
+    expect(fake.records().find((record) => record.summary !== undefined))
+      .toMatchObject({ turnSequence: 1, summary: { sourceVersion: 'actor.42' } })
     fake.expectClean()
   })
 

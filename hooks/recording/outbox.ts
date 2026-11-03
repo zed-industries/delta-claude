@@ -62,6 +62,13 @@ export function pendingRecordTurn(line: string, sequence: number): number | unde
       record.schemaVersion !== 1 || record.sequence !== sequence ||
       !Number.isSafeInteger(sequence) || sequence < 1) throw invalid()
   const keys = Object.keys(record).sort().join()
+  if (keys === 'schemaVersion,sequence,summary,turnSequence') {
+    if (!record.summary || Array.isArray(record.summary) ||
+        typeof record.summary.turnSummary !== 'string' || typeof record.summary.sourceVersion !== 'string' ||
+        !Number.isSafeInteger(record.turnSequence) || record.turnSequence < 1 ||
+        record.turnSequence >= sequence) throw invalid()
+    return record.turnSequence
+  }
   if (!['schemaVersion,sequence,update', 'schemaVersion,sequence,turnSequence,update'].includes(keys) ||
       !record.update || Array.isArray(record.update) || typeof record.update.sessionUpdate !== 'string') throw invalid()
   const turnSequence = record.turnSequence

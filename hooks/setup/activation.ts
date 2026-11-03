@@ -44,6 +44,11 @@ export function activationIncomplete(runtime: SessionState): boolean {
   return !!runtime.binding?.autoUpload && !runtime.binding.thread
 }
 
+/** Wait for a creation already in progress before reading a completed turn's metadata. */
+export async function awaitAutomaticActivation(session: string) {
+  await autoActivating.get(session)
+}
+
 /**
  * A prompt or a resume is an automatic session's repair path: re-run whatever activation steps are
  * missing, using the upload the session already recorded. Every step is idempotent, so this is safe.

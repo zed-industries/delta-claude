@@ -11,6 +11,7 @@ export type Envelope = {
   schemaVersion: 1
   sequence: number
   update?: Record<string, any>
+  summary?: Record<string, any>
   turnSequence?: number
 }
 export type Disposition = 'recorded' | 'fenced' | 'duplicate'
@@ -536,6 +537,8 @@ export function fakeThreads(hostOn: On, options: {
     /** Patches every ready frame, e.g. to simulate a different conversation. */
     readyPatch: undefined as Record<string, unknown> | undefined,
     statusPatch: undefined as Record<string, unknown> | undefined,
+    summaryReply: undefined as string | undefined,
+    summaryRequests: [] as { model: string; prompt: string }[],
     worktreeItems: undefined as Extract<ThreadState['worktrees'], { status: 'available' }>['items'] | undefined,
     mountReply: undefined as ((owner: string) => Record<string, any>) | undefined,
     attachmentPatch: undefined as Record<string, unknown> | undefined,
@@ -921,6 +924,13 @@ export function fakeThreads(hostOn: On, options: {
     if (fake.holdExport) await fake.holdExport
     fake.exports++
     return { value: fake.messages }
+  })
+  on('model.complete', ($, e) => {
+    fake.summaryRequests.push({ model: e.model, prompt: e.prompt })
+    return { value: {
+      isAnswered: true, text: fake.summaryReply ?? '{"summary":"Finished","threadSearchSummary":null}',
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    } }
   })
   on('session.compact', () => ({ messages: [{ role: 'user', text: 'Compacted summary', toolUses: [] }] }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))

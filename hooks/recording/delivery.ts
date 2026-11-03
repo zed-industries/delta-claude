@@ -32,8 +32,15 @@ import { settleRemote, storeShownRow } from '../watch/rows'
 import { scheduleMove } from '../sharing/join'
 import { shownCommandRewrite } from '../watch/row-delivery'
 import { beginAppend, beginShare, endAppend, waitForSnapshot } from '../sharing/share'
+import { recordThreadSummary } from './thread-summary'
 
-export type RecordBody = { update: Update; turnSequence?: number }
+export type RecordBody =
+  | { update: Update; turnSequence?: number; summary?: never }
+  | { update?: never; turnSequence: number; summary: {
+    turnSummary: string
+    threadSummary: { generatedTitle: string; summary: string; keywords: string[]; intents: string[] } | null
+    sourceVersion: string
+  } }
 export type CleanupPlan = { session: string; root: string; next: number; pending: { sequence: number; files: string[] }[] }
 const LIVE_ACTIVITY_ORIGIN = {
   work_origin: 'external_agent',
@@ -750,19 +757,23 @@ export async function startTurn(host: Host, e: HookEvent<'turn.start'>, next: Ho
  * The main loop's turn ended: stage its finish, then release the remote rows held while it ran, move
  * Claude if it must, and start a share asked for during the turn.
  */
-export async function completeTurn(host: Host, e: HookEvent<'turn.complete'>, next: HookNext<'turn.complete'>) {
+export async function completeTurn(host: Host, e: HookEvent<'turn.complete'>, next: HookNext<'turn.complete'>, prose?: string) {
   const session = await host.session.id()
   const runtime = stateFor(session)
   const sequence = runtime.nativeTurns.get(e.turnId) ??
     (runtime.binding?.execution?.turnId === e.turnId ? runtime.binding.execution.sequence : undefined)
+  const local = isLocalTurn(runtime, e.turnId)
   if (runtime.currentTurnId === e.turnId) runtime.currentTurnId = undefined
-  if (isLocalTurn(runtime, e.turnId)) runtime.localTurn = undefined
+  if (local) runtime.localTurn = undefined
   runtime.promptEntering = false
   runtime.nativeTurns.delete(e.turnId)
   const result = await next(e)
   if (sequence !== undefined) runtime.tools.forgetUnpaired(sequence)
   if (sequence !== undefined) {
-    try { await endExecution(host, session, sequence, () => true, 'bounded', stopReasonOf(e)) }
+    try {
+      await endExecution(host, session, sequence, () => true, 'bounded', stopReasonOf(e))
+      if (!local && prose) void recordThreadSummary(host, session, sequence, prose)
+    }
     catch (error) { await report(host, error) }
   }
   // Release the remote rows held back while this turn ran now that its finish is staged: delivered

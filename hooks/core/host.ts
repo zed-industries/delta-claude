@@ -28,6 +28,7 @@ export type Host = {
     read(path: string): Promise<string>
   }
   http: Pick<EngineInterface['http'], 'fetch'>
+  model: Pick<EngineInterface['model'], 'complete'>
   plugin: Pick<EngineInterface['plugin'], 'name' | 'root'>
   process: Pick<EngineInterface['process'], 'run' | 'spawn'>
   prompt: Pick<EngineInterface['prompt'], 'submit'>

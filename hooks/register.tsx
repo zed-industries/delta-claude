@@ -27,6 +27,8 @@ import { errorText } from './core/text'
 import { isAgentTool } from './subagents/children'
 import { forgetThreadNotes, sendToThread } from './subagents/thread-runs'
 import { forgetTitleReader } from './recording/title'
+import { forgetThreadSummaryFailure } from './recording/thread-summary'
+import { completedTurn, rememberTurn } from './recording/thread-summary'
 import { stopWatching } from './watch/watch'
 
 /**
@@ -93,6 +95,9 @@ function hostOf($: EngineInterface): Host {
     },
     http: {
       fetch: (url, init) => $.http.fetch(url, init),
+    },
+    model: {
+      complete: (request) => $.model.complete(request),
     },
     plugin: {
       name: $.plugin.name,
@@ -165,14 +170,16 @@ export function register(on: On) {
   // `currentTurnId` or open an execution. A recorded subagent's turn is its own thread's.
   on('turn.start', ($, e, next) => {
     const host = hostOf($)
+    rememberTurn(e.turnId, e.text)
     return e.agentId !== undefined
       ? startChildTurn(host, e, e.agentId, next) : startTurn(host, e, next)
   })
 
   on('turn.complete', async ($, e, next) => {
     const host = hostOf($)
-    if (e.agentId !== undefined) return completeChildTurn(host, e, e.agentId, next)
-    const result = await completeTurn(host, e, next)
+    const prose = completedTurn(e.turnId, e.answer)
+    if (e.agentId !== undefined) return completeChildTurn(host, e, e.agentId, next, prose)
+    const result = await completeTurn(host, e, next, prose)
     // Claude names a session in its transcript file, not through any hook, so the title is read there
     // when a turn ends: the title Claude chose for the first prompt, or a `/rename` made since. A turn's
     // end never waits for the transcript or its title, and neither can fail it.
@@ -214,6 +221,7 @@ export function register(on: On) {
     await stopWatching(session)
     forgetContract(session)
     forgetTitleReader(session)
+    forgetThreadSummaryFailure(session)
     forgetThreadNotes(session)
     // A joined or shared session keeps reporting through its transition; an ordinary end clears it.
     if (!requests.join && !requests.share) clearProgress(host)

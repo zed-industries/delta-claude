@@ -30,6 +30,7 @@ import { snapshotMessages } from '../recording/snapshot'
 import { errorText } from '../core/text'
 import { CHILD_CONTRACT_VERSION, classifyCommandFailure, DeltaCommandError } from '../cli/thread-commands'
 import { ToolRecords } from '../recording/tool-records'
+import { recordThreadSummary } from '../recording/thread-summary'
 import { adoptThread, isAdoptionSpawn, reportClaudeRun } from './thread-runs'
 
 /**
@@ -908,13 +909,15 @@ async function runLocal(host: Host, worktree: string, argv: string[]) {
 }
 
 /** A subagent's turn ended: close its record, finish its run, and report a thread run's reply. */
-export async function completeChildTurn(host: Host, e: HookEvent<'turn.complete'>, agentId: string, next: HookNext<'turn.complete'>) {
+export async function completeChildTurn(host: Host, e: HookEvent<'turn.complete'>, agentId: string, next: HookNext<'turn.complete'>, prose?: string) {
   const result = await next(e)
   const child = await childFor(host, agentId)
   if (child) {
     // A run found going when recording started attaches its own checkout now, read from its hook.
     const cwd = await host.session.cwd()
+    const sequence = (await loadChild(host, child)).execution?.sequence
     await childStep(host, child, () => endChildTurn(host, child, e.turnId, stopReasonOf(e), cwd))
+    if (sequence !== undefined && prose) void recordThreadSummary(host, child.session, sequence, prose, agentId)
     await finishChildRun(host, child)
     await reportClaudeRun(host, child)
   }

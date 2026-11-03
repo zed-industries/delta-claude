@@ -11,6 +11,9 @@ export type ThreadState = {
   url: string | null
   /** The thread's display name, or null when unnamed. */
   title: string | null
+  /** Available from recording contract 9 onward. */
+  version?: string
+  search_summary?: null | { generatedTitle: string; summary: string; keywords: string[]; intents: string[] }
   access: { state: 'local_only' | 'granted'; is_owner: boolean | null }
   /** The thread's audience once a cloud record exists; null before one does. */
   visibility: 'private' | 'organization' | 'unlisted' | null
@@ -405,7 +408,7 @@ const PLUGIN_CONTRACT_MIN = 8
  * version is gated on the session's negotiated version (`contractVersion`) until `PLUGIN_CONTRACT_MIN`
  * reaches it.
  */
-const PLUGIN_CONTRACT_MAX = 8
+const PLUGIN_CONTRACT_MAX = 9
 /**
  * The name Delta shows for this producer: the recording's attribution (`append --producer-name`)
  * and the harness beside a present person (`watch --participate`). Identity stays the source and
