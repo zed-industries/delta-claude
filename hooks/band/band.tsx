@@ -165,11 +165,12 @@ const REMINDERS: Record<SyncReminder, { text: string; command: string }> = {
 /**
  * The active session's reminder, while the band has nothing else to say. A running share or join,
  * a failure, or an unfinished join takes its place, and a syncing session's band says `Syncing`
- * instead, so the band always shows the current state.
+ * instead. The manual-sync reminder only shows before the first turn, not after a session switch.
  */
 function activeReminder(): { text: string; command: string } | undefined {
   const runtime = sessions.get(activation.session)
   if (!runtime?.reminder || currentProgress() || watchStatus().error || runtime.binding?.joinTransition) return
+  if (runtime.reminder === 'manual' && runtime.syncReminderDismissed) return
   return REMINDERS[runtime.reminder]
 }
 

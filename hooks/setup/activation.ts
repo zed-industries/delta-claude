@@ -257,6 +257,8 @@ async function decideStart(host: Host, session: string): Promise<boolean> {
   }
   sessionStarts.set(session, source)
   startedSession = session
+  // Clearing or switching conversations is not another launch of Claude.
+  if (after) stateFor(session).syncReminderDismissed = true
   if (after === 'join') return false
   // A join, running or done, as a hand-off's is by now, decides what its session records.
   if (newSessionFor(session) && !requests.join && !sessions.get(session)?.binding?.joined) beginCaptureDecision(session)

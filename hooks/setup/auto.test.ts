@@ -268,6 +268,41 @@ describe('automatic activation', () => {
     expect(fake.logs.some((log) => log.includes('Not syncing') || log.includes('Not set up'))).toBe(false)
   })
 
+  test('manual sync is indicated only at launch, not after turns, setup, or session switches', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('manual'))
+    await startAuto($, fake)
+    const ui = await $.ui.mount({ ...abovePrompt, plugin: 'delta' })
+    expect(await ui.find({ text: 'Not syncing', type: 'Text' })).toBeDefined()
+    for (const id of ['first', 'second']) {
+      expect((await $.prompt.submit(prompt(id))).drop).toBeUndefined()
+      await $.turn.start(turnStart(id, id))
+      expect(await ui.find({ text: 'Not syncing', type: 'Text' })).toBeUndefined()
+      await $.turn.complete(turnComplete(id))
+      expect(await reminderKind($)).toBe('none')
+    }
+    // Saving manual mode again must not bring the startup reminder back.
+    fake.answerQuestion = (question: any) => {
+      const { question: text, header } = question.questions[0]
+      return { result: { answers: { [text]: header === 'Team' ? 'Zed' : 'Manual' } } }
+    }
+    expect((await $.command.run(typedDelta('setup'))).text).toContain('Saved Manual with Zed')
+    expect(await reminderKind($)).toBe('none')
+    for (const reason of ['clear', 'clear', 'resume'] as const) {
+      await $.session.end({ ...sessionEnd(fake.session), reason })
+      fake.session = `${fake.session}-${reason}`
+      await $.session.append(clearRow as never)
+      await fake.settle()
+      await fake.advance(0)
+      expect(await reminderKind($)).toBe('none')
+    }
+    await $.session.end(sessionEnd(fake.session))
+    fake.session = 'another-manual-session'
+    await startAuto($, fake)
+    expect(await reminderKind($)).toBe('manual')
+    fake.expectClean()
+  })
+
   test('the band switches from its reminder to Syncing as soon as the session is shared, and stays so on resume', async ($, on) => {
     const fake = fakeThreads(on)
     fake.answerQuestion = async () => ({ result: { answers: {} } })

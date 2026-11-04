@@ -729,6 +729,10 @@ export async function startTurn(host: Host, e: HookEvent<'turn.start'>, next: Ho
   await noticeSession(host, session)
   await captureDecided(session)
   const runtime = stateFor(session)
+  if (!runtime.syncReminderDismissed) {
+    runtime.syncReminderDismissed = true
+    host.ui.invalidate()
+  }
   runtime.currentTurnId = e.turnId
   if (runtime.localTurn && !runtime.localTurn.turnId) runtime.localTurn.turnId = e.turnId
   if (!runtime.binding?.snapshot || isLocalTurn(runtime, e.turnId)) return next(e)

@@ -182,6 +182,8 @@ export type SessionState = {
   handoffClaim?: Promise<void>
   /** What the band reminds an interactive session Delta does not sync, decided when the session starts. */
   reminder?: SyncReminder
+  /** The startup-only sync reminder stays hidden after a turn or an in-process session switch. */
+  syncReminderDismissed?: true
   /**
    * The hand-off's opening line, turned into a one-word turn that is left out of the thread:
    * entering until its turn starts, then that turn's ID.
@@ -376,6 +378,7 @@ export function resetRuntime(runtime: SessionState) {
   runtime.currentTurnId = undefined
   runtime.promptEntering = false
   runtime.reminder = undefined
+  runtime.syncReminderDismissed = undefined
 }
 
 /** Forget an ended session's state, unless rows not yet saved or a running outbox cleanup still need it. */
