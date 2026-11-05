@@ -1,7 +1,7 @@
 /**
  * The `/delta` command and its dedicated forms: parsing, the menu, and running each action.
  */
-import { activate, noticeSession, refreshReminder } from './activation'
+import { activate, noticeSession, refreshReminder, sessionBegun } from './activation'
 import { setProgress, showUpdateProgress } from '../band/band'
 import { type CommandForm, orgCommand } from '../cli/delta-cli'
 import { chooseDeltaAction, type MenuStart } from './delta-menu'
@@ -24,18 +24,22 @@ import { errorText } from '../core/text'
 /** Run `/delta setup` for the active session and answer with what it did. */
 async function setupCommand(host: Host): Promise<string> {
   if (!hasInteractiveSurface(await host.session.surfaces())) return HEADLESS_REFUSAL
-  // The wizard stops once the activated session is not this one, so a session nothing has activated yet (a
-  // hot reload, or setup before the first prompt) is activated first, as share and join do. The session start
-  // this command's notice began can supersede that activation and still be underway, so activate again until
-  // this session is the activated one.
-  const session = await host.session.id()
-  try {
-    for (let attempt = 0; session !== activation.session && attempt < 3; attempt++) await activate(host, session)
-  }
+  // The wizard stops once its session is no longer the activated one, so it needs one that is, even
+  // after a hot reload or before the first prompt.
+  try { await activateForCommand(host, await host.session.id()) }
   catch (error) { return `Delta couldn't start setup: ${errorText(error)}` }
   const outcome = await runSetupWizard(setupEnv(host), claudeInteraction(host))
   if (outcome.status === 'wrote') await refreshReminder(host, await host.session.id())
   return outcome.text
+}
+
+/**
+ * Make `session` the activated one for a command that needs it. The start the command's notice began
+ * activates the session too, so the command waits for it and activates only what it left inactive.
+ */
+async function activateForCommand(host: Host, session: string) {
+  await sessionBegun(session)
+  if (session !== activation.session || !stateFor(session).binding) await activate(host, session)
 }
 
 /** Every `/delta` action, for a surface that can't show the menu and for an action it doesn't know. */
@@ -133,7 +137,7 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
   }
   const session = await host.session.id()
   try {
-    if (session !== activation.session || !stateFor(session).binding) await activate(host, session)
+    await activateForCommand(host, session)
     // Sharing and joining report through the band and ask through dialogs, which only these surfaces have.
     if (!hasInteractiveSurface(await host.session.surfaces()))
       return { text: `${locator ? '/delta-join' : '/delta-share'} needs an interactive Claude Code terminal or Desktop Code tab. Print mode, SDK sessions, and cloud runners aren't supported.` }
