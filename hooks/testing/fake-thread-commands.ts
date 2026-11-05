@@ -1298,6 +1298,13 @@ export function fakeThreads(hostOn: On, options: {
         return output(JSON.stringify(cliFixture('error', faultEnvelope({ code: 'worktree_invalid_reference', message: 'unknown worktree' }))), 2)
       }
       const reference = `${local}#t=0`
+      if (!child && fake.server.mount?.thread === thread &&
+          samePath(fake.server.mount.directory, checkout!.directory) &&
+          fake.server.mount.reference.split('#')[0] !== local)
+        return output(JSON.stringify(cliFixture('error', faultEnvelope({
+          code: 'failed', reason: 'worktree_conflict', retryable: false,
+          message: 'the thread already has a worktree from this Git checkout',
+        }))), 2)
       if (child) child.checkout = { directory: checkout?.directory ?? CHECKOUT, reference }
       else {
         fake.server.mount = { thread, directory: checkout!.directory, reference }

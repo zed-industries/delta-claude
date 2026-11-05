@@ -205,9 +205,10 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
     const created = await threadCreate(host, {
       externalId: session, organization: organization ? { id: organization, visibility: 'private' } : undefined, check,
     })
-    if (binding.thread && created.thread_id !== binding.thread)
+    const knownThread = binding.thread ?? binding.pendingActivation?.thread
+    if (knownThread && created.thread_id !== knownThread)
       throw new Error('Delta returned a different thread for this session; the existing binding was preserved')
-    if (!binding.thread && !created.created) {
+    if (!knownThread && !created.created) {
       const status = await threadStatus(host, created.thread_id, session)
       validateThreadFrontier(status, { session, thread: created.thread_id, next: binding.next, pending: binding.pending })
       // A durable identity always precedes append. A staged plan alone may have
@@ -217,7 +218,8 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
     }
     // Persist identity before further fallible commands; creation is idempotent if this write fails.
     await serial(async () => save(host, {
-      ...await load(host, session), thread: created.thread_id, ...organization ? { organization } : {},
+      ...await load(host, session), thread: created.thread_id, pendingActivation: undefined,
+      ...organization ? { organization } : {},
       ...privateUpload ? { autoUpload: { mode: 'private' as const, organization: organization! } } : {},
     }))
     binding = await serial(() => load(host, session))

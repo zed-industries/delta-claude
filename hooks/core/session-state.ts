@@ -29,6 +29,8 @@ export type AutoUpload = { mode: 'private' | 'organization'; organization: strin
 export type Binding = {
   session: string
   thread?: string
+  /** Created during automatic setup, but not ready for delivery until its checkout mounts. */
+  pendingActivation?: { thread: string; refusal?: { band: string; transcript: string } }
   /** The pasted locator remains resolvable after restarting with an empty local Delta cache. */
   locator?: string
   /** A session working in mounted copies of a thread's worktrees, not a checkout attached by this session. */

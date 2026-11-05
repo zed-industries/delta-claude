@@ -608,7 +608,7 @@ export const autoActivating = new Map<string, Promise<void>>()
  * The session's capture boundary is released once the contract gate and snapshot are settled, before
  * any network step, so a prompt or turn that arrives during create or attach is recorded
  * rather than dropped. Every await re-checks ownership: a session that ended, or that switched away
- * while a step was pending, leaves no half-initialized binding behind.
+ * while a step was pending, leaves its durable setup progress for a later recovery.
  */
 function activateAutomatically(host: Host, session: string, root: string, upload: AutoUpload): Promise<void> {
   const running = autoActivating.get(session)
@@ -621,6 +621,10 @@ function activateAutomatically(host: Host, session: string, root: string, upload
     if (!ownsActivation()) return
     // A session that already holds a thread, or a binding that is not ours, is never re-created.
     if (existing.thread || (existing.snapshot && !existing.autoUpload) || existing.joined || existing.joinTransition) return
+    if (existing.pendingActivation?.refusal) {
+      finishProgress(host, existing.pendingActivation.refusal.band, 'error')
+      return
+    }
     // A fresh session checks the account against the policy alongside the contract, so a repository
     // this account cannot record to is reported before anything is staged.
     const misconfiguration = existing.snapshot ? undefined : policyMisconfiguration(host, upload.organization)
@@ -684,11 +688,14 @@ function activateAutomatically(host: Host, session: string, root: string, upload
         }
       }
       setProgress(host, 'Connecting this session to Delta…', 'active')
-      const created = await threadCreate(host, {
+      const thread = existing.pendingActivation?.thread ?? (await threadCreate(host, {
         externalId: session, organization: { id: upload.organization, visibility: upload.mode },
-      })
+      })).thread_id
       if (!ownsActivation()) return
-      const reference = await attachWorktree(host, root, created.thread_id, existing.checkoutReference, undefined, session)
+      // Keep creation durable without exposing the thread to delivery before its checkout is ready.
+      await serial(async () => save(host, { ...await load(host, session), pendingActivation: { thread } }))
+      if (!ownsActivation()) return
+      const reference = await attachWorktree(host, root, thread, existing.checkoutReference, undefined, session)
       if (!ownsActivation()) return
       await serial(async () => save(host, { ...await load(host, session), checkoutReference: reference, pendingWorktree: undefined }))
       await mountCheckout(host, { session, checkout: root, checkoutReference: reference }, async () => {
@@ -697,7 +704,7 @@ function activateAutomatically(host: Host, session: string, root: string, upload
       if (!ownsActivation()) return
       // Every step succeeded: now the thread and checkout become visible to drain and verification.
       await serial(async () => save(host, {
-        ...await load(host, session), thread: created.thread_id, checkout: root, checkoutReference: reference,
+        ...await load(host, session), thread, checkout: root, checkoutReference: reference, pendingActivation: undefined,
       }))
       if (!ownsActivation()) return
       runtime.binding = await serial(() => load(host, session))
@@ -773,9 +780,9 @@ function activationRefusal(error: unknown, organization: string): ActivationRefu
 }
 
 /**
- * End automatic recording for a session the policy cannot record: drop any staged binding and its
- * outbox, so the session is simply manual again and nothing retries or grows, then report why. A
- * later /delta share exports the whole conversation from Claude's transcript, so nothing is lost.
+ * Stop automatic setup on a permanent refusal. Before creation, discard the staged binding and
+ * outbox; after creation, preserve setup progress and queued records for explicit /delta-share
+ * recovery, without retrying automatically or allowing delivery into an unmounted checkout.
  *
  * The band shows the refusal for the whole session. The transcript explains it once per repository
  * and refusal, remembered in the store, so every new session in a misconfigured repository stays quiet.
@@ -784,6 +791,10 @@ async function stopAutomaticRecording(host: Host, session: string, root: string,
   await serial(async () => {
     const binding = await load(host, session)
     if (!binding.autoUpload || binding.thread) return
+    if (binding.pendingActivation) {
+      await save(host, { ...binding, pendingActivation: { ...binding.pendingActivation, refusal } })
+      return
+    }
     await host.store.delete(key(session))
     const runtime = stateFor(session)
     runtime.binding = await load(host, session)
@@ -826,7 +837,7 @@ async function pruneStore(host: Host) {
     if (sessions.has(id)) continue
     const binding = await storedBinding(host, key(id))
     if (typeof binding?.endedAt !== 'number' || binding.endedAt > now - STORE_HORIZON_MS ||
-        binding.pending?.length || binding.captureFailure || binding.joinTransition) continue
+        binding.pending?.length || binding.captureFailure || binding.joinTransition || binding.pendingActivation) continue
     // A subagent's undelivered records keep its session, like the session's own.
     const recorded = await Promise.all((binding.children ?? []).map((agentId) =>
       storedChildBinding(host, id, agentId)))

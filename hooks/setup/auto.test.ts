@@ -733,6 +733,85 @@ describe('offline recording', () => {
     fake.expectClean()
   })
 
+  for (const { operation, after } of [
+    { operation: 'attach', after: false },
+    { operation: 'attach', after: true },
+    { operation: 'worktree mount', after: false },
+  ]) {
+    test(`a permanent ${operation} failure (${after ? 'lost receipt' : 'refusal'}) preserves partial setup for explicit recovery`, async ($, on) => {
+      const fake = fakeThreads(on)
+      fake.files.set(POLICY, policy('private', 'org-1'))
+      fake.commandFault = {
+        operation, code: 'failed', reason: 'worktree_directory_in_use', retryable: false,
+        message: 'Checkout is managed by another thread', after,
+      }
+      let release!: () => void
+      fake.holdRun = (step) => step === 'attach' ? new Promise<void>((resolve) => { release = resolve }) : undefined
+      await startAuto($, fake)
+      expect((await $.prompt.submit(prompt('during attach'))).drop).toBeUndefined()
+      await $.turn.start(turnStart('native-partial-setup', 'during attach'))
+      await fake.settle()
+      const queued = binding(fake).pending.flatMap((entry: any) => entry.files)
+      expect(queued.length).toBeGreaterThan(0)
+      const records = binding(fake).pending.map((entry: any) => ({
+        sequence: entry.sequence, line: entry.files.map((path: string) => fake.files.get(path)).join(''),
+      }))
+      release()
+      await fake.settle()
+      expect(binding(fake).thread).toBeUndefined()
+      expect(binding(fake).pendingActivation).toMatchObject({
+        thread: fake.threadId, refusal: { transcript: expect.stringContaining('Checkout is managed by another thread') },
+      })
+      const reference = binding(fake).checkoutReference ?? `${binding(fake).pendingWorktree.reference}#t=0`
+      if (operation !== 'attach' || after) expect(fake.server.mount!.reference).toBe(reference)
+      expect(queued.every((path: string) => fake.files.has(path))).toBe(true)
+      expect(fake.records()).toEqual([])
+      const operations = fake.operations()
+
+      // Prompts and resumes keep capturing locally but do not repeat a permanent refusal.
+      expect((await $.prompt.submit(prompt('after refusal'))).drop).toBeUndefined()
+      await $.turn.complete(turnComplete('native-partial-setup'))
+      await fake.settle()
+      await $.session.end(sessionEnd(fake.session))
+      await startAuto($, fake, 'resume')
+      expect(fake.operations()).toEqual(operations)
+      expect(binding(fake).pendingActivation.refusal).toBeDefined()
+      expect(queued.every((path: string) => fake.files.has(path))).toBe(true)
+
+      fake.commandFault = undefined
+      fake.holdRun = undefined
+      await fake.share($)
+      expect(fake.server.localWorktrees.size).toBe(1)
+      expect(fake.server.mount!.reference).toBe(reference)
+      expect(binding(fake)).toMatchObject({ thread: fake.threadId, checkoutReference: reference, pending: [] })
+      expect(binding(fake).pendingActivation).toBeUndefined()
+      for (const record of records)
+        expect(fake.server.records.get(record.sequence)?.line + '\n').toBe(record.line)
+      expect(fake.exports).toBe(0)
+      fake.expectClean()
+    })
+  }
+
+  test('a retryable mount failure automatically resumes the saved setup', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('private', 'org-1'))
+    fake.commandFault = {
+      operation: 'worktree mount', code: 'app_unavailable', message: 'Delta is unreachable', retryable: true,
+    }
+    await startAuto($, fake)
+    expect(binding(fake).pendingActivation).toEqual({ thread: fake.threadId })
+    expect(binding(fake).thread).toBeUndefined()
+    const reference = binding(fake).checkoutReference
+    fake.commandFault = undefined
+    expect((await $.prompt.submit(prompt('retry setup'))).drop).toBeUndefined()
+    await fake.settle()
+    expect(binding(fake)).toMatchObject({ thread: fake.threadId, checkoutReference: reference })
+    expect(binding(fake).pendingActivation).toBeUndefined()
+    expect(fake.server.localWorktrees.size).toBe(1)
+    expect(fake.operations().filter((operation) => operation === 'create')).toHaveLength(1)
+    fake.expectClean()
+  })
+
   test('a permanent refusal during activation stops recording and removes what was queued', { timeoutMs: 15_000 }, async ($, on) => {
     const fake = fakeThreads(on)
     // Memberships aren't loaded, so only the create itself can refuse.
@@ -797,6 +876,7 @@ describe('store retention', () => {
     seedEnded(store, 'keeper', { next: 5, pending: [{ sequence: 1, files: [], digest: 'x' }] })
     seedEnded(store, 'captured', { captureFailure: 'disk full' })
     seedEnded(store, 'joining', { joinTransition: { locator: 'x' } })
+    seedEnded(store, 'partial-setup', { pendingActivation: { thread: 'created-thread' } })
     seedEnded(store, 'live', { endedAt: undefined })
     await $.session.start(sessionStart)
     await fake.settle()
@@ -806,7 +886,7 @@ describe('store retention', () => {
     expect(keys).not.toContain('session:expired')
     expect(keys).not.toContain('appended:expired')
     // Never a binding without an end marker, one within the horizon, or one something still needs.
-    for (const id of ['live', 'marked-recent', 'keeper', 'captured', 'joining']) expect(keys).toContain(`session:${id}`)
+    for (const id of ['live', 'marked-recent', 'keeper', 'captured', 'joining', 'partial-setup']) expect(keys).toContain(`session:${id}`)
     fake.expectClean()
   })
 
