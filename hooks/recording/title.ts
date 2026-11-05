@@ -1,7 +1,7 @@
 import { conversationText } from '../watch/conversation'
 import { drain, stageRecord } from './delivery'
 import { isJsonObject } from '../core/json'
-import { load, report, save, serial, stateFor } from '../core/session-state'
+import { load, report, requests, save, serial, stateFor } from '../core/session-state'
 import type { Host } from '../core/host'
 import { cutsSurrogatePair } from '../core/text'
 
@@ -89,25 +89,38 @@ function cleanTitle(title: string): string | undefined {
   return `${line.slice(0, end)}…`
 }
 
-/** A read of what a transcript gained gives up after this long; the next turn's end reads it again. */
+/** A read of what a transcript gained gives up after this long; the next read takes it up again. */
 const TITLE_TIMEOUT_MS = 10_000
 /**
- * How much of a transcript's end the first read takes in. Claude appends a title when it is chosen
- * or renamed, and repeats it as the transcript grows, so the end of the file holds the current one.
+ * How much of a transcript's end the first read takes in. Claude appends the current title when it is
+ * chosen or renamed and again at each prompt, so the end of the file usually holds it. A turn can add
+ * megabytes after its prompt, so a window without a title is widened {@link TITLE_WINDOW_GROWTH}-fold,
+ * up to the whole file.
  */
-const TITLE_WINDOW_BYTES = 256 * 1024
+export const TITLE_WINDOW_BYTES = 256 * 1024
+const TITLE_WINDOW_GROWTH = 8
 /** `$.fs.read` refuses a larger file, so reading a transcript whole is possible only below this. */
 export const FS_READ_LIMIT = 4 * 1024 * 1024
 /**
- * Where a session's transcript was last read to and the title found so far. `ranged` is cleared
- * once reading from an offset fails, so the session reads its transcript whole from then on.
+ * Where a session's transcript was last read to, once a read has finished, and the title found so far.
+ * `ranged` is cleared once reading from an offset fails, so the session reads its transcript whole
+ * from then on.
  */
-type TitleReader = { path: string; offset: number; scanner: TitleScanner; ranged: boolean; reading?: true }
+type TitleReader = { path: string; offset?: number; scanner: TitleScanner; ranged: boolean }
 const titleReaders = new Map<string, TitleReader>()
+/** Each session's latest read, which the next one waits for: two reads would feed one scanner at once. */
+const titleReads = new Map<string, Promise<string | undefined>>()
 
 /** An ended session's transcript is not read again here. */
 export function forgetTitleReader(session: string) {
   titleReaders.delete(session)
+  titleReads.delete(session)
+}
+
+/** Whether a session's thread is recorded by it and has no title from it yet. */
+export function awaitsTitle(session: string): boolean {
+  const binding = stateFor(session).binding
+  return !!binding?.snapshot && !binding.joined && binding.title === undefined
 }
 
 /**
@@ -115,7 +128,7 @@ export function forgetTitleReader(session: string) {
  * shared session names its thread; a joined session takes part in someone else's. An automatic
  * session stages its title before its thread exists, like its other records, so a turn that ends
  * during activation still names the thread. Nothing here can fail a turn or sharing: a title that
- * cannot be read or staged is skipped, and the next turn's end tries again.
+ * cannot be read or staged is skipped, and the next read tries again.
  */
 export async function recordTitle(host: Host, session: string, transcript: string) {
   const binding = stateFor(session).binding
@@ -129,58 +142,71 @@ export async function recordTitle(host: Host, session: string, transcript: strin
       await save(host, { ...await stageRecord(host, current, { update: { sessionUpdate: 'session_info_update', title } }), title })
       return true
     })
-    // Once staged, the title is delivered and reported like every other record.
-    if (staged) void drain(host, session).catch((error) => report(host, error))
+    // Once staged, the title is delivered and reported like every other record. A share in flight
+    // delivers it itself once the thread is published; delivering earlier would fail and pause sharing.
+    if (staged && requests.share?.session !== session) void drain(host, session).catch((error) => report(host, error))
   } catch (error) {
     await host.ui.log(`Couldn't record this session's title: ${String(error)}`, { to: 'debug' })
   }
 }
 
 /**
- * The session's title, from what its transcript gained since the last read: the first read takes
- * in the file's last {@link TITLE_WINDOW_BYTES}, and each later one only the bytes added since. A
- * transcript that shrank was rewritten, as compaction does, and is read from its end again.
- *
- * Reading from an offset needs `tail`, or PowerShell allowed to call .NET on Windows, and either
- * may be missing or refused, as under Constrained Language Mode. Once it fails, the session reads
- * its transcript whole with `$.fs.read`, which works wherever the plugin does, up to
- * {@link FS_READ_LIMIT}; past that it has no title to offer. A read already running is not
- * doubled; the next turn's end picks up what it left.
+ * The session's title, from what its transcript gained since the last read. The first read takes in
+ * the file's last {@link TITLE_WINDOW_BYTES}, widening the window until it holds a title or the whole
+ * file; each later one takes only the bytes added since. A transcript that shrank was rewritten, as
+ * compaction does, and is read like a new one. A read waits for the session's previous one, so a
+ * rename made while another read runs is never missed.
  */
-async function readTitle(host: Host, session: string, transcript: string): Promise<string | undefined> {
-  const previous = titleReaders.get(session)
-  if (previous?.reading) return previous.scanner.title
+function readTitle(host: Host, session: string, transcript: string): Promise<string | undefined> {
+  const read = (titleReads.get(session) ?? Promise.resolve(undefined))
+    // The previous read reported its own failure to its caller.
+    .catch(() => undefined)
+    .then(() => readTitleNow(host, session, transcript))
+  titleReads.set(session, read)
+  return read
+}
+
+async function readTitleNow(host: Host, session: string, transcript: string): Promise<string | undefined> {
   const { size } = await host.fs.stat(transcript)
-  let reader = previous
-  if (!reader || reader.path !== transcript || size < reader.offset) {
-    reader = {
-      path: transcript, offset: Math.max(0, size - TITLE_WINDOW_BYTES), scanner: new TitleScanner(),
-      ranged: previous?.ranged ?? true,
-    }
-    titleReaders.set(session, reader)
+  const previous = titleReaders.get(session)
+  if (previous?.path === transcript && previous.offset !== undefined && size >= previous.offset) {
+    if (size > previous.offset) await scanTranscript(host, previous, previous.offset, size)
+    return previous.scanner.title
   }
-  if (size === reader.offset) return reader.scanner.title
-  reader.reading = true
-  try {
-    if (reader.ranged) {
-      try {
-        await readFrom(host, transcript, reader.offset, (text) => reader.scanner.push(text))
-        reader.offset = size
-        return reader.scanner.title
-      } catch (error) {
-        reader.ranged = false
-        await host.ui.log(`Couldn't read the transcript from an offset (${String(error)}); reading it whole from now on.`, { to: 'debug' })
-      }
-    }
-    if (size > FS_READ_LIMIT) throw new Error(`the transcript is ${size} bytes, more than it can be read whole`)
-    const scanner = new TitleScanner()
-    scanner.push(await host.fs.read(transcript))
-    reader.scanner = scanner
-    reader.offset = size
-    return scanner.title
-  } finally {
-    reader.reading = undefined
+  const reader: TitleReader = { path: transcript, scanner: new TitleScanner(), ranged: previous?.ranged ?? true }
+  titleReaders.set(session, reader)
+  for (let window = TITLE_WINDOW_BYTES; ; window *= TITLE_WINDOW_GROWTH) {
+    const start = Math.max(0, size - window)
+    reader.scanner = new TitleScanner()
+    await scanTranscript(host, reader, start, size)
+    // Once reading from an offset failed, the transcript was read whole: there is no wider window.
+    if (reader.scanner.title !== undefined || start === 0 || !reader.ranged) return reader.scanner.title
   }
+}
+
+/**
+ * Feed `reader` the transcript from byte `start`, which the file's `size` now ends. Reading from an
+ * offset needs `tail`, or PowerShell allowed to call .NET on Windows, and either may be missing or
+ * refused, as under Constrained Language Mode. Once it fails, the session reads its transcript whole
+ * with `$.fs.read`, which works wherever the plugin does, up to {@link FS_READ_LIMIT}; past that it
+ * has no title to offer.
+ */
+async function scanTranscript(host: Host, reader: TitleReader, start: number, size: number) {
+  if (reader.ranged) {
+    try {
+      await readFrom(host, reader.path, start, (text) => reader.scanner.push(text))
+      reader.offset = size
+      return
+    } catch (error) {
+      reader.ranged = false
+      await host.ui.log(`Couldn't read the transcript from an offset (${String(error)}); reading it whole from now on.`, { to: 'debug' })
+    }
+  }
+  if (size > FS_READ_LIMIT) throw new Error(`the transcript is ${size} bytes, more than it can be read whole`)
+  const scanner = new TitleScanner()
+  scanner.push(await host.fs.read(reader.path))
+  reader.scanner = scanner
+  reader.offset = size
 }
 
 /** Stream a file from a byte offset to its end, without holding it whole. */

@@ -30,7 +30,7 @@ import {
 } from '../cli/thread-commands'
 import { errorText } from '../core/text'
 import { restoreChildren } from '../subagents/thread-runs'
-import { FS_READ_LIMIT, readFrom, recordTitle } from '../recording/title'
+import { awaitsTitle, FS_READ_LIMIT, readFrom, recordTitle } from '../recording/title'
 import { claudeConfigDir, expectedTranscript, findTranscript } from '../core/transcript'
 import { followUpload, startConversation, stopConversation } from '../watch/watch'
 
@@ -198,8 +198,8 @@ const noticing = new Map<string, Promise<boolean>>()
 /** How often a session's transcript was looked for and not found, which stops the looking at {@link MAX_TRANSCRIPT_MISSES}. */
 const transcriptMisses = new Map<string, number>()
 const MAX_TRANSCRIPT_MISSES = 3
-/** The turn whose reply last looked for an untitled session's title, so a long turn reads its transcript once. */
-const titleTurns = new Map<string, string | undefined>()
+/** Each session's latest {@link pollTitle}, so a newer turn's polling replaces an older one's. */
+const titlePolls = new Map<string, object>()
 
 /**
  * `session.start` ran for a session, which has been activated by now: work out how it started. A session
@@ -308,8 +308,9 @@ async function beginSession(host: Host, session: string) {
 }
 
 /**
- * Remember where a turn left the transcript and its title. Looking for the file stops after a few
- * misses, as a session that keeps no transcript would otherwise search for it at every turn.
+ * Remember where the session's transcript is now, and record the title it holds. Looking for the file
+ * stops after a few misses, as a session that keeps no transcript would otherwise search for it at
+ * every turn.
  */
 export async function followTranscript(host: Host, session: string) {
   if ((transcriptMisses.get(session) ?? 0) >= MAX_TRANSCRIPT_MISSES) return
@@ -323,24 +324,37 @@ export async function followTranscript(host: Host, session: string) {
 }
 
 /**
- * Read an untitled recorded session's title at the first reply of each turn. Claude writes a session's
- * title before its first reply, so the thread is named during that turn rather than at its end. Once a
- * title is recorded, only a turn's end reads again, for a later one such as a `/rename`.
+ * How long to wait before each read of an untitled session's transcript after a turn starts. Claude
+ * writes the title it chose about two seconds after the first prompt, whatever the reply, and never
+ * changes it; reading only at a reply or a turn's end would leave the thread unnamed for the whole
+ * first reply. No hook reports the title, so the transcript is read on this schedule instead.
  */
-export async function followTitle(host: Host, session: string) {
-  const runtime = stateFor(session)
-  const binding = runtime.binding
-  if (!binding?.snapshot || binding.joined || binding.title !== undefined) return
-  if (titleTurns.has(session) && titleTurns.get(session) === runtime.currentTurnId) return
-  titleTurns.set(session, runtime.currentTurnId)
-  await followTranscript(host, session)
+export const TITLE_POLL_DELAYS_MS = [1000, 1000, 1000, 2000, 4000, 8000, 16000]
+
+/**
+ * Read a recorded session's transcript for its title on {@link TITLE_POLL_DELAYS_MS} after a turn
+ * starts, until the thread has a title from it. Polling stops when the session ends, another is
+ * recorded, or a later turn starts polling of its own.
+ */
+export async function pollTitle(host: Host, session: string) {
+  if (!awaitsTitle(session)) return
+  const poll = {}
+  titlePolls.set(session, poll)
+  const active = stillActive(session)
+  for (const delay of TITLE_POLL_DELAYS_MS) {
+    await host.clock.sleep(delay)
+    if (titlePolls.get(session) !== poll || !active() || !awaitsTitle(session)) break
+    // A failed look is as good as finding nothing; the next one tries again.
+    try { await followTranscript(host, session) } catch {}
+  }
+  if (titlePolls.get(session) === poll) titlePolls.delete(session)
 }
 
 /** A session that ended forgets how it started and its open setup offer, and releases its capture boundary. */
 export async function forgetSessionStart(host: Host, session: string, reason: string) {
   sessionStarts.delete(session)
   transcriptMisses.delete(session)
-  titleTurns.delete(session)
+  titlePolls.delete(session)
   // Claude starts the session after this one with no `session.start`, so the reason it ended says how.
   endedSession = session
   startedSession = undefined
