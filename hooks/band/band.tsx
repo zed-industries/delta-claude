@@ -368,7 +368,7 @@ export function authorColor(item: WatchItem): string {
 
 /**
  * The band above the prompt: sync status, the thread's link and people, and an optional plugin update
- * row inside the same surface. It yields to a survey and takes at most the band's rows; remote agent
+ * row inside the same surface. It yields to a survey and bounds its own rows; remote agent
  * activity sits above the shaded status rows. Draining queued message rows here also gives them the
  * hook context their own command needs.
  */
@@ -451,12 +451,16 @@ export async function drawBand(
   const childActivity = band.childActivity ? <Text key="children" wrap="truncate-end">{spans(band.childActivity)}</Text> : null
   // The desktop's own card sets the band apart. The terminal shades it, a status bar the width of
   // the band, so it reads as part of the input area rather than another transcript row.
-  if (!terminal) return <Box flexDirection="column">{activity}{childActivity}{rows}</Box>
-  const bar = <Box key="bar" flexDirection="column" width={columns} paddingX={1} backgroundColor={await barShade(host)}>{rows}</Box>
-  if (!activity && !childActivity) return bar
-  return <Box flexDirection="column" width={columns}>
-    {activity ? <Box paddingX={1}>{activity}</Box> : null}
-    {childActivity ? <Box paddingX={1}>{childActivity}</Box> : null}
-    {bar}
-  </Box>
+  let own = <Box flexDirection="column">{activity}{childActivity}{rows}</Box>
+  if (terminal) {
+    const bar = <Box key="bar" flexDirection="column" width={columns} paddingX={1} backgroundColor={await barShade(host)}>{rows}</Box>
+    own = !activity && !childActivity ? bar : <Box flexDirection="column" width={columns}>
+      {activity ? <Box paddingX={1}>{activity}</Box> : null}
+      {childActivity ? <Box paddingX={1}>{childActivity}</Box> : null}
+      {bar}
+    </Box>
+  }
+  const rest = await next(e)
+  // Keep replacing the core band, but preserve other plugins' content.
+  return rest.type === 'engine' ? own : <Box flexDirection="column">{rest}{own}</Box>
 }

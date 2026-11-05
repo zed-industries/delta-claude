@@ -3042,6 +3042,62 @@ describe('remote activity', () => {
 })
 
 describe('the status band', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    for (const state of ['not set up', 'manual', 'syncing'] as const) {
+      test(`preserves a downstream AbovePrompt band while ${state} on ${surface} (#27)`, async ($, on) => {
+        let downstreamDraws = 0
+        // Stand in for the next plugin's band at the engine boundary.
+        on('ui.render', { component: 'AbovePrompt' }, () => {
+          downstreamDraws++
+          return { type: 'Text', props: {}, children: ['hello from the downstream band'] }
+        })
+        const fake = fakeThreads(on)
+        if (state === 'manual') fake.files.set(POLICY, policy('manual'))
+        const mount = (hasSurvey = false) => $.ui.mount({
+          ...abovePrompt, surface, plugin: 'delta', props: { ...abovePrompt.props, hasSurvey },
+        })
+        const beforeStartup = await mount()
+        expect(await beforeStartup.find({ text: 'hello from the downstream band' })).toBeDefined()
+        expect(downstreamDraws).toBeGreaterThan(0)
+        await beforeStartup.unmount()
+
+        await $.session.start(sessionStart)
+        if (state === 'syncing') await fake.share($)
+        await fake.settle()
+        // The survey path still reaches the downstream renderer after startup.
+        const survey = await mount(true)
+        expect(await survey.find({ text: 'hello from the downstream band' })).toBeDefined()
+        await survey.unmount()
+        const beforeDraw = downstreamDraws
+        const shown = await mount()
+        const label = state === 'manual' ? 'Not syncing' : state === 'not set up' ? 'Not set up' : 'Syncing'
+        expect(await shown.find({ text: label })).toBeDefined()
+        expect(downstreamDraws).toBe(beforeDraw + 1)
+        expect(await shown.find({ text: 'hello from the downstream band' })).toBeDefined()
+      })
+    }
+  }
+
+  test('does not nest the engine placeholder inside its band', async ($, on) => {
+    let downstreamDraws = 0
+    on('ui.render', { component: 'AbovePrompt' }, () => {
+      downstreamDraws++
+      return { type: 'engine', ref: 0 }
+    })
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('manual'))
+    await $.session.start(sessionStart)
+    await fake.settle()
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ ...abovePrompt, surface, plugin: 'delta' })
+      expect(await ui.find({ text: 'Not syncing' })).toBeDefined()
+      expect(JSON.stringify(await ui.drawn())).not.toContain('"type":"engine"')
+      await ui.unmount()
+    }
+    expect(downstreamDraws).toBe(2)
+    fake.expectClean()
+  })
+
   test('child updates preserve siblings and reconnect replaces the inventory while the parent is idle', async ($, on) => {
     const fake = fakeThreads(on)
     fake.server.children = [
