@@ -11,6 +11,7 @@ import {
 } from '../cli/delta-cli'
 import { worktreeHistory } from '../cli/command-outcomes'
 import { attachWorktree, mountCheckout } from './checkout'
+import { followTranscript } from '../setup/activation'
 import { authenticationHost, claudeInteraction } from '../setup/interaction'
 import {
   currentOrganizationId, isPersonalOrganizationId, loadOrganizationDirectory, organizationName, savedOrganization,
@@ -273,6 +274,11 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   await startConversation(host, session)
   await assertShareSession(host, request)
   setProgress(host, 'Syncing files…', 'active', [5, 5])
+  // Claude named the session before it was shared, and polling for a title starts only with a turn, so
+  // the title is staged now and delivered with the snapshot. Not before: delivering a record checks the
+  // thread is published, and a failed check pauses sharing. A title that cannot be read fails nothing.
+  await followTranscript(host, session).catch((error) =>
+    host.ui.log(`Couldn't look for this session's title: ${String(error)}`, { to: 'debug' }))
   await drain(host, session)
   for (const child of children.values()) if (child.session === session) void deliverChild(host, child)
   if (isPaused(runtime))

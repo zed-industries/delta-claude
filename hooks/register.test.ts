@@ -3,6 +3,8 @@ import { describe, expect, test as kitTest, tier } from 'claude-code/testing'
 import { cliFixture } from './testing/cli-fixtures'
 import { claudeVersionWarning } from './core/compatibility'
 import { transcriptCandidate } from './core/transcript'
+import { TITLE_POLL_DELAYS_MS } from './setup/activation'
+import { TITLE_WINDOW_BYTES } from './recording/title'
 import { addRows, itemFingerprint, type PendingRow, RemoteView } from './watch/conversation'
 import {
   abovePrompt, ADA, bash, CHECKOUT, commandOutput, CONFIG, drawBandText, drawReady, expectNoSetupCommands,
@@ -1386,11 +1388,11 @@ describe('recording', () => {
     fake.failRemoval = true
     fake.appendOffline = false
     let releaseListing!: () => void
-    fake.holdListing = new Promise<void>((resolve) => { releaseListing = resolve })
+    fake.holdOutboxListing = new Promise<void>((resolve) => { releaseListing = resolve })
     expect(await fake.share($)).toBe(`https://delta.dev/join/${fake.shareId}`)
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     releaseListing()
-    fake.holdListing = undefined
+    fake.holdOutboxListing = undefined
     await fake.settle()
     fake.failRemoval = false
     await $.session.end(sessionEnd(fake.session))
@@ -3442,8 +3444,6 @@ describe('recording titles', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     const transcript = transcriptCandidate(CONFIG, CHECKOUT, fake.session)
-    const titles = () => fake.records().flatMap((record) =>
-      record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])
     let turns = 0
     const stop = async (...lines: object[]) => {
       fake.files.set(transcript, [...(fake.files.get(transcript) ?? '').split('\n').filter(Boolean),
@@ -3454,16 +3454,16 @@ describe('recording titles', () => {
     }
     // No title yet: nothing is recorded.
     await stop({ type: 'user', message: { role: 'user', content: 'hello' } })
-    expect(titles()).toEqual([])
+    expect(titles(fake)).toEqual([])
     await stop({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session })
-    expect(titles()).toEqual(['Fix the parser'])
+    expect(titles(fake)).toEqual(['Fix the parser'])
     // The same title at a later turn's end is not recorded again.
     await stop()
-    expect(titles()).toEqual(['Fix the parser'])
+    expect(titles(fake)).toEqual(['Fix the parser'])
     // A rename wins over a title Claude chooses after it.
     await stop({ type: 'custom-title', customTitle: 'Parser rewrite', sessionId: fake.session },
       { type: 'ai-title', aiTitle: 'Something else', sessionId: fake.session })
-    expect(titles()).toEqual(['Fix the parser', 'Parser rewrite'])
+    expect(titles(fake)).toEqual(['Fix the parser', 'Parser rewrite'])
     expect((fake.store.get(`session:${fake.session}`) as { title?: unknown }).title).toBe('Parser rewrite')
     // Each read starts where the last one ended, never at the start of the file again.
     const reads = fake.commands.filter((argv) => argv[0] === 'tail').map((argv) => Number(argv[2]!.slice(1)))
@@ -3472,7 +3472,7 @@ describe('recording titles', () => {
     fake.expectClean()
   })
 
-  test("an automatic session takes Claude's title at its first reply, before its thread exists", { timeoutMs: 15_000 }, async ($, on) => {
+  test("an automatic session takes Claude's title while its first turn runs, before its thread exists", { timeoutMs: 15_000 }, async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('organization', 'org-1'))
     let release!: () => void
@@ -3486,52 +3486,120 @@ describe('recording titles', () => {
     await $.turn.start(turnStart('native-title'))
     fake.files.set(transcriptCandidate(CONFIG, CHECKOUT, fake.session),
       JSON.stringify({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session }) + '\n')
-    await $.session.append({
-      door: 'response', uuid: 'first-reply',
-      message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'On it.' }] },
-    } as never)
-    await fake.settle()
-    // Staged while the thread is still being attached, and before the turn ends.
+    await fake.advance(TITLE_POLL_DELAYS_MS[0]!)
+    // Staged while the thread is still being attached, with no reply yet and before the turn ends.
     const stored = fake.store.get(`session:${fake.session}`) as { thread?: unknown; title?: unknown }
     expect(stored.thread).toBeUndefined()
     expect(stored.title).toBe('Fix the parser')
-    fake.statusPatch = { version: 'actor.42' }
-    await $.turn.complete({ ...turnComplete('native-title'), answer: 'Fixed the parser' })
     release()
     await fake.settle()
     await fake.advance(120_000)
     await fake.settle()
-    expect(fake.records().flatMap((record) =>
-      record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])).toEqual(['Fix the parser'])
-    expect(fake.records().find((record) => record.summary !== undefined))
-      .toMatchObject({ turnSequence: 1, summary: { sourceVersion: 'actor.42' } })
+    expect(titles(fake)).toEqual(['Fix the parser'])
     fake.expectClean()
   })
 
-  test('an untitled session reads its transcript at the first reply of each turn, not at every reply', async ($, on) => {
+  test("a shared session's thread takes Claude's title as soon as it is written, not at a reply or the turn's end", async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
     await fake.share($)
     const transcript = transcriptCandidate(CONFIG, CHECKOUT, fake.session)
-    const reply = async (uuid: string) => {
-      fake.files.set(transcript, (fake.files.get(transcript) ?? '') + JSON.stringify({ type: 'assistant', uuid }) + '\n')
-      await $.session.append({
-        door: 'response', uuid,
-        message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: uuid }] },
-      } as never)
-      await fake.settle()
-    }
+    fake.files.set(transcript, JSON.stringify({ type: 'user', message: { role: 'user', content: 'fix the parser' } }) + '\n')
     const reads = () => fake.commands.filter((argv) => argv[0] === 'tail').length
-    await $.turn.start(turnStart('turn-1', 'hello'))
-    await reply('first')
-    expect(reads()).toBe(1)
-    await reply('second')
-    expect(reads()).toBe(1)
+    await $.turn.start(turnStart('turn-1', 'fix the parser'))
+    await fake.advance(TITLE_POLL_DELAYS_MS[0]!)
+    expect(titles(fake)).toEqual([])
+    // Claude writes its title a moment after the prompt, while its reply is still being written.
+    fake.files.set(transcript, fake.files.get(transcript)! +
+      JSON.stringify({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session }) + '\n')
+    await fake.advance(TITLE_POLL_DELAYS_MS[1]!)
+    expect(titles(fake)).toEqual(['Fix the parser'])
+    // A titled session stops polling, this turn and the next, while its transcript grows; only a turn's
+    // end reads it again.
+    const titled = reads()
+    const reply = (uuid: string) =>
+      fake.files.set(transcript, fake.files.get(transcript)! + JSON.stringify({ type: 'assistant', uuid }) + '\n')
+    reply('first')
+    await fake.advance(60_000)
+    expect(reads()).toBe(titled)
     await $.turn.complete(turnComplete('turn-1'))
     await fake.settle()
+    expect(reads()).toBe(titled + 1)
     await $.turn.start(turnStart('turn-2', 'again'))
-    await reply('third')
-    expect(reads()).toBe(3)
+    reply('second')
+    await fake.advance(60_000)
+    expect(reads()).toBe(titled + 1)
+    expect(titles(fake)).toEqual(['Fix the parser'])
+    fake.expectClean()
+  })
+
+  test('sharing a session Claude already titled names its thread with the share, without another turn', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('initial')] })
+    await $.session.start(sessionStart)
+    const transcript = transcriptCandidate(CONFIG, CHECKOUT, fake.session)
+    // A long turn after the title, larger than the first window a read takes in, as agentic work writes.
+    const work = JSON.stringify({ type: 'user', message: { role: 'user', content: 'x'.repeat(1024) } }) + '\n'
+    fake.files.set(transcript, JSON.stringify({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session }) + '\n' +
+      work.repeat(Math.ceil(TITLE_WINDOW_BYTES / work.length) + 1))
+    // An unshared session's turn records no title.
+    await $.turn.start(turnStart('turn-1', 'hello'))
+    await $.turn.complete(turnComplete('turn-1'))
+    await fake.advance(60_000)
+    expect(fake.commands.filter((argv) => argv[0] === 'tail')).toEqual([])
+    await fake.share($)
+    await fake.settle()
+    expect(titles(fake)).toEqual(['Fix the parser'])
+    // The first window held no title, so the next took in the whole file.
+    expect(fake.commands.filter((argv) => argv[0] === 'tail').map((argv) => argv[2])).toEqual([
+      `+${new TextEncoder().encode(fake.files.get(transcript)!).byteLength - TITLE_WINDOW_BYTES + 1}`, '+1',
+    ])
+    fake.expectClean()
+  })
+
+  test('/rename renames the thread at once, even while another read of the transcript runs', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('initial')] })
+    const transcript = transcriptCandidate(CONFIG, CHECKOUT, fake.session)
+    const append = (row: object) => fake.files.set(transcript, (fake.files.get(transcript) ?? '') + JSON.stringify(row) + '\n')
+    const rename = (args: string) => $.command.run({ ...shareCommand, command: 'rename', args })
+    append({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await fake.settle()
+    expect(titles(fake)).toEqual(['Fix the parser'])
+    expect((await rename('Parser rewrite')).text).toBe('Session renamed to: Parser rewrite')
+    await fake.settle()
+    expect(titles(fake)).toEqual(['Fix the parser', 'Parser rewrite'])
+    // A rename while a turn's end is still reading the transcript is read after it, not dropped.
+    let release!: () => void
+    fake.holdTranscriptRead = new Promise<void>((resolve) => { release = resolve })
+    await $.turn.start(turnStart('turn-1', 'hello'))
+    append({ type: 'assistant', uuid: 'reply' })
+    await $.turn.complete(turnComplete('turn-1'))
+    await fake.settle()
+    await rename('')
+    await fake.settle()
+    fake.holdTranscriptRead = undefined
+    release()
+    await fake.settle()
+    expect(titles(fake)).toEqual(['Fix the parser', 'Parser rewrite', 'chosen-by-claude'])
+    fake.expectClean()
+  })
+
+  test('a /rename while the session is being shared is delivered by the share, and never pauses it', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('initial')] })
+    let release: (() => void) | undefined
+    fake.holdRun = (operation) => operation === 'attach' ? new Promise<void>((resolve) => { release = resolve }) : undefined
+    await $.session.start(sessionStart)
+    const shared = fake.share($)
+    // The thread exists and the snapshot is staged, but the thread is not attached or published yet.
+    await fake.settleUntil(() => release !== undefined)
+    await $.command.run({ ...shareCommand, command: 'rename', args: 'Parser rewrite' })
+    await fake.settle()
+    fake.holdRun = undefined
+    release!()
+    expect(await shared).toBe(`https://delta.dev/join/${fake.shareId}`)
+    await fake.settle()
+    expect(titles(fake)).toEqual(['Parser rewrite'])
     fake.expectClean()
   })
 
@@ -3570,8 +3638,6 @@ describe('recording titles', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     const transcript = transcriptCandidate(CONFIG, CHECKOUT, fake.session)
-    const titles = () => fake.records().flatMap((record) =>
-      record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])
     let turns = 0
     const stop = async () => {
       await $.turn.start(turnStart(`turn-${++turns}`, 'hello'))
@@ -3583,15 +3649,21 @@ describe('recording titles', () => {
     fake.failTranscriptRead = true
     fake.files.set(transcript, JSON.stringify({ type: 'ai-title', aiTitle: 'Read whole', sessionId: fake.session }) + '\n')
     await stop()
-    expect(titles()).toEqual(['Read whole'])
+    expect(titles(fake)).toEqual(['Read whole'])
     // The session reads its transcript whole from then on, without trying the offset read again.
     const tries = fake.commands.filter((argv) => argv[0] === 'tail').length
     fake.files.set(transcript, fake.files.get(transcript)! + JSON.stringify({ type: 'custom-title', customTitle: 'Renamed' }) + '\n')
     await stop()
-    expect(titles()).toEqual(['Read whole', 'Renamed'])
+    expect(titles(fake)).toEqual(['Read whole', 'Renamed'])
     expect(fake.commands.filter((argv) => argv[0] === 'tail')).toHaveLength(tries)
     expect(fake.logs.join('\n')).not.toContain('title')
     expect((await $.prompt.submit(prompt('still sharing'))).drop).toBeUndefined()
     fake.expectClean()
   })
 })
+
+/** The titles the session recorded for its thread, in order. */
+function titles(fake: ReturnType<typeof fakeThreads>) {
+  return fake.records().flatMap((record) =>
+    record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])
+}

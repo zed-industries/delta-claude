@@ -5,6 +5,7 @@ import type { ThreadState, ThreadUser, WatchChild, WatchComment, WatchItem } fro
 import { cliErrorCodes, cliFixture } from './cli-fixtures'
 import { MINIMUM_CLAUDE_VERSION } from '../core/compatibility'
 import { samePath } from '../core/paths'
+import { transcriptCandidate } from '../core/transcript'
 import { showAnswer } from '../watch/row-delivery'
 
 export type Envelope = {
@@ -587,6 +588,8 @@ export function fakeThreads(hostOn: On, options: {
     holdCliResolution: undefined as (() => Promise<void> | undefined) | undefined,
     /** Reading a transcript from an offset cannot start, as without `tail` or a usable PowerShell. */
     failTranscriptRead: false,
+    /** A transcript read that has read the file waits for this before it prints anything. */
+    holdTranscriptRead: undefined as Promise<void> | undefined,
     failWrite: false,
     /** `git rev-parse` fails, as outside a checkout. */
     failGit: false,
@@ -604,7 +607,8 @@ export function fakeThreads(hostOn: On, options: {
     gitCommonDir: `${CHECKOUT}/.git`,
     failStoreSet: false as boolean | (() => boolean),
     failRemoval: false,
-    holdListing: undefined as Promise<void> | undefined,
+    /** Holds listing the outbox, as a blocked collector sees it; other folders list at once. */
+    holdOutboxListing: undefined as Promise<void> | undefined,
     /** Pauses `process.run` for the named operations, so a test can read the band mid-step. */
     holdRun: undefined as ((operation: string | undefined) => Promise<void> | undefined) | undefined,
     /** Pauses the initial API export, between its fetch and its staging. */
@@ -905,10 +909,18 @@ export function fakeThreads(hostOn: On, options: {
       await fake.endSession?.(fake.session)
       fake.session = `${fake.session}-fresh`
     } else if (e.command === 'cd' && !fake.refuseCd) fake.cwd = e.args
+    else if (e.command === 'rename') {
+      // Claude writes the new title, or one it chose when none was typed, before the command returns.
+      const title = e.args.trim() || 'chosen-by-claude'
+      const transcript = transcriptCandidate(CONFIG, fake.cwd, fake.session)
+      fake.files.set(transcript, (fake.files.get(transcript) ?? '') +
+        JSON.stringify({ type: 'custom-title', customTitle: title, sessionId: fake.session }) + '\n')
+      return { text: `Session renamed to: ${title}` }
+    }
     else if (e.command === 'reload-plugins') {
       if (fake.reloadFailure) throw new Error(fake.reloadFailure)
       if (fake.reloadResponse !== undefined) return { text: fake.reloadResponse }
-    } else if (!['clear', 'cd'].includes(e.command)) throw new Error(`Unexpected fixture session command ${e.command}`)
+    } else if (!['clear', 'cd', 'rename'].includes(e.command)) throw new Error(`Unexpected fixture session command ${e.command}`)
     return {}
   })
   // The settings menu's rows, of which the band reads the theme for its status bar's shade.
@@ -1045,7 +1057,7 @@ export function fakeThreads(hostOn: On, options: {
     [...fake.files.keys()].some((path) => path === fixturePath(e.path) || path.startsWith(`${fixturePath(e.path)}/`)) }))
   on('fs.list', async ($, e) => {
     fake.listed.push(e.path)
-    if (fake.holdListing) await fake.holdListing
+    if (fake.holdOutboxListing && e.path.includes('/delta-plugin/outbox')) await fake.holdOutboxListing
     const prefix = `${fixturePath(e.path)}/`
     const below = [...fake.files.keys()].filter((path) => path.startsWith(prefix)).map((path) => path.slice(prefix.length))
     // A file deeper down makes a folder here, listed once.
@@ -1454,6 +1466,7 @@ export function fakeThreads(hostOn: On, options: {
       fake.commands.push([...e.argv])
       if (fake.failTranscriptRead) throw new Error('spawn tail ENOENT')
       const text = fake.files.get(e.argv[3]!)
+      if (fake.holdTranscriptRead) await fake.holdTranscriptRead
       if (text === undefined) {
         yield { stream: 'stderr', text: `tail: ${e.argv[3]}: No such file or directory` }
         return { value: { code: 1, signal: null } }
