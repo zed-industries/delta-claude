@@ -3,25 +3,45 @@ import { DeltaCli } from './cli'
 
 tier('user')
 
-test('existing executable is cached without running an installer', async () => {
+test('the first PATH program that answers as Delta is selected and cached without an installer', async () => {
   const calls: string[][] = []
   const run = async (argv: readonly string[]) => {
     calls.push([...argv])
-    return output('/development build/delta\n')
+    if (argv[0] === 'sh') return output('path /nix/bin/delta\npath /development build/delta\ninstalled /Applications/Delta.app/Contents/MacOS/delta\n')
+    return argv[0] === '/nix/bin/delta' ? gitDelta() : contract()
   }
   const cli = new DeltaCli()
   expect(await cli.resolve(run, true)).toBe('/development build/delta')
   expect(await cli.resolve(run)).toBe('/development build/delta')
-  expect(calls).toHaveLength(1)
-  expect(calls[0]![2]).toContain('command -v delta')
+  expect(calls.slice(1)).toEqual([
+    ['/nix/bin/delta', '--json', 'thread', 'contract'],
+    ['/development build/delta', '--json', 'thread', 'contract'],
+  ])
   expect(calls[0]![2]).not.toContain('curl')
+})
+
+test('an install location is selected unprobed once PATH holds only other programs named delta', async () => {
+  const calls: string[][] = []
+  const installed = '/Applications/Delta.app/Contents/MacOS/delta'
+  const run = async (argv: readonly string[]) => {
+    calls.push([...argv])
+    return argv[0] === 'sh' ? output(`path /nix/bin/delta\npath /nix/bin/delta\ninstalled ${installed}\n`) : gitDelta()
+  }
+  expect(await new DeltaCli().resolve(run)).toBe(installed)
+  expect(calls.slice(1)).toEqual([['/nix/bin/delta', '--json', 'thread', 'contract']])
+})
+
+test('only other programs named delta on PATH leave the CLI missing and name them', async () => {
+  const run = async (argv: readonly string[]) => argv[0] === 'sh' ? output('path /nix/bin/delta\n') : gitDelta()
+  await expect(new DeltaCli().resolve(run))
+    .rejects.toThrow("Delta CLI is missing. /nix/bin/delta is another program named delta, not Zed's Delta CLI.")
 })
 
 test('resume never installs, but explicit setup after missing discovery does', async () => {
   const calls: string[][] = []
   const run = async (argv: readonly string[]) => {
     calls.push([...argv])
-    return argv[2]!.includes('--non-interactive') ? output('/installed/delta\n') : output('', 3)
+    return argv[2]!.includes('--non-interactive') ? output('/installed/delta\n') : output('')
   }
   const cli = new DeltaCli()
   await expect(cli.resolve(run)).rejects.toThrow(Error)
@@ -39,7 +59,7 @@ test('concurrent setup shares installation and failure; later retry succeeds', a
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
   const run = async (argv: readonly string[]) => {
-    if (!argv[2]!.includes('--non-interactive')) return output('', 3)
+    if (!argv[2]!.includes('--non-interactive')) return output('')
     installations++
     await held
     return installations === 1 ? output('', 1, 'download failed') : output('/installed/delta\n')
@@ -59,7 +79,7 @@ test('discovery failures and malformed paths never authorize installation', asyn
   let calls = 0
   const run = async () => {
     calls++
-    return calls === 1 ? output('', 1, 'permission denied') : output('/delta\nunexpected output\n')
+    return calls === 1 ? output('', 1, 'permission denied') : output('installed relative/delta\n')
   }
   const cli = new DeltaCli()
   await expect(cli.resolve(run, true)).rejects.toThrow(Error)
@@ -68,18 +88,23 @@ test('discovery failures and malformed paths never authorize installation', asyn
   expect(calls).toBe(2)
 })
 
-test('Windows discovery selects the first native absolute path without a shell', async () => {
+test('Windows discovery selects the first PATH program that answers as Delta, without a shell', async () => {
   for (const path of ['C:\\Program Files\\Delta\\delta.exe', '\\\\server\\tools\\delta.exe']) {
     const calls: string[][] = []
     const run = async (argv: readonly string[]) => {
       calls.push([...argv])
-      return output(`${path}\r\nC:\\other\\delta.exe\r\n`)
+      if (argv[0] === 'where.exe') return output(`C:\\scoop\\shims\\delta.exe\r\n${path}\r\nC:\\other\\delta.exe\r\n`)
+      return argv[0] === 'C:\\scoop\\shims\\delta.exe' ? gitDelta() : contract()
     }
     const cli = new DeltaCli()
     const windows = { exists: async () => { throw new Error('PATH must win over registry lookup') } }
     expect(await cli.resolve(run, true, undefined, windows)).toBe(path)
     expect(await cli.resolve(run, false, undefined, windows)).toBe(path)
-    expect(calls).toEqual([['where.exe', '$PATH:delta.exe']])
+    expect(calls).toEqual([
+      ['where.exe', '$PATH:delta.exe'],
+      ['C:\\scoop\\shims\\delta.exe', '--json', 'thread', 'contract'],
+      [path, '--json', 'thread', 'contract'],
+    ])
   }
 })
 
@@ -189,6 +214,15 @@ test('Windows installation failure is retryable and never caches a CLI', async (
       .rejects.toThrow(Error)
   expect(installations).toBe(2)
 })
+
+/** How git-delta, the diff pager, answers a Delta command: it rejects `--json`. */
+function gitDelta() {
+  return output('', 2, "error: unexpected argument '--json' found")
+}
+
+function contract() {
+  return output('{"operation":"contract","min":8,"max":9}\n')
+}
 
 function output(stdout: string, exitCode = 0, stderr = '') {
   return { stdout, exitCode, stderr, isStdoutTruncated: false, isStderrTruncated: false }

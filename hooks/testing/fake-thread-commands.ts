@@ -1135,12 +1135,16 @@ export function fakeThreads(hostOn: On, options: {
         message: `Delta plugin ${fake.pluginInstalledVersion} is installed.` }))
     }
     if (argv[0] === 'where.exe') return output(`${WINDOWS_DELTA}\r\n`)
+    // Discovery asks a CLI found on PATH whether it is Delta before selecting it.
+    if (argv[0] === WINDOWS_DELTA && argv.slice(1).join(' ') === '--json thread contract')
+      return output(JSON.stringify(cliFixture('contract', {})))
     if (argv[0] === 'sh') {
       const discovery = !argv[2]?.includes('--non-interactive')
       if (discovery && e.init?.timeoutMs === 5_000) fake.updateDiscoveries++
       else fake.cliSetups.push(discovery ? 'discover' : 'install')
       await fake.holdCliSetup?.(!discovery)
-      if (discovery) return fake.cliMissing ? output('', 3) : output('/selected/delta\n')
+      // The fake's CLI sits at an install location, which discovery selects without probing it.
+      if (discovery) return fake.cliMissing ? output('') : output('installed /selected/delta\n')
       fake.cliMissing = false
       return output('/selected/delta\n')
     }
