@@ -18,7 +18,7 @@ class CliSetup(unittest.TestCase):
         self.home = Path(self.temporary.name)
         self.bin = self.home / "bin"
         self.bin.mkdir()
-        for tool in ("sh", "mkdir", "rmdir", "rm", "mktemp", "dirname", "basename"):
+        for tool in ("sh", "mkdir", "rmdir", "rm", "mktemp"):
             (self.bin / tool).symlink_to(shutil.which(tool))
         self.env = {**os.environ, "HOME": str(self.home), "PATH": str(self.bin)}
         self.write(self.bin / "uname", '#!/bin/sh\nprintf "Linux\\n"\n')
@@ -27,8 +27,9 @@ class CliSetup(unittest.TestCase):
         def shell(name):
             text = re.search(rf"const {name} = `\n(.*?)\n`", source, re.S)[1]
             return text.replace("\\\\", "\\").replace("\\${", "${")
-        self.discover = shell("discover")
-        self.install = shell("install").replace("${discover}", self.discover)
+        locations = shell("installLocations")
+        self.discover = shell("discover").replace("${installLocations}", locations)
+        self.install = shell("install").replace("${installLocations}", locations)
 
     def write(self, path, text="#!/bin/sh\nexit 0\n"):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,26 +37,35 @@ class CliSetup(unittest.TestCase):
         path.chmod(0o755)
 
     def run_shell(self, script):
-        return subprocess.run(["/bin/sh", "-c", script], env=self.env,
+        return subprocess.run(["/bin/sh", "-c", script], env=self.env, cwd=self.home,
                               capture_output=True, text=True, timeout=10)
 
-    def test_precedence_fallback_and_locked_recheck(self):
+    def test_lists_path_then_install_locations_and_rechecks_only_installs(self):
         fallback = self.home / ".local/delta.app/bin/delta"
         self.write(fallback)
+        other = self.home / "other bin/delta"
+        self.write(other)
         selected = self.bin / "delta"
         self.write(selected)
-        self.assertEqual(self.run_shell(self.discover).stdout, f"{selected}\n")
-        selected.unlink()
-        self.assertEqual(self.run_shell(self.discover).stdout, f"{fallback}\n")
+        self.write(self.home / "relative/delta")
+        (self.home / "not executable").mkdir()
+        (self.home / "not executable/delta").write_text("")
+        self.env["PATH"] = f"relative:{self.bin}/:{self.home}/not executable:{other.parent}:{self.bin}"
+        self.assertEqual(self.run_shell(self.discover).stdout,
+                         f"path {selected}\npath {other}\npath {selected}\ninstalled {fallback}\n")
+        # A delta on PATH was already passed over, so only an install location ends the install.
         result = self.run_shell(self.install)
         self.assertEqual((result.returncode, result.stdout), (0, f"{fallback}\n"))
         self.assertFalse((self.home / "downloads").exists())
         self.assertFalse((self.home / ".cache/delta-claude-install.lock").exists())
         fallback.unlink()
+        self.assertEqual(self.run_shell(self.install).returncode, 22)
         self.write(self.bin / "uname", '#!/bin/sh\nprintf "Darwin\\n"\n')
+        self.env["PATH"] = str(self.bin)
+        selected.unlink()
         app = self.home / "Applications/Delta.app/Contents/MacOS/delta"
         self.write(app)
-        self.assertEqual(self.run_shell(self.discover).stdout, f"{app}\n")
+        self.assertEqual(self.run_shell(self.discover).stdout, f"installed {app}\n")
 
     def test_download_failure_cleans_lock(self):
         result = self.run_shell(self.install)
