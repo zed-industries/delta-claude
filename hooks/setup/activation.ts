@@ -540,6 +540,12 @@ export async function startSession(host: Host, session: string, loadedMidSession
     }
     if (policy.problem)
       await notifyOnce(host, `Delta settings at ${path} couldn't be used (${policy.problem}). Until it's fixed, only sessions you share with /delta-share sync. Run /delta-setup to replace it.`)
+    // Delta records a session it runs over ACP in its own thread, so recording it here would add a
+    // second thread. Delta's app sets this; a `claude` started in Delta's terminal doesn't have it.
+    if (newSession && recordsAutomatically(policy) && await host.env.deltaAcpSession()) {
+      await host.ui.log('Delta: Delta records this ACP session itself, so this session is not recorded automatically.', { to: 'debug' })
+      return
+    }
     if (newSession && recordsAutomatically(policy) && await joinedBindingAt(host, root))
       await notifyOnce(host, `${root} is a worktree of a Delta thread a Claude session joined, so this session isn't recorded automatically. Run /delta-join with that thread's link to record in it.`)
     else if (newSession && recordsAutomatically(policy))

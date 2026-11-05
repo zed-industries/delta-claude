@@ -112,6 +112,16 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
+  test('a session Delta runs over ACP never activates, since Delta records it in its own thread', async ($, on) => {
+    const fake = fakeThreads(on, { env: { DELTA_ACP_SESSION: '1' } })
+    fake.files.set(POLICY, policy('private', 'org-1'))
+    await startAuto($, fake)
+    expect(fake.server.thread).toBeUndefined()
+    expect(fake.operations()).not.toContain('create')
+    expect(binding(fake)).toBeUndefined()
+    fake.expectClean()
+  })
+
   test('a clear session activates and uploads to the organization', async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('organization', 'org-1'))
