@@ -78,6 +78,7 @@ function hostOf($: EngineInterface): Host {
     env: {
       claudeCodeRemote: () => $.env.get('CLAUDE_CODE_REMOTE'),
       claudeConfigDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
+      deltaAcpSession: () => $.env.get('DELTA_ACP_SESSION'),
       disableNonessentialTraffic: () => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'),
       home: () => $.env.get('HOME'),
       os: () => $.env.get('OS'),

@@ -19,6 +19,8 @@ export type Host = {
   env: {
     claudeCodeRemote(): Promise<string | undefined>
     claudeConfigDir(): Promise<string | undefined>
+    /** Set when Delta runs this session over ACP and records it itself. */
+    deltaAcpSession(): Promise<string | undefined>
     disableNonessentialTraffic(): Promise<string | undefined>
     home(): Promise<string | undefined>
     os(): Promise<string | undefined>
