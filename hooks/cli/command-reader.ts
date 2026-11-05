@@ -117,7 +117,9 @@ export async function readMountReady(
       const line = stdout.slice(0, newline).trim()
       let response: unknown
       try { response = JSON.parse(line) }
-      catch { throw new DeltaCommandError('process_failed', `${name}: invalid readiness receipt`) }
+      // Readiness is one JSON line, but CLI failures may be pretty-printed. Collect those until
+      // exit, where the complete error envelope is decoded and stderr remains the fallback.
+      catch { continue }
       const failure = commandErrorFromEnvelope(isJsonObject(response) ? response.error : undefined, name)
       if (failure) throw failure
       ready = true
