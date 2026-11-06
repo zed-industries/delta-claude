@@ -28,7 +28,10 @@ describe('conversation', () => {
         toolCallId: 'call-1', name: 'edit', title: 'Edit src/main.rs', status: 'completed',
         rawInput: { path: 'src/main.rs' },
         content: [
-          { type: 'diff', path: '/repo/src/main.rs', oldText: 'a', newText: 'b', patch: '@@ -1 +1 @@\n-a\n+b' },
+          {
+            type: 'diff', changes: [{ operation: 'modify', path: '/repo/src/main.rs' }],
+            patch: { format: 'git_patch', text: '@@ -1 +1 @@\n-a\n+b' },
+          },
           { type: 'content', content: { type: 'text', text: 'Applied 1 edit' } },
           { type: 'terminal', terminalId: 'term-1' },
         ],
@@ -143,7 +146,10 @@ describe('conversation', () => {
     const edited = tool({
       toolCallId: 'call-1', name: 'edit', title: 'Edit src/main.rs', status: 'completed',
       rawInput: { file_path: 'src/main.rs' },
-      content: [{ type: 'diff', path: '/repo/src/main.rs', patch: '@@ -1 +1 @@\n-a\n+b' }],
+      content: [{
+        type: 'diff', changes: [{ operation: 'modify', path: '/repo/src/main.rs' }],
+        patch: { format: 'git_patch', text: '@@ -1 +1 @@\n-a\n+b' },
+      }],
       rawOutput: 'o'.repeat(5_000),
     })
     expect(edited).toContain('Claude')
