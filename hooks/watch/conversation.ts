@@ -242,8 +242,11 @@ export function renderItem(item: WatchItem, thread: string, edited = false): str
     if (tool.rawInput !== undefined) sections.push(`Input: ${clip(jsonText(tool.rawInput), 2_000)}`)
     for (const entry of Array.isArray(tool.content) ? tool.content.filter(isJsonObject) : []) {
       if (entry.type === 'diff') {
-        const patch = typeof entry.patch === 'string' ? entry.patch : typeof entry.newText === 'string' ? entry.newText : ''
-        sections.push(`Changed ${entry.path ?? 'a file'}:\n${clip(patch, SECTION_LIMIT)}`)
+        // An ACP v2 diff: `changes` names each file and `patch` optionally carries its git patch text.
+        const paths = (Array.isArray(entry.changes) ? entry.changes : []).flatMap((change) =>
+          isJsonObject(change) && typeof change.path === 'string' ? [change.path] : [])
+        const patch = isJsonObject(entry.patch) && typeof entry.patch.text === 'string' ? entry.patch.text : ''
+        sections.push(`Changed ${paths.join(', ') || 'a file'}:\n${clip(patch, SECTION_LIMIT)}`)
       } else if (entry.type === 'terminal') sections.push(`Terminal ${entry.terminalId ?? ''}`.trim())
       else if (entry.type === 'content') {
         const block = entry.content
