@@ -6,11 +6,11 @@ import type { ApiMessage, FsEntry, Timer } from 'claude-code'
 import { outbox } from '../setup/activation'
 import { restoreBinding } from '../core/binding'
 import { type ChildBinding, childKey, childName, childOutbox, recordsSubagent, sentBy } from './children'
-import { capturedMessage, messageUpdates, resultUpdate, toolInfo } from '../recording/content'
+import { capturedMessage, isOmittedTool, messageUpdates, resultUpdate, toolInfo } from '../recording/content'
 import { isJsonObject } from '../core/json'
 import {
-  appendPending, collectAcknowledgedOutbox, liveActivity, type RecordBody, recordsOffline, rememberToolResults,
-  runningUpdate, stageOutboxRecord,
+  appendPending, collectAcknowledgedOutbox, liveActivity, type RecordBody, recordsOffline, recordsPlans,
+  rememberToolResults, runningUpdate, stageOutboxRecord,
 } from '../recording/delivery'
 import { deliveryRetryDelay } from '../recording/delivery-policy'
 import {
@@ -321,9 +321,11 @@ export async function endChildTurn(host: Host, child: ChildRuntime, turnId: stri
 export async function recordChildMessage(host: Host, child: ChildRuntime, message: ApiMessage, id: string) {
   let binding = await loadChild(host, child)
   if (binding.awaitingSnapshot) return
-  rememberToolResults(child.tools, message)
+  const plans = recordsPlans(child.session)
+  rememberToolResults(child.tools, message, plans)
   const root = childRoot(binding)
-  const updates = messageUpdates(message, id, child.tools.structuredResults, { root, omitted: child.tools.omitted })
+  const updates = messageUpdates(message, id, child.tools.structuredResults,
+    { root, omitted: child.tools.omitted, plans })
     .map((update) => liveActivity(sentBy(update, child.sender)))
   const prompt = message.role === 'user' && message.content.some((block) => block.type !== 'tool_result')
   const turn = binding.execution?.sequence
@@ -355,7 +357,9 @@ export async function recordChildMessage(host: Host, child: ChildRuntime, messag
 async function recordChildToolResult(host: Host, child: ChildRuntime,
     call: { tool: string; tool_use_id: string; input: unknown }, result: unknown, isError: boolean) {
   let binding = await loadChild(host, child)
-  if (binding.awaitingSnapshot || child.tools.omitted.has(call.tool_use_id)) return
+  // The call's row may not be stored yet, so the tool's name decides its omission too.
+  if (binding.awaitingSnapshot || child.tools.omitted.has(call.tool_use_id) ||
+      isOmittedTool(call.tool, recordsPlans(child.session))) return
   const root = childRoot(binding)
   const update = resultUpdate(call.tool_use_id, call.tool, result, isError, root)
   child.tools.structuredResults.set(call.tool_use_id, update)
@@ -380,9 +384,11 @@ export async function snapshotChild(host: Host, child: ChildRuntime, binding: Ch
   const root = childRoot(binding)
   const tools = new ToolRecords()
   const turnSequence = binding.execution?.sequence
+  const plans = recordsPlans(child.session)
   for (const [index, message] of snapshotMessages(messages).entries()) {
-    rememberToolResults(tools, message)
-    for (const update of messageUpdates(message, `snapshot:${index}`, undefined, { root, omitted: tools.omitted }))
+    rememberToolResults(tools, message, plans)
+    const updates = messageUpdates(message, `snapshot:${index}`, undefined, { root, omitted: tools.omitted, plans })
+    for (const update of updates)
       binding = await stageChildRecord(host, binding, { update: sentBy(update, child.sender), ...turnSequence ? { turnSequence } : {} })
   }
   delete binding.awaitingSnapshot

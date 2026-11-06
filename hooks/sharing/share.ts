@@ -5,7 +5,9 @@
 import { AccessRequiredError, requireAuthentication } from '../cli/auth'
 import { clearProgress, finishProgress, setProgress, threadOrganization } from '../band/band'
 import { messageUpdates, resultUpdate } from '../recording/content'
-import { drain, flushUnsaved, recordsOffline, rememberToolResults, stageRecord, verifyCheckout } from '../recording/delivery'
+import {
+  drain, flushUnsaved, recordsOffline, recordsPlans, rememberToolResults, stageRecord, verifyCheckout,
+} from '../recording/delivery'
 import {
   type CommandForm, requireContract, resolveCli, threadCreate, threadInvite, threadShare, threadStatus,
 } from '../cli/delta-cli'
@@ -159,10 +161,11 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
       await serial(async () => {
         let state = await load(host, session)
         await assertShareSession(host, request)
+        const plans = recordsPlans(session)
         for (const [index, message] of snapshot.entries()) {
-          rememberToolResults(runtime.tools, message)
+          rememberToolResults(runtime.tools, message, plans)
           const updates = messageUpdates(message, `snapshot:${index}`, runtime.tools.structuredResults,
-            { root, omitted: runtime.tools.omitted })
+            { root, omitted: runtime.tools.omitted, plans })
           for (const update of updates) state = await stageRecord(host, state, { update })
         }
         // Commit the complete immutable plan and its pending receipts together. Until

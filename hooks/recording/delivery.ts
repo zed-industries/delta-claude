@@ -23,7 +23,7 @@ import type { Host } from '../core/host'
 import { children, deliverChild, stopReasonOf } from '../subagents/subagents'
 import {
   appendFailure, classifyCommandFailure, DeltaCommandError, DeltaSendError, JoinNotReadyError, permanentFailureAdvice,
-  type ThreadTurn, validateJoinedMounts, validateThreadCheckout, validateThreadFrontier,
+  PLAN_CONTRACT_VERSION, type ThreadTurn, validateJoinedMounts, validateThreadCheckout, validateThreadFrontier,
 } from '../cli/thread-commands'
 import { errorText } from '../core/text'
 import type { ToolRecords } from './tool-records'
@@ -61,11 +61,16 @@ export function recordsOffline(session: string, binding: Binding | undefined): b
   return !!binding && !binding.joined && verifiedContract(session) !== undefined
 }
 
-export function rememberToolResults(tools: ToolRecords, message: ApiMessage) {
+/** Whether this session records TodoWrite as its turn's plan: its CLI accepts `plan_update`. */
+export function recordsPlans(session: string): boolean {
+  return (verifiedContract(session) ?? 0) >= PLAN_CONTRACT_VERSION
+}
+
+export function rememberToolResults(tools: ToolRecords, message: ApiMessage, plans = false) {
   for (const block of message.content) {
     if (block.type === 'tool_result' && typeof block.tool_use_id === 'string')
       tools.toolResults.set(block.tool_use_id, block)
-    else if (block.type === 'tool_use' && typeof block.id === 'string' && isOmittedTool(block.name))
+    else if (block.type === 'tool_use' && typeof block.id === 'string' && isOmittedTool(block.name, plans))
       tools.omitted.add(block.id)
   }
 }
@@ -135,6 +140,9 @@ export async function stageRecord(host: Host, binding: Binding, body: RecordBody
 export async function stageOutboxRecord<T extends { next: number; pending: Entry[] }>(
   host: Host, folder: string, binding: T, body: RecordBody,
 ): Promise<T> {
+  // Delta shows a plan only on a turn and rejects one outside it, which would stop recording, so a
+  // plan from history outside any turn, such as a share's snapshot, is left out.
+  if (body.update?.sessionUpdate === 'plan_update' && body.turnSequence === undefined) return binding
   const sequence = binding.next
   const line = JSON.stringify({ schemaVersion: 1, sequence, ...body }) + '\n'
   const files: string[] = []
@@ -830,9 +838,10 @@ export async function recordRow(host: Host, e: HookEvent<'session.append'>, next
     if (!('deny' in stored) && runtime.binding?.snapshot) {
       const message = capturedMessage(stored.message, e.door)
       if (message) {
-        rememberToolResults(runtime.tools, message)
+        const plans = recordsPlans(session)
+        rememberToolResults(runtime.tools, message, plans)
         const updates = messageUpdates(message, stored.uuid, runtime.tools.structuredResults,
-          { root: boundDirectory(runtime.binding), omitted: runtime.tools.omitted }).map(liveActivity)
+          { root: boundDirectory(runtime.binding), omitted: runtime.tools.omitted, plans }).map(liveActivity)
         // Output from the turn Claude is running waits for that turn's scoped start record, so
         // it names its own turn rather than the turn before it. The prompt starting a turn is
         // held the same way, because its start record is written after its row.
@@ -878,7 +887,7 @@ export async function recordToolCall(host: Host, e: HookEvent<'tool.call'>, next
   const turnSequence = contentTurn(runtime)
   if (e.tool_use_id && turnSequence !== undefined) runtime.tools.toolTurns.set(e.tool_use_id, turnSequence)
   const hold = turnSequence === undefined && runtime.currentTurnId !== undefined
-  if (e.tool_use_id && isOmittedTool(e.tool)) runtime.tools.omitted.add(e.tool_use_id)
+  if (e.tool_use_id && isOmittedTool(e.tool, recordsPlans(session))) runtime.tools.omitted.add(e.tool_use_id)
   try {
     const result = await next(e)
     await waitForSnapshot()
