@@ -195,6 +195,8 @@ let endedSession: string | undefined
 let successor: 'clear' | 'resume' | 'join' | undefined
 /** The starts being worked out, so two hooks that notice one session wait for the same work. */
 const noticing = new Map<string, Promise<boolean>>()
+/** The session starts {@link noticeSession} began and that are still running, for {@link sessionBegun}. */
+const beginnings = new Map<string, Promise<unknown>>()
 /** How often a session's transcript was looked for and not found, which stops the looking at {@link MAX_TRANSCRIPT_MISSES}. */
 const transcriptMisses = new Map<string, number>()
 const MAX_TRANSCRIPT_MISSES = 3
@@ -240,7 +242,19 @@ export async function noticeSession(host: Host, session?: string) {
   noticing.set(id, deciding)
   let begins: boolean
   try { begins = await deciding } finally { noticing.delete(id) }
-  if (begins) void beginSession(host, id).catch((error) => report(host, error))
+  if (begins) {
+    const beginning = beginSession(host, id).catch((error) => report(host, error)).finally(() => beginnings.delete(id))
+    beginnings.set(id, beginning)
+  }
+}
+
+/**
+ * Wait for the start {@link noticeSession} began for `session`, which activates it unless something
+ * already had. Work that needs the session activated waits for this rather than activating beside it,
+ * as two activations of one session stop each other.
+ */
+export async function sessionBegun(session: string) {
+  await beginnings.get(session)
 }
 
 /**
