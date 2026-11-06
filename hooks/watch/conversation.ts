@@ -4,6 +4,7 @@ import type { WatchComment, WatchCommentTarget, WatchItem } from '../cli/thread-
 
 /** Kinds shown in the pane and announced as transcript rows. */
 const MESSAGE_KINDS = new Set(['user_message', 'agent_message', 'cross_agent_message'])
+const EVENT_KINDS = new Set(['land_result', 'local_changes_forked', 'subthread_event'])
 /** Remote agents' thinking is for the person: shown in the pane and announced, never given to Claude. */
 export const THOUGHT_KIND = 'agent_thought'
 /** Each large section of a rendered item, such as tool output or one patch, keeps at most this much. */
@@ -62,7 +63,7 @@ export function isMessageItem(item: WatchItem): boolean {
 
 /** Structured thread activity is shown as an event, not attributed to the surrounding agent turn. */
 export function isEventItem(item: WatchItem): boolean {
-  return (item.kind === 'subthread_event' || item.kind === 'land_result') && !!itemText(item)?.trim()
+  return EVENT_KINDS.has(item.kind) && !!itemText(item)?.trim()
 }
 
 /** Whether an item is drawn for the person as the plugin's own command output row. */
@@ -109,7 +110,7 @@ export function itemMarkdown(item: WatchItem, thread: string): string {
 /** Event storage can include model-only instructions after its human-readable headline. */
 function eventText(item: WatchItem): string {
   const text = itemText(item) ?? ''
-  return (text.split(/\n<(?:subthread-event|review-thread-event)\b/, 1)[0] ?? '').trim().replace(/:$/, '')
+  return (text.split(/\n<(?:subthread-event|review-thread-event|local-changes-forked)\b/, 1)[0] ?? '').trim().replace(/:$/, '')
 }
 
 /** Emphasis, code and heading markers removed, since a `$.ui.log` line draws them literally. */
