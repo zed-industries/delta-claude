@@ -258,20 +258,46 @@ export function toolInfo(name: string, input: unknown, root?: string): { title: 
 /** Delta has no plan mode, so Claude's plan approvals stay out of its transcript. */
 const OMITTED_TOOLS = new Set(['ExitPlanMode'])
 
-/** Whether calls to the tool `name` are left out of Delta's transcript. */
-export function isOmittedTool(name: unknown): boolean {
-  return typeof name === 'string' && OMITTED_TOOLS.has(name)
+/**
+ * Whether calls to the tool `name` are left out of Delta's transcript. With `plans`, TodoWrite is
+ * too: its todos are recorded as the turn's plan instead (see `planUpdate`).
+ */
+export function isOmittedTool(name: unknown, plans = false): boolean {
+  return typeof name === 'string' && (OMITTED_TOOLS.has(name) || (plans && name === 'TodoWrite'))
+}
+
+const TODO_STATUSES = ['pending', 'in_progress', 'completed']
+
+/**
+ * A TodoWrite call's todos as the turn's plan, as Claude's ACP adapter reports them (`planEntries`
+ * in claude-agent-acp): an in-progress todo shows its `activeForm`, and every entry has medium
+ * priority. Claude keeps one list per session, so each update replaces the plan `plan`. Undefined
+ * for input without a todo list. A malformed todo is left out, since Delta rejects a record with an
+ * entry it can't decode.
+ */
+export function planUpdate(input: unknown): Update | undefined {
+  const todos = object(input)?.todos
+  if (!Array.isArray(todos)) return
+  const entries = todos.flatMap((todo) => {
+    const value = object(todo)
+    if (typeof value?.content !== 'string' || !TODO_STATUSES.includes(value.status as string)) return []
+    const active = value.status === 'in_progress' && typeof value.activeForm === 'string' && value.activeForm
+      ? value.activeForm : undefined
+    return [{ content: active ?? value.content, priority: 'medium', status: value.status }]
+  })
+  return { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'plan', entries } }
 }
 
 /**
  * Convert normalized Messages API rows while retaining opaque provider thinking metadata.
  *
  * Paths in tool titles are shown relative to `root`, and results of the calls in `omitted` are
- * left out along with the omitted calls themselves.
+ * left out along with the omitted calls themselves. With `plans`, a TodoWrite call becomes a
+ * `plan_update` rather than a tool call.
  */
 export function messageUpdates(
   message: ApiMessage, id: string, structuredResults?: ReadonlyMap<string, Update>,
-  { root, omitted }: { root?: string; omitted?: ReadonlySet<string> } = {},
+  { root, omitted, plans = false }: { root?: string; omitted?: ReadonlySet<string>; plans?: boolean } = {},
 ): Update[] {
   const updates: Update[] = []
   let content: RecordValue[] = []
@@ -296,7 +322,12 @@ export function messageUpdates(
         _meta: { claudeCode: { block } },
       })
     } else if (block.type === 'tool_use' && typeof block.id === 'string') {
-      if (isOmittedTool(block.name)) continue
+      const plan = plans && block.name === 'TodoWrite' ? planUpdate(block.input) : undefined
+      if (plan) {
+        flush()
+        updates.push(plan)
+      }
+      if (isOmittedTool(block.name, plans)) continue
       flush()
       const name = jsonText(block.name ?? 'Tool')
       updates.push({

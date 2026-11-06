@@ -68,6 +68,30 @@ describe('content', () => {
     ] }, 'm2', undefined, { omitted: new Set(['plan']) })).toEqual([])
   })
 
+  test("records a TodoWrite as the turn's plan, as Claude's ACP adapter does, leaving malformed todos out", () => {
+    const todos = { todos: [
+      { content: 'Read it', activeForm: 'Reading it', status: 'completed' },
+      { content: 'Fix it', activeForm: 'Fixing it', status: 'in_progress' },
+      { content: 'Ship it', status: 'in_progress' },
+      { content: 'Unknown', status: 'blocked' },
+      'not a todo',
+    ] }
+    const todoCall = (input: unknown) =>
+      ({ role: 'assistant' as const, content: [{ type: 'tool_use', id: 'todos', name: 'TodoWrite', input }] })
+    const call = todoCall(todos)
+    expect(messageUpdates(call, 'm1', undefined, { plans: true })).toEqual([{
+      sessionUpdate: 'plan_update',
+      plan: { type: 'items', planId: 'plan', entries: [
+        { content: 'Read it', priority: 'medium', status: 'completed' },
+        { content: 'Fixing it', priority: 'medium', status: 'in_progress' },
+        { content: 'Ship it', priority: 'medium', status: 'in_progress' },
+      ] },
+    }])
+    // Without plans the call stays a tool call; with them, input that is no todo list records nothing.
+    expect(messageUpdates(call, 'm1')[0]).toMatchObject({ sessionUpdate: 'tool_call_update', toolCallId: 'todos' })
+    expect(messageUpdates(todoCall({}), 'm1', undefined, { plans: true })).toEqual([])
+  })
+
   test('preserves interleaved complete segments and opaque thought metadata', () => {
     const rows = messageUpdates({ role: 'assistant', content: [
       { type: 'text', text: 'before' },

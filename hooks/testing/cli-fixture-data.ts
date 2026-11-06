@@ -5,7 +5,7 @@ export const cliFixtureData: Record<string, any> = {
   "thread-append.duplicate": {"operation":"appended","thread_id":"thread_example","sequence":1,"next_sequence":3,"duplicate":true,"disposition":"duplicate","turn_sequence":null,"version":"actor.42"},
   "thread-append.fenced": {"operation":"appended","thread_id":"thread_example","sequence":2,"next_sequence":3,"duplicate":false,"disposition":"fenced","turn_sequence":1,"version":"actor.42"},
   "thread-append.recorded": {"operation":"appended","thread_id":"thread_example","sequence":1,"next_sequence":2,"duplicate":false,"disposition":"recorded","turn_sequence":null,"version":"actor.42"},
-  "thread-contract": {"operation":"contract","min":8,"max":9},
+  "thread-contract": {"operation":"contract","min":8,"max":10},
   "thread-create.child": {"operation":"created","thread_id":"child_example","created":true,"reference":"share_example#s=AbCdEf12"},
   "thread-create": {"operation":"created","thread_id":"thread_example","created":true},
   "thread-invite": {"operation":"invited","thread_id":"thread_example","share_id":"share_example","url":"https://delta.dev/join/share_example","results":[{"status":"invited","email":"ada@example.com"},{"status":"failed","email":"bo@example.com","reason":"already_member","message":"already a member"}]},

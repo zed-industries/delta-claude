@@ -1155,6 +1155,53 @@ describe('recording', () => {
     fake.expectClean()
   })
 
+  for (const { max, plans } of [{ max: 10, plans: true }, { max: 9, plans: false }]) test(
+    `a TodoWrite records its turn's plan where the CLI accepts plans (max ${max})`, async ($, on) => {
+    const todos = (status: string) => ({ todos: [{ content: 'Fix it', activeForm: 'Fixing it', status }] })
+    // A todo list from before the share is history outside any turn, which Delta shows no plan for.
+    const fake = fakeThreads(on, { messages: [
+      userText('one'),
+      { role: 'assistant', content: [
+        { type: 'tool_use', id: 'old-todos', name: 'TodoWrite', input: todos('pending') },
+      ] },
+    ] as never })
+    fake.contractRange = { min: 8, max }
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.prompt.submit(prompt('fix it'))
+    await $.session.append({ door: 'prompt', uuid: 'todo-user',
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'fix it' }] } } as never)
+    await $.turn.start(turnStart('todo-turn'))
+    await $.session.append({ door: 'response', uuid: 'todo-agent',
+      message: { type: 'assistant', role: 'assistant', content: [
+        { type: 'tool_use', id: 'todos', name: 'TodoWrite', input: todos('in_progress') },
+      ] } } as never)
+    await $.tool.call({ tool: 'TodoWrite', tool_use_id: 'todos', ...todos('in_progress') } as never)
+    await $.session.append({ door: 'tool-result', uuid: 'todo-result',
+      message: { type: 'user', role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'todos', content: 'Todos have been modified successfully' },
+      ] } } as never)
+    const recorded = plans ? 'plan_update' : 'tool_call_update'
+    await fake.settleUntil(() => fake.updates().some((record) =>
+      record.update?.sessionUpdate === recorded && record.turnSequence !== undefined))
+    const start = fake.updates().find((record) => record.update?.state === 'running')!.sequence
+    const todoRecords = fake.updates().filter((record) => record.update?.sessionUpdate === 'plan_update' ||
+      ['old-todos', 'todos'].includes(record.update?.toolCallId))
+    if (plans) {
+      expect(todoRecords).toEqual([expect.objectContaining({ turnSequence: start, update: {
+        sessionUpdate: 'plan_update',
+        plan: { type: 'items', planId: 'plan', entries: [
+          { content: 'Fixing it', priority: 'medium', status: 'in_progress' },
+        ] },
+      } })])
+    } else {
+      // An older Delta rejects plans, so the call stays a tool call there.
+      expect(todoRecords.map((record) => [record.update?.toolCallId, record.update?.sessionUpdate]))
+        .toEqual(expect.arrayContaining([['old-todos', 'tool_call_update'], ['todos', 'tool_call_update']]))
+    }
+    fake.expectClean()
+  })
+
   test('a failed append shows the CLI error in the transcript once, keeps the record queued, and retries it', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
@@ -3386,7 +3433,7 @@ describe('the recording contract', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 10, max: 11 }
+    fake.contractRange = { min: 11, max: 12 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -3423,7 +3470,7 @@ describe('the recording contract', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 10, max: 11 }
+    fake.contractRange = { min: 11, max: 12 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
@@ -3445,7 +3492,7 @@ describe('the recording contract', () => {
     const checksAtAppend: number[] = []
     fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
     // An incompatible CLI is refused before anything is appended.
-    fake.contractRange = { min: 10, max: 11 }
+    fake.contractRange = { min: 11, max: 12 }
     await $.session.start(sessionStart)
     await fake.settle()
     expect(checksAtAppend).toEqual([])
