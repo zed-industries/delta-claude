@@ -561,10 +561,18 @@ export function fakeThreads(hostOn: On, options: {
     contractUnknownSubcommand: false,
     /** Every `thread contract` the plugin asked for, counted apart from the recording commands. */
     contractChecks: 0,
-    /** Every `thread capture` the plugin ran, as `[action, reference, tool_use_id]`, apart from the recording commands. */
+    /**
+     * Every `thread capture` the plugin ran, as `[action, reference, tool_use_id, time]`, apart from the recording
+     * commands. `time` is its `--started-at` or `--ended-at`.
+     */
     captures: [] as string[][],
-    /** Answers `thread capture` like a CLI that predates it: clap error on stderr, exit 2, no JSON. */
-    captureUnknownSubcommand: false,
+    /**
+     * Answers `thread capture` like a CLI that predates it, or predates its `--started-at` and `--ended-at`: clap
+     * error on stderr, exit 2, no JSON.
+     */
+    captureUnsupported: undefined as 'subcommand' | 'times' | undefined,
+    /** Holds every supported `thread capture`'s answer until it resolves, once the command is in `captures`. */
+    holdCaptures: undefined as Promise<void> | undefined,
     authCalls: [] as string[][],
     authReplies: [] as { status: string; [key: string]: unknown }[],
     holdAuth: undefined as Promise<void> | undefined,
@@ -1201,10 +1209,14 @@ export function fakeThreads(hostOn: On, options: {
     }
     // Capture runs around tool calls, so it is recorded apart from the recording commands.
     if (operation === 'capture') {
-      if (fake.captureUnknownSubcommand) return output('', 2, "error: unrecognized subcommand 'capture'")
       const [action, reference] = [parsed!.positionals[2]!, parsed!.positionals[3]!]
       const toolUseId = String(parsed!.options['--tool-use-id'])
-      fake.captures.push([action, reference, toolUseId])
+      fake.captures.push([action, reference, toolUseId,
+        String(parsed!.options[action === 'start' ? '--started-at' : '--ended-at'])])
+      if (fake.captureUnsupported === 'subcommand') return output('', 2, "error: unrecognized subcommand 'capture'")
+      if (fake.captureUnsupported === 'times')
+        return output('', 2, "error: unexpected argument '--started-at' found")
+      await fake.holdCaptures
       return output(JSON.stringify({
         operation: 'capture', thread_id: fake.server.thread, tool_use_id: toolUseId,
         capturing: action === 'start', checkouts: action === 'start' ? 1 : 0,
@@ -1951,7 +1963,7 @@ function cliArguments(argv: readonly string[]) {
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
     if (argument === '--json' || argument === '--force' || argument === '--join' || argument === '--existing-checkout' || argument === '--shared-worktrees' || argument === '--isolated-worktrees') { options[argument] = true; continue }
-    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name', '--tool-use-id'].includes(argument)) return undefined
+    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name', '--tool-use-id', '--started-at', '--ended-at'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined
     options[argument] = value

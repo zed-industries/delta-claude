@@ -1477,6 +1477,40 @@ describe('recording', () => {
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
     fake.expectClean()
   })
+
+  test('editing calls after the first run without waiting for Delta to capture them', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.tool.call(bash('first', 'echo first'))
+    await fake.settle()
+    let release!: () => void
+    fake.holdCaptures = new Promise<void>((resolve) => { release = resolve })
+    // Delta answers neither of this call's capture commands until released.
+    await $.tool.call(bash('second', 'echo second'))
+    await fake.settleUntil(() => fake.captures.length === 4)
+    release()
+    await fake.settle()
+    expect(fake.captures.map(([action, , toolUseId]) => [action, toolUseId]))
+      .toEqual([['start', 'first'], ['stop', 'first'], ['start', 'second'], ['stop', 'second']])
+    for (const [start, stop] of [fake.captures.slice(0, 2), fake.captures.slice(2)])
+      expect(Number(start![3])).toBeLessThanOrEqual(Number(stop![3]))
+    fake.expectClean()
+  })
+
+  for (const missing of ['subcommand', 'times'] as const)
+    test(`editing calls run uncaptured once the first finds the CLI lacks the capture ${missing}`, async ($, on) => {
+      const fake = fakeThreads(on)
+      fake.captureUnsupported = missing
+      await $.session.start(sessionStart)
+      await fake.share($)
+      await $.tool.call(bash('first', 'echo first'))
+      await $.tool.call(bash('second', 'echo second'))
+      await fake.settle()
+      expect(fake.captures.map(([action, , toolUseId]) => [action, toolUseId])).toEqual([['start', 'first']])
+      expect(fake.logs.join('\n')).not.toContain('attributing a tool call')
+      fake.expectClean()
+    })
 })
 
 describe('native turns', () => {
