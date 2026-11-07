@@ -260,6 +260,27 @@ export async function threadShare(
   return shared
 }
 
+/**
+ * Start or stop attributing the file edits `call.reference`'s mounted checkouts ingest to the producer
+ * `call.externalId`'s tool call `call.toolUseId`. Delta stops a capture itself once the process that
+ * started it exits. Returns how many checkouts are captured, or undefined from a CLI that predates
+ * `thread capture` (clap's error on stderr, nonzero exit, no JSON).
+ */
+export async function threadCapture(
+  host: Host, call: { reference: string; externalId: string; toolUseId: string }, action: 'start' | 'stop',
+  timeoutMs: number,
+): Promise<{ checkouts: number } | undefined> {
+  const name = `thread capture ${action}`
+  let result: ProcessRunResult
+  try {
+    result = await runJson(host, ['thread', 'capture', action, call.reference, '--source', 'claude-code',
+      '--external-id', call.externalId, '--tool-use-id', call.toolUseId], { timeoutMs })
+  } catch (error) { throw new DeltaCommandError('process_failed', `${name} did not finish (${errorText(error)})`) }
+  if (result.exitCode !== 0 && !result.stdout.trim()) return undefined
+  const answer = checkResult(result, name)
+  return { checkouts: typeof answer.checkouts === 'number' ? answer.checkouts : 0 }
+}
+
 /** Make an existing Cloud thread private without stopping its sync or removing invitations. */
 export async function threadUnshare(
   host: Host, thread: string, form?: CommandForm,

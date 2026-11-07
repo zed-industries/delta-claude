@@ -29,6 +29,7 @@ import type { Host } from '../core/host'
 import { snapshotMessages } from '../recording/snapshot'
 import { errorText } from '../core/text'
 import { CHILD_CONTRACT_VERSION, classifyCommandFailure, DeltaCommandError } from '../cli/thread-commands'
+import { capturesEdits, startCapture } from '../recording/edit-capture'
 import { ToolRecords } from '../recording/tool-records'
 import { recordThreadSummary } from '../recording/thread-summary'
 import { adoptThread, isAdoptionSpawn, reportClaudeRun } from './thread-runs'
@@ -951,7 +952,13 @@ export async function recordChildRow(host: Host, e: HookEvent<'session.append'>,
 
 /** A recorded subagent's tool call finished; its result is recorded on its thread. */
 export async function recordChildToolCall(host: Host, e: HookEvent<'tool.call'>, agentId: string, next: HookNext<'tool.call'>) {
-  const result = await next(e)
+  const editing = e.tool_use_id && capturesEdits(e.tool) ? await childFor(host, agentId) : undefined
+  const binding = editing && await loadChild(host, editing)
+  const stopCapture = editing && e.tool_use_id && binding?.thread && binding.reference
+    ? await startCapture(host, { reference: binding.reference, externalId: editing.agentId, toolUseId: e.tool_use_id })
+    : undefined
+  // Capture ends as the call does, so later edits are not the call's.
+  const result = await next(e).finally(() => stopCapture?.())
   const id = e.tool_use_id
   if (!id || !('result' in result) || result.result === undefined) return result
   const child = await childFor(host, agentId)

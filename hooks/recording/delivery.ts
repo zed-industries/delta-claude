@@ -26,6 +26,7 @@ import {
   PLAN_CONTRACT_VERSION, type ThreadTurn, validateJoinedMounts, validateThreadCheckout, validateThreadFrontier,
 } from '../cli/thread-commands'
 import { errorText } from '../core/text'
+import { capturesEdits, startCapture } from './edit-capture'
 import type { ToolRecords } from './tool-records'
 import { liveFor, rememberStatus } from '../watch/watch'
 import { settleRemote, storeShownRow } from '../watch/rows'
@@ -888,8 +889,15 @@ export async function recordToolCall(host: Host, e: HookEvent<'tool.call'>, next
   if (e.tool_use_id && turnSequence !== undefined) runtime.tools.toolTurns.set(e.tool_use_id, turnSequence)
   const hold = turnSequence === undefined && runtime.currentTurnId !== undefined
   if (e.tool_use_id && isOmittedTool(e.tool, recordsPlans(session))) runtime.tools.omitted.add(e.tool_use_id)
+  const binding = runtime.binding
+  const stopCapture = e.tool_use_id && capturesEdits(e.tool) && binding?.snapshot && binding.thread && !isPaused(runtime)
+    ? await startCapture(host, {
+      reference: binding.locator ?? binding.thread, externalId: producerOf(binding), toolUseId: e.tool_use_id,
+    })
+    : undefined
   try {
-    const result = await next(e)
+    // Capture ends as the call does, so later edits are not the call's.
+    const result = await next(e).finally(() => stopCapture?.())
     await waitForSnapshot()
     if (!runtime.binding?.snapshot || !e.tool_use_id || runtime.tools.omitted.has(e.tool_use_id) ||
         !('result' in result) || result.result === undefined) return result
