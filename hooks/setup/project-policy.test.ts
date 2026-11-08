@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { readProjectPolicy, serializeProjectPolicy } from './project-policy'
+import { readProjectPolicy, recordsAutomatically, serializeProjectPolicy, serializeStopped } from './project-policy'
 
 describe('project policy', () => {
   test('each kind of file reads as its effective policy, and unusable ones record manually', () => {
@@ -35,5 +35,26 @@ describe('project policy', () => {
     expect(readProjectPolicy(manual).policy).toEqual({ mode: 'manual', organization: 'org-2', configured: true })
     expect(JSON.parse(serializeProjectPolicy(JSON.parse(text), 'manual')))
       .toEqual({ unrelated: { keep: [1, 2] }, threads: { future: 'x', mode: 'manual' } })
+  })
+
+  test('a stopped file keeps its mode and team, records nothing automatically, and counts as configured', () => {
+    const stopped = readProjectPolicy('{"threads":{"mode":"private","organization":"org-1","stopped":true}}').policy
+    expect(stopped).toEqual({ mode: 'private', organization: 'org-1', configured: true, stopped: true })
+    expect(recordsAutomatically(stopped)).toBe(false)
+    // Stopping a checkout that was never set up is still a choice, so setup is not offered.
+    expect(readProjectPolicy('{"threads":{"stopped":true}}').policy).toEqual({ mode: 'manual', configured: true, stopped: true })
+    // Only `true` stops.
+    expect(readProjectPolicy('{"threads":{"mode":"private","organization":"org-1","stopped":"yes"}}').policy.stopped).toBeUndefined()
+  })
+
+  test('stopping and starting round-trip without losing the mode, the team, or unknown keys', () => {
+    const previous = { unrelated: 1, threads: { future: 'x', mode: 'organization', organization: 'org-1' } }
+    const stopped = serializeStopped(previous, true)
+    expect(JSON.parse(stopped)).toEqual({ unrelated: 1, threads: { future: 'x', mode: 'organization', organization: 'org-1', stopped: true } })
+    const started = serializeStopped(JSON.parse(stopped), false)
+    expect(JSON.parse(started)).toEqual(previous)
+    expect(recordsAutomatically(readProjectPolicy(started).policy)).toBe(true)
+    // Choosing a mode in setup starts sync again.
+    expect(JSON.parse(serializeProjectPolicy(JSON.parse(stopped), 'private', 'org-1')).threads.stopped).toBeUndefined()
   })
 })

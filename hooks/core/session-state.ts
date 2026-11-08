@@ -52,6 +52,11 @@ export type Binding = {
   /** Every worktree of a joined session's thread, as the last `thread mount` placed them. */
   mounts?: ThreadMount[]
   url?: string
+  /**
+   * `/delta stop` paused this session: nothing it says is recorded and `snapshot` is cleared, but its
+   * thread, producer and sequence stay, so `/delta start` or `/delta share` resumes the same thread.
+   */
+  stopped?: true
   /** The audience Delta reports for the thread, shown apart from the link. */
   visibility?: 'private' | 'organization' | 'unlisted'
   /** Delta's background upload of this thread, as status last reported it. */

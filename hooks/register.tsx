@@ -312,6 +312,14 @@ export function register(on: On) {
     const host = hostOf($)
     return runDeltaCommand(host, `setup ${e.args.trim()}`.trim(), 'dedicated_command')
   }).catch(async ($, e, next) => { await logHookFailure($, '/delta-setup', next.error); return next(e) })
+  on('command.run', { command: 'delta-stop' }, async ($, e) => {
+    const host = hostOf($)
+    return runDeltaCommand(host, `stop ${e.args.trim()}`.trim(), 'dedicated_command')
+  }).catch(async ($, e, next) => { await logHookFailure($, '/delta-stop', next.error); return next(e) })
+  on('command.run', { command: 'delta-start' }, async ($, e) => {
+    const host = hostOf($)
+    return runDeltaCommand(host, `start ${e.args.trim()}`.trim(), 'dedicated_command')
+  }).catch(async ($, e, next) => { await logHookFailure($, '/delta-start', next.error); return next(e) })
   on('command.run', { command: 'delta-update' }, async ($, e) => {
     const host = hostOf($)
     return runDeltaCommand(host, `update ${e.args.trim()}`.trim(), 'dedicated_command')

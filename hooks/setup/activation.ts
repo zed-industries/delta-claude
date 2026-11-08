@@ -96,6 +96,8 @@ export async function activate(host: Host, session: string, isCurrent = () => tr
       await report(host, new Error(`The join directory transition is incomplete. Run /delta-join ${binding.joinTransition.locator} to retry the saved mount${binding.directory ? ` at ${binding.directory}` : ''}; prompts remain blocked.`))
       return
     }
+    // A session `/delta stop` paused keeps its thread but starts nothing until it is resumed.
+    if (binding.stopped) return
     // A session Desktop started in a hand-off's folder joins it before its first prompt.
     if (!binding.snapshot && !binding.joined && !runtime.handoffClaim) {
       const handoff = await pendingHandoff(host, await host.session.cwd())
@@ -418,7 +420,8 @@ export async function continuedFrom(host: Host, session: string): Promise<Bindin
   for (const storeKey of keys) {
     if (!storeKey.startsWith('session:') || storeKey === key(session)) continue
     const candidate = await storedBinding(host, storeKey)
-    if (!candidate?.thread || !candidate.snapshot) continue
+    // A conversation `/delta stop` paused is continued too, and stays paused in its new session.
+    if (!candidate?.thread || !(candidate.snapshot || candidate.stopped)) continue
     if (candidate.continuedIn === session) return candidate
     if (candidate.continuedIn || !candidate.transcript) continue
     if (candidate.endedAt !== undefined && candidate.endedAt < now - CONTINUATION_HORIZON_MS) continue
@@ -591,12 +594,13 @@ function onboardingStore(host: Host): OnboardingStore {
 }
 
 /**
- * The band's reminder for a session while Delta does not sync it: a checkout with any setting points
- * to /delta-share, and one never set up to /delta-setup. A syncing session's band says `Syncing`
+ * The band's reminder for a session while Delta does not sync it: a stopped checkout points to
+ * /delta-start, one with any other setting to /delta-share, and one never set up to /delta-setup. A syncing session's band says `Syncing`
  * instead, so an automatic checkout's sessions show this only when they are not syncing, as a session
  * started before the setting was saved, or one Delta could not start.
  */
 function syncReminder(policy: ProjectPolicy): SyncReminder {
+  if (policy.stopped) return 'stopped'
   // Someone who chose a setting is not nudged toward setup every session.
   return policy.configured ? 'manual' : 'not set up'
 }

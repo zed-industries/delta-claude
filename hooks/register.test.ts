@@ -37,6 +37,11 @@ describe('startup and commands', () => {
     const run = (command: string, args: string) => $.command.run({ ...shareCommand, command, args } as never)
     expect(await run('delta-org', 'current')).toEqual(await run('delta', 'org current'))
     expect(await run('delta-setup', '')).toEqual(await run('delta', 'setup'))
+    // Stopping and starting change a saved setting, so the second form finds it already done.
+    expect((await run('delta-stop', '')).text).toContain('Stopped Delta sync')
+    expect((await run('delta', 'stop')).text).toContain('already stopped')
+    expect((await run('delta-start', '')).text).toContain('Resumed Delta sync')
+    expect((await run('delta', 'start')).text).toContain("isn't stopped")
     // Headless, a menu command missing its argument explains that command's own format.
     expect((await run('delta-join', '')).text).toContain('Usage: /delta-join <link>')
     expect((await run('delta-org', '')).text).toContain('Usage: /delta-org list')

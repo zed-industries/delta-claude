@@ -22,11 +22,12 @@ function seedEnded(store: Map<string, unknown>, id: string, overrides: Record<st
   store.set(`appended:${id}`, { thread: 't', items: {} })
 }
 
-type ReminderKind = 'manual' | 'not set up' | 'none'
+type ReminderKind = 'manual' | 'not set up' | 'stopped' | 'none'
 
 /** The reminder the band shows a session Delta does not sync, by what it tells the person. */
 async function reminderKind($: Engine): Promise<ReminderKind> {
   const band = await drawBandText($)
+  if (band.includes('Sync stopped') && band.includes('/delta-start')) return 'stopped'
   if (band.includes('Not syncing') && band.includes('/delta-share')) return 'manual'
   return band.includes('Not set up') && band.includes('/delta-setup') ? 'not set up' : 'none'
 }
@@ -119,6 +120,98 @@ describe('automatic activation', () => {
     expect(fake.server.thread).toBeUndefined()
     expect(fake.operations()).not.toContain('create')
     expect(binding(fake)).toBeUndefined()
+    fake.expectClean()
+  })
+
+  test('a new session in a stopped repository never activates, and /delta-start lets the next one', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, JSON.stringify({ threads: { mode: 'organization', organization: 'org-1', stopped: true } }))
+    await startAuto($, fake)
+    expect(fake.server.thread).toBeUndefined()
+    expect(fake.operations()).not.toContain('create')
+    expect(binding(fake)).toBeUndefined()
+    await $.command.run({ ...typedDelta('start'), command: 'delta-start', args: '' } as never)
+    await fake.settle()
+    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'organization', organization: 'org-1' } })
+    fake.expectClean()
+  })
+
+  test('/delta stop saves the stop, and the next new session does not sync', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('manual', 'org-1'))
+    await startAuto($, fake)
+    const result = await $.command.run(typedDelta('stop'))
+    await fake.settle()
+    expect(JSON.stringify(result)).toContain('Stopped Delta sync')
+    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'manual', organization: 'org-1', stopped: true } })
+    expect(await reminderKind($)).toBe('stopped')
+    fake.expectClean()
+  })
+
+  /** Run one composer turn with `text`, as Claude does, and let its delivery finish. */
+  async function turn($: Engine, fake: ReturnType<typeof fakeThreads>, id: string, text: string) {
+    await $.prompt.submit(prompt(text))
+    await $.session.append({
+      door: 'prompt', origin: { kind: 'composer' }, uuid: `${id}-prompt`,
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text }] },
+    } as never)
+    await $.turn.start(turnStart(id, text))
+    await fake.settle()
+    await $.turn.complete(turnComplete(id))
+    await fake.settle()
+    await fake.advance(120_000)
+    await fake.settle()
+  }
+  const recorded = (fake: ReturnType<typeof fakeThreads>, text: string) =>
+    fake.updates().some((record) => JSON.stringify(record.update).includes(text))
+
+  test('/delta stop pauses a session that syncs, and /delta start resumes it into the same thread', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('private', 'org-1'))
+    await startAuto($, fake)
+    const thread = binding(fake).thread
+    await turn($, fake, 'native-before', 'before the stop')
+    expect(recorded(fake, 'before the stop')).toBe(true)
+
+    const result = await $.command.run(typedDelta('stop'))
+    await fake.settle()
+    expect(JSON.stringify(result)).toContain('This session stopped syncing too.')
+    expect(binding(fake)).toMatchObject({ thread, snapshot: false, stopped: true })
+    expect(fake.live()).toBeUndefined()
+    expect(await reminderKind($)).toBe('stopped')
+
+    await turn($, fake, 'native-during', 'while stopped')
+    expect(recorded(fake, 'while stopped')).toBe(false)
+    expect(binding(fake)).toMatchObject({ thread, stopped: true })
+    // Stopping again finds nothing left to stop.
+    expect(JSON.stringify(await $.command.run(typedDelta('stop')))).toContain('already stopped')
+
+    expect(JSON.stringify(await $.command.run(typedDelta('start')))).toContain('This session syncs into its thread again')
+    await fake.settle()
+    expect(binding(fake)).toMatchObject({ thread, snapshot: true })
+    expect(binding(fake).stopped).toBeUndefined()
+    await turn($, fake, 'native-after', 'after the start')
+    expect(recorded(fake, 'after the start')).toBe(true)
+    expect(recorded(fake, 'while stopped')).toBe(false)
+    expect(fake.server.thread).toBe(thread)
+    fake.expectClean()
+  })
+
+  test('/delta share after /delta stop resumes the same thread without exporting again', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('private', 'org-1'))
+    await startAuto($, fake)
+    const thread = binding(fake).thread
+    await turn($, fake, 'native-before', 'before the stop')
+    await $.command.run(typedDelta('stop'))
+    await fake.settle()
+    const exports = fake.exports
+    await runShare($, fake, 'share')
+    expect(binding(fake)).toMatchObject({ thread, snapshot: true })
+    expect(binding(fake).stopped).toBeUndefined()
+    expect(fake.exports).toBe(exports)
+    await turn($, fake, 'native-after', 'after the share')
+    expect(recorded(fake, 'after the share')).toBe(true)
     fake.expectClean()
   })
 
@@ -263,6 +356,8 @@ describe('automatic activation', () => {
     { name: 'an unconfigured checkout is told how to set up', expected: 'not set up' },
     { name: 'a Manual checkout is told how to share, not to set up', expected: 'manual',
       arrange: (fake) => { fake.files.set(POLICY, policy('manual')) } },
+    { name: 'a stopped checkout is told how to resume', expected: 'stopped',
+      arrange: (fake) => { fake.files.set(POLICY, JSON.stringify({ threads: { mode: 'private', organization: 'org-1', stopped: true } })) } },
     { name: 'a headless session gets none', expected: 'none', arrange: (fake) => { fake.surfaces = [] } },
     { name: 'a session with an unfinished join gets none', source: 'resume', expected: 'none',
       arrange: (fake) => { seedResumed(fake, { snapshot: false, joinTransition: { locator: 'x' } }) } },

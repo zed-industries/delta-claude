@@ -9,29 +9,34 @@ import {
   drain, flushUnsaved, recordsOffline, recordsPlans, rememberToolResults, stageRecord, verifyCheckout,
 } from '../recording/delivery'
 import {
-  type CommandForm, requireContract, resolveCli, threadCreate, threadInvite, threadShare, threadStatus,
+  type CommandForm, requireContract, resolveCli, stopSessionMounts, threadCreate, threadInvite, threadShare,
+  threadStatus,
 } from '../cli/delta-cli'
 import { worktreeHistory } from '../cli/command-outcomes'
 import { attachWorktree, mountCheckout } from './checkout'
-import { followTranscript } from '../setup/activation'
+import { activate, followTranscript } from '../setup/activation'
+import { activeBackgroundAgents } from './lifecycle'
 import { authenticationHost, claudeInteraction } from '../setup/interaction'
 import {
   currentOrganizationId, isPersonalOrganizationId, loadOrganizationDirectory, organizationName, savedOrganization,
 } from '../setup/organizations'
 import { samePath } from '../core/paths'
 import {
-  type Binding, isPaused, load, pauseCheckout, recoveryCommand, requests, save, serial, stateFor,
-  storedBinding,
+  activation, type Binding, isPaused, load, pauseCheckout, recoveryCommand, report, requests, resetRuntime, save,
+  serial, stateFor, storedBinding,
 } from '../core/session-state'
 import type { Host } from '../core/host'
-import { InteractionDismissedError, InteractionUnavailableError, invitationSummary, remoteRefusal } from '../setup/setup'
+import {
+  InteractionDismissedError, InteractionUnavailableError, invitationSummary, remoteRefusal, type SessionResume,
+  type SessionStop,
+} from '../setup/setup'
 import { type AudienceAnswer, chooseShareAudience, type ShareAudience } from './share-audience'
 import { snapshotMessages } from '../recording/snapshot'
-import { children, deliverChild, recordsChildren } from '../subagents/subagents'
+import { children, deliverChild, forgetSubagents, recordsChildren } from '../subagents/subagents'
 import { errorText } from '../core/text'
 import { DeltaCommandError, validateThreadFrontier } from '../cli/thread-commands'
-import { adoptExistingChildren } from '../subagents/thread-runs'
-import { startConversation, stopConversation } from '../watch/watch'
+import { adoptExistingChildren, releaseThreadMounts, restoreChildren } from '../subagents/thread-runs'
+import { startConversation, stopConversation, stopWatching } from '../watch/watch'
 
 /**
  * A share to run. With `choose`, the share decides who sees the session once the CLI is checked: the
@@ -90,6 +95,87 @@ export function sessionSyncs(binding: Binding | undefined): boolean {
   return !!binding?.url || !!binding?.autoUpload
 }
 
+/** How long `/delta stop` waits for recorded rows to reach Delta before it stops the session anyway. */
+const STOP_DRAIN_MS = 5_000
+
+/**
+ * Pause a session's sync, for `/delta stop`: send what it recorded, then mark its binding `stopped` and
+ * clear `snapshot`, which every recording path and the band's `Syncing` read. The binding keeps its
+ * thread, producer and sequence, so `/delta start` or `/delta share` resumes the same thread, and nothing
+ * the session says meanwhile is recorded. Its watch, checkout mount and subagents' mounts stop; the
+ * checkout's files stay as they are. A joined session, a turn underway, a share or join in flight, or a
+ * running subagent is refused, since stopping under any of them would cut a live transition.
+ */
+export async function stopSessionSync(host: Host, session: string): Promise<SessionStop> {
+  const runtime = stateFor(session)
+  const binding = runtime.binding
+  if (!binding?.snapshot) return { kind: 'none' }
+  if (binding.joined || binding.joinTransition)
+    return { kind: 'refused', reason: 'it joined a shared thread, which it leaves when the session ends' }
+  if (requests.share?.session === session || requests.join)
+    return { kind: 'refused', reason: 'a share or join is still running; try again when it finishes' }
+  if (runtime.currentTurnId)
+    return { kind: 'refused', reason: 'a turn is running; try again when it finishes' }
+  // A recorded subagent may be working in a mount the stop releases.
+  if (binding.children?.length && activeBackgroundAgents(await host.agent.list()))
+    return { kind: 'refused', reason: 'a subagent is still running; try again when it finishes' }
+  // Send what was recorded first, but never wait long: Delta may be unreachable. What is left stays
+  // queued with its sequence and is sent when the session resumes.
+  const cancelled = new AbortController()
+  try {
+    if (runtime.unsaved.length) await flushUnsaved(host, session)
+    if (binding.thread)
+      await Promise.race([drain(host, session), host.clock.sleep(STOP_DRAIN_MS, { signal: cancelled.signal })])
+  } catch { /* whatever didn't reach Delta stays queued and is counted below */ }
+  finally { cancelled.abort() }
+  // Work begun under this activation, such as an automatic activation or a send still running, sees it is
+  // stale. The session stays the current one, so the band shows its reminder.
+  activation.epoch++
+  forgetSubagents(session)
+  await stopWatching(session)
+  try { await stopSessionMounts(session) }
+  catch (error) { await host.ui.log(`Delta mount process did not stop: ${String(error)}`, { to: 'debug' }) }
+  // An automatic session whose thread isn't created yet keeps its staged setup the same way, and
+  // finishes it when it resumes.
+  const stopped = await serial(async () => {
+    const current = await load(host, session)
+    await save(host, { ...current, snapshot: false, stopped: true })
+    return current
+  })
+  runtime.pauses.clear()
+  resetRuntime(runtime)
+  await releaseThreadMounts(host, session, stopped.children ?? [])
+  // A share or join running for another session keeps its progress in the band.
+  if (!requests.join && !requests.share) clearProgress(host)
+  return { kind: 'stopped', queued: stopped.pending.length + runtime.unsaved.length }
+}
+
+/**
+ * Undo {@link stopSessionSync}: record the session into its thread again and start its watch and checkout
+ * mount, as a resume does. What it said while stopped stays out of the thread. False when it wasn't stopped.
+ */
+export async function resumeSessionSync(host: Host, session: string): Promise<SessionResume> {
+  // A share resumes a stopped session itself; activating beside it would race its attach and mount.
+  if (requests.share?.session === session || requests.join)
+    return stateFor(session).binding?.stopped
+      ? { kind: 'refused', reason: 'a share or join is still running; try again when it finishes' } : { kind: 'none' }
+  if (!await clearStop(host, session)) return { kind: 'none' }
+  await activate(host, session)
+  return { kind: 'resumed' }
+}
+
+/** Clear a stopped binding's mark so it records again; false when it wasn't stopped. */
+async function clearStop(host: Host, session: string): Promise<boolean> {
+  return serial(async () => {
+    const current = await load(host, session)
+    if (!current.stopped) return false
+    const resumed: Binding = { ...current, snapshot: true }
+    delete resumed.stopped
+    await save(host, resumed)
+    return true
+  })
+}
+
 /**
  * What a finished share reports: the thread's link, which a private share may not have until Delta's
  * background upload registers it, and what the band and transcript say. No `band` means nothing was
@@ -138,6 +224,10 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   const joined = await joinedBindingAt(host, root)
   if (joined) throw new ShareRefusalError(joinedCheckoutRefusal(root, joined))
   await assertShareSession(host, request)
+  // A session `/delta stop` paused already holds its thread and everything it recorded before the stop:
+  // sharing resumes it there rather than exporting the conversation again.
+  const resumed = await clearStop(host, session)
+  if (resumed) binding = await serial(() => load(host, session))
   if (!binding.snapshot) {
     let release!: () => void
     snapshotBarrier.gate = new Promise<void>((resolve) => { release = resolve })
@@ -286,6 +376,11 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
     host.ui.log(`Couldn't look for this session's title: ${String(error)}`, { to: 'debug' }))
   await drain(host, session)
   for (const child of children.values()) if (child.session === session) void deliverChild(host, child)
+  // The stop forgot this session's subagents; they record again as an activation would restore them.
+  if (resumed) {
+    const restored = await serial(() => load(host, session))
+    void restoreChildren(host, session, restored).catch((error) => report(host, error))
+  }
   if (isPaused(runtime))
     throw new Error('checkout sharing is paused; saved messages remain queued until reattachment succeeds')
   if (runtime.captureFailure || runtime.unsaved.length)
