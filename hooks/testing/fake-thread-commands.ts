@@ -1210,7 +1210,7 @@ export function fakeThreads(hostOn: On, options: {
     // Capture runs around tool calls, so it is recorded apart from the recording commands.
     if (operation === 'capture') {
       const [action, reference] = [parsed!.positionals[2]!, parsed!.positionals[3]!]
-      const toolUseId = String(parsed!.options['--tool-use-id'])
+      const toolUseId = String(parsed!.options['--tool-call-id'])
       fake.captures.push([action, reference, toolUseId,
         String(parsed!.options[action === 'start' ? '--started-at' : '--ended-at'])])
       if (fake.captureUnsupported === 'subcommand') return output('', 2, "error: unrecognized subcommand 'capture'")
@@ -1218,7 +1218,7 @@ export function fakeThreads(hostOn: On, options: {
         return output('', 2, "error: unexpected argument '--started-at' found")
       await fake.holdCaptures
       return output(JSON.stringify({
-        operation: 'capture', thread_id: fake.server.thread, tool_use_id: toolUseId,
+        operation: 'capture', thread_id: fake.server.thread, tool_call_id: toolUseId,
         capturing: action === 'start', checkouts: action === 'start' ? 1 : 0,
       }))
     }
@@ -1963,7 +1963,7 @@ function cliArguments(argv: readonly string[]) {
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
     if (argument === '--json' || argument === '--force' || argument === '--join' || argument === '--existing-checkout' || argument === '--shared-worktrees' || argument === '--isolated-worktrees') { options[argument] = true; continue }
-    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name', '--tool-use-id', '--started-at', '--ended-at'].includes(argument)) return undefined
+    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name', '--tool-call-id', '--started-at', '--ended-at'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined
     options[argument] = value

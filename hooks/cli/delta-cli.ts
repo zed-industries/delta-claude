@@ -275,7 +275,7 @@ export async function threadCapture(
   let result: ProcessRunResult
   try {
     result = await runJson(host, ['thread', 'capture', action, call.reference, '--source', 'claude-code',
-      '--external-id', call.externalId, '--tool-use-id', call.toolUseId,
+      '--external-id', call.externalId, '--tool-call-id', call.toolUseId,
       action === 'start' ? '--started-at' : '--ended-at', String(at)], { timeoutMs })
   } catch (error) { throw new DeltaCommandError('process_failed', `${name} did not finish (${errorText(error)})`) }
   if (result.exitCode !== 0 && !result.stdout.trim()) return false
