@@ -408,7 +408,7 @@ const PLUGIN_CONTRACT_MIN = 8
  * version is gated on the session's negotiated version (`contractVersion`) until `PLUGIN_CONTRACT_MIN`
  * reaches it.
  */
-const PLUGIN_CONTRACT_MAX = 10
+const PLUGIN_CONTRACT_MAX = 11
 /**
  * The name Delta shows for this producer: the recording's attribution (`append --producer-name`)
  * and the harness beside a present person (`watch --participate`). Identity stays the source and
@@ -422,6 +422,8 @@ export const PRODUCER_NAME = 'Claude Code'
 export const CHILD_CONTRACT_VERSION = 7
 /** The first contract that accepts a turn's `plan_update`, which records TodoWrite as its plan. */
 export const PLAN_CONTRACT_VERSION = 10
+/** The first contract that attributes tool edits through `thread capture start` and `stop`. */
+export const CAPTURE_CONTRACT_VERSION = 11
 
 /** The range of recording-output contract versions a CLI build speaks. */
 export type ThreadContract = { operation: 'contract'; min: number; max: number }

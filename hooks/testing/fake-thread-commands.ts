@@ -555,12 +555,20 @@ export function fakeThreads(hostOn: On, options: {
     /** Replaces the default watch readiness and snapshot. */
     onWatch: undefined as ((watch: Watch, index: number) => void) | undefined,
     commandFault: undefined as { operation: string; message: string; code?: string; reason?: string; retryable?: boolean; after?: boolean; exitCode?: number } | undefined,
-    /** The recording-contract range `thread contract` reports; overrides the fixture's `{min:1,max:6}`. */
+    /** The recording-contract range `thread contract` reports; overrides the fixture's range. */
     contractRange: undefined as { min?: number; max?: number } | undefined,
     /** Answers `thread contract` like a CLI that predates it: clap error on stderr, exit 2, no JSON. */
     contractUnknownSubcommand: false,
     /** Every `thread contract` the plugin asked for, counted apart from the recording commands. */
     contractChecks: 0,
+    /**
+     * Every `thread capture` as `[action, reference, tool_use_id, time, external_id]`, apart from the
+     * recording commands. `time` is its `--started-at` or `--ended-at`.
+     */
+    captures: [] as string[][],
+    captureFailure: undefined as string | undefined,
+    /** Holds each capture's answer so tests can exercise calls without a CLI response. */
+    holdCaptures: undefined as Promise<void> | undefined,
     authCalls: [] as string[][],
     authReplies: [] as { status: string; [key: string]: unknown }[],
     holdAuth: undefined as Promise<void> | undefined,
@@ -1194,6 +1202,21 @@ export function fakeThreads(hostOn: On, options: {
         operation: 'listed',
         organizations: fake.organizations ?? [{ id: 'org-1', name: 'Zed', current: true }],
       }))
+    }
+    // Capture runs around tool calls, so it is recorded apart from the recording commands.
+    if (operation === 'capture') {
+      const [action, reference] = [parsed!.positionals[2]!, parsed!.positionals[3]!]
+      const toolUseId = String(parsed!.options['--tool-call-id'])
+      fake.captures.push([action, reference, toolUseId,
+        String(parsed!.options[action === 'start' ? '--started-at' : '--ended-at']),
+        String(parsed!.options['--external-id'])])
+      const answer = fake.captureFailure ? output('', 1, fake.captureFailure)
+        : output(JSON.stringify({
+          operation: 'capture', thread_id: fake.server.thread, tool_call_id: toolUseId,
+          capturing: action === 'start', checkouts: action === 'start' ? 1 : 0,
+        }))
+      await fake.holdCaptures
+      return answer
     }
     // The recording-contract probe is counted on its own (`contractChecks`) so tests asserting the
     // plugin's recording commands through `commands`/`delta()`/`operations()` stay unaffected by it.
@@ -1936,7 +1959,7 @@ function cliArguments(argv: readonly string[]) {
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
     if (argument === '--json' || argument === '--force' || argument === '--join' || argument === '--existing-checkout' || argument === '--shared-worktrees' || argument === '--isolated-worktrees') { options[argument] = true; continue }
-    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name'].includes(argument)) return undefined
+    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name', '--tool-call-id', '--started-at', '--ended-at'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined
     options[argument] = value
