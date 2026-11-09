@@ -260,6 +260,21 @@ export async function threadShare(
   return shared
 }
 
+/**
+ * Start or stop attributing the file edits `call.reference`'s mounted checkouts ingest to the producer
+ * `call.externalId`'s tool call `call.toolUseId`, from or until `at`, the time in Unix milliseconds the
+ * call started or ended. Delta pairs a stop that arrives before its start, and stops a capture itself
+ * once the process that started it exits. Requires recording contract version 11 or newer.
+ */
+export async function threadCapture(
+  host: Host, call: { reference: string; externalId: string; toolUseId: string }, action: 'start' | 'stop',
+  at: number, timeoutMs: number,
+): Promise<void> {
+  await command(host, ['thread', 'capture', action, call.reference, '--source', 'claude-code',
+    '--external-id', call.externalId, '--tool-call-id', call.toolUseId,
+    action === 'start' ? '--started-at' : '--ended-at', String(at)], `thread capture ${action}`, { timeoutMs })
+}
+
 /** Make an existing Cloud thread private without stopping its sync or removing invitations. */
 export async function threadUnshare(
   host: Host, thread: string, form?: CommandForm,
