@@ -264,23 +264,15 @@ export async function threadShare(
  * Start or stop attributing the file edits `call.reference`'s mounted checkouts ingest to the producer
  * `call.externalId`'s tool call `call.toolUseId`, from or until `at`, the time in Unix milliseconds the
  * call started or ended. Delta pairs a stop that arrives before its start, and stops a capture itself
- * once the process that started it exits. Resolves false from a CLI that predates `thread capture` or
- * its `--started-at` and `--ended-at` (clap's error on stderr, nonzero exit, no JSON).
+ * once the process that started it exits. Requires recording contract version 11 or newer.
  */
 export async function threadCapture(
   host: Host, call: { reference: string; externalId: string; toolUseId: string }, action: 'start' | 'stop',
   at: number, timeoutMs: number,
-): Promise<boolean> {
-  const name = `thread capture ${action}`
-  let result: ProcessRunResult
-  try {
-    result = await runJson(host, ['thread', 'capture', action, call.reference, '--source', 'claude-code',
-      '--external-id', call.externalId, '--tool-call-id', call.toolUseId,
-      action === 'start' ? '--started-at' : '--ended-at', String(at)], { timeoutMs })
-  } catch (error) { throw new DeltaCommandError('process_failed', `${name} did not finish (${errorText(error)})`) }
-  if (result.exitCode !== 0 && !result.stdout.trim()) return false
-  checkResult(result, name)
-  return true
+): Promise<void> {
+  await command(host, ['thread', 'capture', action, call.reference, '--source', 'claude-code',
+    '--external-id', call.externalId, '--tool-call-id', call.toolUseId,
+    action === 'start' ? '--started-at' : '--ended-at', String(at)], `thread capture ${action}`, { timeoutMs })
 }
 
 /** Make an existing Cloud thread private without stopping its sync or removing invitations. */

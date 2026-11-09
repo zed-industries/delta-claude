@@ -555,23 +555,19 @@ export function fakeThreads(hostOn: On, options: {
     /** Replaces the default watch readiness and snapshot. */
     onWatch: undefined as ((watch: Watch, index: number) => void) | undefined,
     commandFault: undefined as { operation: string; message: string; code?: string; reason?: string; retryable?: boolean; after?: boolean; exitCode?: number } | undefined,
-    /** The recording-contract range `thread contract` reports; overrides the fixture's `{min:1,max:6}`. */
+    /** The recording-contract range `thread contract` reports; overrides the fixture's range. */
     contractRange: undefined as { min?: number; max?: number } | undefined,
     /** Answers `thread contract` like a CLI that predates it: clap error on stderr, exit 2, no JSON. */
     contractUnknownSubcommand: false,
     /** Every `thread contract` the plugin asked for, counted apart from the recording commands. */
     contractChecks: 0,
     /**
-     * Every `thread capture` the plugin ran, as `[action, reference, tool_use_id, time]`, apart from the recording
-     * commands. `time` is its `--started-at` or `--ended-at`.
+     * Every `thread capture` as `[action, reference, tool_use_id, time, external_id]`, apart from the
+     * recording commands. `time` is its `--started-at` or `--ended-at`.
      */
     captures: [] as string[][],
-    /**
-     * Answers `thread capture` like a CLI that predates it, or predates its `--started-at` and `--ended-at`: clap
-     * error on stderr, exit 2, no JSON.
-     */
-    captureUnsupported: undefined as 'subcommand' | 'times' | undefined,
-    /** Holds every supported `thread capture`'s answer until it resolves, once the command is in `captures`. */
+    captureFailure: undefined as string | undefined,
+    /** Holds each capture's answer so tests can exercise calls without a CLI response. */
     holdCaptures: undefined as Promise<void> | undefined,
     authCalls: [] as string[][],
     authReplies: [] as { status: string; [key: string]: unknown }[],
@@ -1212,15 +1208,15 @@ export function fakeThreads(hostOn: On, options: {
       const [action, reference] = [parsed!.positionals[2]!, parsed!.positionals[3]!]
       const toolUseId = String(parsed!.options['--tool-call-id'])
       fake.captures.push([action, reference, toolUseId,
-        String(parsed!.options[action === 'start' ? '--started-at' : '--ended-at'])])
-      if (fake.captureUnsupported === 'subcommand') return output('', 2, "error: unrecognized subcommand 'capture'")
-      if (fake.captureUnsupported === 'times')
-        return output('', 2, "error: unexpected argument '--started-at' found")
+        String(parsed!.options[action === 'start' ? '--started-at' : '--ended-at']),
+        String(parsed!.options['--external-id'])])
+      const answer = fake.captureFailure ? output('', 1, fake.captureFailure)
+        : output(JSON.stringify({
+          operation: 'capture', thread_id: fake.server.thread, tool_call_id: toolUseId,
+          capturing: action === 'start', checkouts: action === 'start' ? 1 : 0,
+        }))
       await fake.holdCaptures
-      return output(JSON.stringify({
-        operation: 'capture', thread_id: fake.server.thread, tool_call_id: toolUseId,
-        capturing: action === 'start', checkouts: action === 'start' ? 1 : 0,
-      }))
+      return answer
     }
     // The recording-contract probe is counted on its own (`contractChecks`) so tests asserting the
     // plugin's recording commands through `commands`/`delta()`/`operations()` stay unaffected by it.

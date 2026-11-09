@@ -1478,15 +1478,13 @@ describe('recording', () => {
     fake.expectClean()
   })
 
-  test('editing calls after the first run without waiting for Delta to capture them', async ($, on) => {
+  test('every editing call runs without waiting for Delta to capture it', async ($, on) => {
     const fake = fakeThreads(on)
     await $.session.start(sessionStart)
     await fake.share($)
-    await $.tool.call(bash('first', 'echo first'))
-    await fake.settle()
     let release!: () => void
     fake.holdCaptures = new Promise<void>((resolve) => { release = resolve })
-    // Delta answers neither of this call's capture commands until released.
+    await $.tool.call(bash('first', 'echo first'))
     await $.tool.call(bash('second', 'echo second'))
     await fake.settleUntil(() => fake.captures.length === 4)
     release()
@@ -1498,19 +1496,43 @@ describe('recording', () => {
     fake.expectClean()
   })
 
-  for (const missing of ['subcommand', 'times'] as const)
-    test(`editing calls run uncaptured once the first finds the CLI lacks the capture ${missing}`, async ($, on) => {
-      const fake = fakeThreads(on)
-      fake.captureUnsupported = missing
-      await $.session.start(sessionStart)
-      await fake.share($)
-      await $.tool.call(bash('first', 'echo first'))
-      await $.tool.call(bash('second', 'echo second'))
-      await fake.settle()
-      expect(fake.captures.map(([action, , toolUseId]) => [action, toolUseId])).toEqual([['start', 'first']])
-      expect(fake.logs.join('\n')).not.toContain('attributing a tool call')
-      fake.expectClean()
-    })
+  test('capture uses the negotiated contract and becomes available after activation', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.contractRange = { min: 8, max: 10 }
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.tool.call(bash('old-cli', 'echo old'))
+    await fake.settle()
+    expect(fake.captures).toEqual([])
+    expect(fake.records().some((record) => record.update?.toolCallId === 'old-cli')).toBe(true)
+    fake.contractRange = { min: 8, max: 11 }
+    await $.session.end(sessionEnd(fake.session))
+    await $.session.start(sessionStart)
+    await fake.settle()
+    await $.tool.call(bash('new-cli', 'echo new'))
+    await fake.settle()
+    expect(fake.captures.map(([action, , id]) => [action, id])).toEqual([
+      ['start', 'new-cli'], ['stop', 'new-cli'],
+    ])
+    fake.expectClean()
+  })
+
+  test('a failed capture process does not disable later captures', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    fake.captureFailure = 'process stopped before answering'
+    await $.tool.call(bash('failed', 'echo failed'))
+    await fake.settle()
+    fake.captureFailure = undefined
+    await $.tool.call(bash('recovered', 'echo recovered'))
+    await fake.settle()
+    expect(fake.captures.map(([action, , id]) => [action, id])).toEqual([
+      ['start', 'failed'], ['stop', 'failed'], ['start', 'recovered'], ['stop', 'recovered'],
+    ])
+    expect(fake.debugLogs.some((text) => text.includes('process stopped before answering'))).toBe(true)
+    fake.expectClean()
+  })
 })
 
 describe('native turns', () => {
@@ -3467,7 +3489,7 @@ describe('the recording contract', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 11, max: 12 }
+    fake.contractRange = { min: 12, max: 13 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -3504,7 +3526,7 @@ describe('the recording contract', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 11, max: 12 }
+    fake.contractRange = { min: 12, max: 13 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
@@ -3526,7 +3548,7 @@ describe('the recording contract', () => {
     const checksAtAppend: number[] = []
     fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
     // An incompatible CLI is refused before anything is appended.
-    fake.contractRange = { min: 11, max: 12 }
+    fake.contractRange = { min: 12, max: 13 }
     await $.session.start(sessionStart)
     await fake.settle()
     expect(checksAtAppend).toEqual([])

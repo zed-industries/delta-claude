@@ -5,65 +5,65 @@
  * carries the time the call started or ended, so the call doesn't wait for Delta, and Delta pairs a
  * stop that arrives before its start.
  */
-import { threadCapture } from '../cli/delta-cli'
+import { threadCapture, verifiedContract } from '../cli/delta-cli'
+import { CAPTURE_CONTRACT_VERSION } from '../cli/thread-commands'
 import type { Host } from '../core/host'
 import { errorText } from '../core/text'
 
 /** The tools that can change files in the checkout. Others run without a capture. */
 const EDITING_TOOLS = new Set(['Bash', 'Edit', 'MultiEdit', 'NotebookEdit', 'Write'])
 
-/**
- * How long a start may take. The first call waits for its start, so a slower answer, which means Delta
- * is busy, lets that call run uncaptured.
- */
 const START_TIMEOUT_MS = 5_000
-
-/** Stopping runs after the call, so it can wait longer without delaying anything. */
 const STOP_TIMEOUT_MS = 60_000
-
-/**
- * Set once the CLI turns out to predate `thread capture` or its `--started-at`. It spans sessions
- * because they share the CLI, which Claude Code is restarted to change.
- */
-let unsupported = false
-
-/** Set once a call has waited for its start, whose answer says whether the CLI supports capture. */
-let probed = false
 
 /** Whether calls of `tool` are captured. */
 export function capturesEdits(tool: string): boolean {
   return EDITING_TOOLS.has(tool)
 }
 
-/**
- * Start capturing the edits of the tool call `call.toolUseId`, returning a function that stops it, or
- * undefined when the CLI can't capture. Only the process's first call waits for Delta; later starts
- * run beside their calls. A failure is logged and at worst leaves the call uncaptured: attribution
- * never keeps a tool from running. The stop runs even after a failed start, which Delta may still
- * have registered; Delta forgets a stop no start pairs with after a minute.
- */
+/** Remember a call's start, submitting it immediately when its thread is already known. */
 export async function startCapture(
-  host: Host, call: { reference: string; externalId: string; toolUseId: string },
-): Promise<(() => void) | undefined> {
-  if (unsupported) return undefined
-  const started = threadCapture(host, call, 'start', await host.clock.now(), START_TIMEOUT_MS)
-  if (probed) void started.catch((error) => logCaptureFailure(host, 'start', error))
-  else {
-    probed = true
-    try {
-      if (!await started) {
-        unsupported = true
-        return undefined
-      }
-    } catch (error) { await logCaptureFailure(host, 'start', error) }
-  }
-  // Delta also stops the capture once Claude Code exits, so a stop that fails only ends it later.
-  return () => void stopCapture(host, call)
+  host: Host, session: string, call: { reference?: string; externalId: string; toolUseId: string },
+): Promise<EditCapture | undefined> {
+  if ((verifiedContract(session) ?? 0) < CAPTURE_CONTRACT_VERSION) return undefined
+  const capture = new EditCapture(host, call, await host.clock.now())
+  if (call.reference) capture.submit(call.reference)
+  return capture
 }
 
-async function stopCapture(host: Host, call: { reference: string; externalId: string; toolUseId: string }) {
-  try { await threadCapture(host, call, 'stop', await host.clock.now(), STOP_TIMEOUT_MS) }
-  catch (error) { await logCaptureFailure(host, 'stop', error) }
+/** A call's capture can finish before its thread exists; submission keeps both original timestamps. */
+export class EditCapture {
+  private reference?: string
+  private endedAt?: number
+
+  constructor(
+    private readonly host: Host,
+    private readonly call: { externalId: string; toolUseId: string },
+    private readonly startedAt: number,
+  ) {}
+
+  submit(reference: string) {
+    if (this.reference) return
+    this.reference = reference
+    sendCapture(this.host, { ...this.call, reference }, 'start', this.startedAt)
+    if (this.endedAt !== undefined)
+      sendCapture(this.host, { ...this.call, reference }, 'stop', this.endedAt)
+  }
+
+  stop() {
+    void this.host.clock.now().then((endedAt) => {
+      this.endedAt = endedAt
+      if (this.reference)
+        sendCapture(this.host, { ...this.call, reference: this.reference }, 'stop', endedAt)
+    }).catch((error) => logCaptureFailure(this.host, 'stop', error))
+  }
+}
+
+function sendCapture(
+  host: Host, call: { reference: string; externalId: string; toolUseId: string }, action: 'start' | 'stop', at: number,
+) {
+  void threadCapture(host, call, action, at, action === 'start' ? START_TIMEOUT_MS : STOP_TIMEOUT_MS)
+    .catch((error) => logCaptureFailure(host, action, error))
 }
 
 async function logCaptureFailure(host: Host, action: 'start' | 'stop', error: unknown) {
