@@ -125,7 +125,7 @@ export const shareCommand = {
 /** The band above the prompt: the hook context the plugin draws its status and queued message rows in. */
 export const abovePrompt = {
   component: 'AbovePrompt', requestId: 'above-prompt', surface: 'terminal',
-  props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 80,
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 12, bodyColumns: 80,
     scroll: { offset: 0, bodyRows: 12 }, view: {} },
 } as const
 
