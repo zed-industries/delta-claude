@@ -172,17 +172,17 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
-  test("a Desktop tab hands the join to a new session in the thread's folder, changing nothing here", async ($, on) => {
+  test("a Desktop tab hands a one-worktree thread's join to a new session in its checkout, changing nothing here", async ($, on) => {
     const fake = desktopTab(on, $)
     const before = fake.session
     const offer = await offerFromDesktopTab($, fake)
     expect(fake.session).toBe(before)
     expect(fake.sessionCommands).toEqual([])
-    // A one-worktree thread asks for its thread folder, which Desktop opens as a plain folder.
+    // The checkout is a Git repository, so the project's instructions load and isolated subagents work.
     expect(fake.mountRequests).toEqual([{ owner: offer.owner, folder: true, join: true }])
-    expect(fake.opened).toEqual([newSessionLink(offer.folder, HANDOFF_PROMPT)])
+    expect(fake.opened).toEqual([newSessionLink(offer.checkout, HANDOFF_PROMPT)])
     expect(JSON.parse(fake.files.get(offer.record)!)).toMatchObject({
-      owner: offer.owner, thread: fake.threadId, locator: link(fake), directory: offer.folder,
+      owner: offer.owner, thread: fake.threadId, locator: link(fake), directory: offer.checkout,
     })
     expect(await bandText($)).toContain('Press Enter in the new Claude Code Desktop session to join “Fix the parser”')
     expect(fake.watches.length).toBe(0)
@@ -191,13 +191,13 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
-  test("the session started in the thread's folder joins before its opening line, which becomes a one-word turn the thread never records", async ($, on) => {
+  test('the session Desktop starts from the link joins before its opening line, which becomes a one-word turn the thread never records', async ($, on) => {
     const fake = desktopTab(on, $)
     const offer = await offerFromDesktopTab($, fake)
-    await startInThreadFolder($, fake, offer.folder)
+    await startFromLink($, fake, offer.checkout)
     // Claude delivers the first prompt once session.start returns, so the join is done by then.
     expect(fake.store.get('session:opened-from-link')).toMatchObject({
-      joined: true, snapshot: true, owner: offer.owner, directory: offer.folder, locator: link(fake),
+      joined: true, snapshot: true, owner: offer.owner, directory: offer.checkout, locator: link(fake),
     })
     // The requested offer reports one join. The automatic takeover reuses its mount without reporting another.
     expect(fake.mountRequests).toEqual([
@@ -231,7 +231,7 @@ describe('joining', () => {
     desktopHost(fake)
     fake.surfaces = []
     const offer = await offerFromDesktopTab($, fake)
-    expect(fake.opened).toEqual([newSessionLink(offer.folder, HANDOFF_PROMPT)])
+    expect(fake.opened).toEqual([newSessionLink(offer.checkout, HANDOFF_PROMPT)])
     expect(fake.sessionCommands).toEqual([])
     await $.session.end(sessionEnd(fake.session))
   })
@@ -241,7 +241,7 @@ describe('joining', () => {
     const offer = await offerFromDesktopTab($, fake)
     let release!: () => void
     fake.holdRun = (operation) => operation === 'mount' ? new Promise<void>((resolve) => { release = resolve }) : undefined
-    const starting = startInThreadFolder($, fake, offer.folder)
+    const starting = startFromLink($, fake, offer.checkout)
     await fake.settle()
     await fake.settle()
     await fake.advance(0)
@@ -255,7 +255,7 @@ describe('joining', () => {
   test('an opening line the person changed before sending goes to Claude and the thread as they wrote it', async ($, on) => {
     const fake = desktopTab(on, $)
     const offer = await offerFromDesktopTab($, fake)
-    await startInThreadFolder($, fake, offer.folder)
+    await startFromLink($, fake, offer.checkout)
     expect((await $.prompt.submit(prompt('Join this Delta thread and summarize it.'))).drop).toBeUndefined()
     expect(fake.entered.at(-1)?.text).toBe('Join this Delta thread and summarize it.')
     await $.session.end(sessionEnd(fake.session))
@@ -265,7 +265,7 @@ describe('joining', () => {
     const fake = desktopTab(on, $)
     fake.failOpen = true
     const offer = await offerFromDesktopTab($, fake)
-    expect(fake.logs.join('\n')).toContain(newSessionLink(offer.folder, HANDOFF_PROMPT))
+    expect(fake.logs.join('\n')).toContain(newSessionLink(offer.checkout, HANDOFF_PROMPT))
     expect(await bandText($)).toContain('Open the link in this transcript')
     expect(fake.unmounts).toEqual([])
     await $.session.end(sessionEnd(fake.session))
@@ -290,6 +290,46 @@ describe('joining', () => {
     await $.session.end({ ...sessionEnd(fake.session), reason: 'prompt_input_exit' })
     expect(fake.unmounts).toEqual([{ thread: fake.threadId, owner: offer.owner }])
     expect(fake.files.has(offer.record)).toBe(false)
+  })
+
+  test("a Desktop join of a thread with several worktrees starts in the first one's checkout and asks the person to /add-dir the others", async ($, on) => {
+    const fake = desktopTab(on, $)
+    fake.addWorktree('zed')
+    scriptMounts(fake, ['delta', 'zed'], (owner) => `${FOLDERS}/${owner}`)
+    const offer = await offerFromDesktopTab($, fake)
+    expect(fake.opened).toEqual([newSessionLink(offer.checkout, HANDOFF_PROMPT)])
+    await startFromLink($, fake, offer.checkout)
+    expect(fake.store.get('session:opened-from-link')).toMatchObject({ joined: true, directory: offer.checkout })
+    expect(fake.sessionCommands).toEqual([])
+    expect(fake.logs.join('\n')).toContain(`/add-dir ${MOUNTS}/${offer.owner}/zed`)
+    expect((await $.prompt.submit(prompt(HANDOFF_PROMPT))).drop).toBeUndefined()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('a Desktop session in its checkout asks the person to /add-dir a worktree attached later, and again on resume', async ($, on) => {
+    const fake = desktopTab(on, $)
+    const offer = await offerFromDesktopTab($, fake)
+    await startFromLink($, fake, offer.checkout)
+    const zed = `${MOUNTS}/${offer.owner}/zed`
+    scriptMounts(fake, ['delta', 'zed'], (owner) => `${FOLDERS}/${owner}`)
+    fake.addWorktree('zed')
+    await fake.advance(0)
+    // Desktop refuses a plugin's /add-dir, so the transcript names the command for the person to type.
+    expect(fake.logs.join('\n')).toContain(`The "zed" worktree was added to this thread. Claude Code Desktop doesn't let Delta add it to this session. To work in it here too, run:\n/add-dir ${zed}`)
+    expect(fake.sessionCommands).toEqual([])
+    expect(fake.cwd).toBe(offer.checkout)
+    expect(fake.store.get('session:opened-from-link')).toMatchObject({ directory: offer.checkout })
+    expect((await $.prompt.submit(prompt(HANDOFF_PROMPT))).drop).toBeUndefined()
+    await $.session.end({ ...sessionEnd(fake.session), reason: 'prompt_input_exit' })
+    // Claude forgets added directories with the session, so a resume asks again.
+    const asked = fake.logs.length
+    await $.session.start({ ...sessionStart, surface: 'desktop', cwd: offer.checkout })
+    await fake.advance(0)
+    expect(fake.logs.slice(asked).join('\n')).toContain(`/add-dir ${zed}`)
+    expect(fake.sessionCommands).toEqual([])
+    expect((await $.prompt.submit(prompt('after resume'))).drop).toBeUndefined()
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
   })
 
   test("Claude's own cd below the joined directory keeps participating, and leaving it pauses", async ($, on) => {
@@ -1109,11 +1149,14 @@ async function offerFromDesktopTab($: Engine, fake: ReturnType<typeof fakeThread
   await finishJoin(fake)
   const owner = fake.mountRequests[0]!.owner
   expect(owner).toMatch(/^desktop-/)
-  return { owner, folder: `${FOLDERS}/${owner}`, record: `${CONFIG}/delta-plugin/handoffs/${owner}.json` }
+  return {
+    owner, checkout: `${MOUNTS}/${owner}/delta`,
+    record: `${CONFIG}/delta-plugin/handoffs/${owner}.json`,
+  }
 }
 
-/** The session Desktop starts in the thread folder from the link, once the opening line is sent. */
-async function startInThreadFolder($: Engine, fake: ReturnType<typeof fakeThreads>, folder: string) {
+/** The session Desktop starts in `folder` from the link, once the opening line is sent. */
+async function startFromLink($: Engine, fake: ReturnType<typeof fakeThreads>, folder: string) {
   fake.session = 'opened-from-link'
   fake.cwd = folder
   // Desktop opens a new session there.

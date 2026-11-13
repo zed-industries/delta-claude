@@ -40,14 +40,20 @@ export type SessionDirectories = { workingDirectory: string; additionalDirectori
  * Where a joined session works: its thread's first worktree's checkout, with the others added as
  * working directories, as Delta's own Claude sessions do. Claude Code only makes an isolated
  * subagent's worktree, and only loads a project's instructions, inside a checkout. Claude Code
- * Desktop, which has no `/cd`, works in the thread folder, which links to every checkout, and so
- * does a session whose thread has no worktree left.
+ * Desktop has no `/cd`, so a Desktop session works where Desktop started it, `desktopRoot`: in one
+ * of the thread's checkouts, with the others added, or else in the thread folder, which links to
+ * every checkout. A session whose thread has no worktree left works in the thread folder.
  */
-export function sessionDirectories(mounted: MountedThread, folder: boolean): SessionDirectories {
-  const [first, ...others] = mounted.worktrees
-  if (folder || !first) return { workingDirectory: mounted.directory, additionalDirectories: [] }
-  return { workingDirectory: first.directory, additionalDirectories: others.map((tree) => tree.directory) }
+export function sessionDirectories(mounted: MountedThread, desktopRoot?: string): SessionDirectories {
+  const own = desktopRoot === undefined ? mounted.worktrees[0]
+    : mounted.worktrees.find((tree) => samePath(tree.directory, desktopRoot))
+  if (!own) return { workingDirectory: mounted.directory, additionalDirectories: [] }
+  return {
+    workingDirectory: own.directory,
+    additionalDirectories: mounted.worktrees.filter((tree) => tree !== own).map((tree) => tree.directory),
+  }
 }
+
 
 /**
  * The worktrees a mount added and removed since `previous`, and, when the session in `directory`
@@ -55,11 +61,11 @@ export function sessionDirectories(mounted: MountedThread, folder: boolean): Ses
  * again; Claude adds one it already has without asking.
  */
 export function worktreeChanges(
-  previous: readonly ThreadMount[], directory: string | undefined, mounted: MountedThread, folder: boolean,
+  previous: readonly ThreadMount[], directory: string | undefined, mounted: MountedThread, desktopRoot?: string,
 ): { added: ThreadMount[]; removed: ThreadMount[]; update?: SessionDirectories } {
   const added = mounted.worktrees.filter((tree) => !previous.some((mount) => mount.reference === tree.reference))
   const removed = previous.filter((mount) => !mounted.worktrees.some((tree) => tree.reference === mount.reference))
-  const target = sessionDirectories(mounted, folder)
+  const target = sessionDirectories(mounted, desktopRoot)
   const moves = directory !== undefined && !samePath(target.workingDirectory, directory)
   const missing = moves ? target.additionalDirectories
     : target.additionalDirectories.filter((path) => added.some((tree) => samePath(tree.directory, path)))

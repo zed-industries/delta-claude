@@ -49,7 +49,7 @@ export type Binding = {
   owner?: string
   /**
    * The directory a joined session works in: its thread's first worktree's checkout, or in Claude
-   * Code Desktop the thread folder.
+   * Code Desktop the checkout or thread folder Desktop started it in.
    */
   directory?: string
   /** Every worktree of a joined session's thread, as the last `thread mount` placed them. */
