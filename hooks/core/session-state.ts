@@ -202,6 +202,12 @@ export type SessionState = {
   /** A saved checkout's mount is being restored while prompts proceed and record locally. */
   restoringCheckout?: true
   /**
+   * Why Delta refused to restore the saved checkout's mount for good, such as a folder it manages for
+   * another thread. Prompts keep recording locally, and nothing restores the checkout again until an
+   * explicit /delta-share or the session resumes.
+   */
+  checkoutRefusal?: string
+  /**
    * Where Claude has to be between turns, and the checkouts it has to add, because the thread's
    * worktrees changed.
    */
@@ -372,6 +378,7 @@ export function resetRuntime(runtime: SessionState) {
   runtime.mounted = undefined
   runtime.restoring = undefined
   runtime.restoringCheckout = undefined
+  runtime.checkoutRefusal = undefined
   runtime.moveTo = undefined
   runtime.notes = []
   runtime.nativeTurns.clear()

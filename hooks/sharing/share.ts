@@ -12,7 +12,7 @@ import {
   type CommandForm, requireContract, resolveCli, threadCreate, threadInvite, threadShare, threadStatus,
 } from '../cli/delta-cli'
 import { worktreeHistory } from '../cli/command-outcomes'
-import { attachWorktree, mountCheckout } from './checkout'
+import { attachWorktree, managedCheckoutRefusal, mountCheckout } from './checkout'
 import { followTranscript } from '../setup/activation'
 import { authenticationHost, claudeInteraction } from '../setup/interaction'
 import {
@@ -29,7 +29,7 @@ import { type AudienceAnswer, chooseShareAudience, type ShareAudience } from './
 import { snapshotMessages } from '../recording/snapshot'
 import { children, deliverChild, recordsChildren } from '../subagents/subagents'
 import { errorText } from '../core/text'
-import { DeltaCommandError, validateThreadFrontier } from '../cli/thread-commands'
+import { validateThreadFrontier } from '../cli/thread-commands'
 import { adoptExistingChildren } from '../subagents/thread-runs'
 import { startConversation, stopConversation } from '../watch/watch'
 
@@ -190,6 +190,7 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   }
   // Reattachment is the explicit recovery: it lifts every pause but the watcher's, which going live lifts.
   runtime.pauses.clear()
+  runtime.checkoutRefusal = undefined
   runtime.deliveryNotice = undefined
   binding = await serial(() => load(host, session))
   await assertShareSession(host, request)
@@ -239,12 +240,7 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   setProgress(host, 'Attaching the checkout…', 'active', [3, 5])
   let reference: string
   try { reference = await attachWorktree(host, root, thread, binding.checkoutReference, check, session) }
-  catch (error) {
-    // A checkout Delta manages for another thread, which no session here joined.
-    if (error instanceof DeltaCommandError && error.reason === 'worktree_directory_in_use')
-      throw new Error(`${root} is a checkout Delta manages for another thread, so it can't be shared as this one. Run /delta-join with that thread's link to work there (${error.message})`)
-    throw error
-  }
+  catch (error) { throw managedCheckoutRefusal(error, root) }
   await serial(async () => {
     const current = await load(host, session)
     if ((current.checkout && !samePath(current.checkout, root)) ||
@@ -252,7 +248,8 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
       throw new Error('Delta returned a different checkout reference or directory; the existing binding was preserved')
     await save(host, { ...current, checkout: root, checkoutReference: reference, pendingWorktree: undefined })
   })
-  await mountCheckout(host, { session, checkout: root, checkoutReference: reference }, check)
+  try { await mountCheckout(host, { session, checkout: root, checkoutReference: reference }, check) }
+  catch (error) { throw managedCheckoutRefusal(error, root) }
   await assertShareSession(host, request)
   let outcome: ShareOutcome = { band: audience.kind === 'unchanged' ? 'Reconnected' : 'Synced privately' }
   if (audience.kind === 'unchanged' && !sessionSyncs(binding))
