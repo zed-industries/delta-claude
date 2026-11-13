@@ -272,7 +272,7 @@ export async function parentDirectories(host: Host, binding: Pick<ChildBinding, 
   const bound = boundDirectory(session)
   if (!bound) return []
   if (!session?.joined) return [bound]
-  // A joined thread with one worktree works in that worktree's own directory.
+  // A joined session works in one worktree's checkout and adds the others' as working directories.
   const mounted = (session.mounts ?? []).map((mount) => mount.directory)
   return [bound, ...mounted.filter((directory) => !samePath(directory, bound))]
 }
@@ -742,7 +742,7 @@ type Fork = { thread: string; reference: string; owner: string; directory?: stri
  * The child works in the fork of the worktree its parent works in, which Delta checks out inside the
  * parent's checkout: Claude lets a subagent edit inside the session's directories without asking, as in
  * a worktree of its own, but asks for a directory it was merely sent to elsewhere. Only a parent that
- * works in a thread folder itself, as a joined thread with several worktrees does, gets the fork's.
+ * works in a thread folder itself, as a joined Claude Code Desktop session does, gets the fork's.
  */
 async function forkWorktrees(host: Host, binding: ChildBinding): Promise<Fork | undefined> {
   const { session, agentId, parent, name } = binding

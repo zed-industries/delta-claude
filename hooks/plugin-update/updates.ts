@@ -7,7 +7,7 @@ import { clearPluginUpdateNotice, showPluginUpdateNotice } from '../band/plugin-
 import type { Host } from '../core/host'
 import { MINIMUM_CLAUDE_VERSION } from '../core/compatibility'
 import { claimInstallation, installation } from '../core/installation'
-import { hasInteractiveSurface } from '../sharing/lifecycle'
+import { hasInteractiveSurface, sessionSurfaces } from '../sharing/lifecycle'
 import { samePath } from '../core/paths'
 import { requests, stateFor } from '../core/session-state'
 import { errorText } from '../core/text'
@@ -134,7 +134,7 @@ async function checkInBackground(host: Host, observer: Observer) {
   const current = async () => observers.get(observer.session) === observer && installation?.kind !== 'plugin' &&
     await host.store.get(NOTIFICATIONS) !== false
   try {
-    const surfaces = await host.session.surfaces()
+    const surfaces = await sessionSurfaces(host)
     if (!hasInteractiveSurface(surfaces) || !!await host.env.disableNonessentialTraffic() || !await current()) {
       clearPluginUpdateNotice(host, observer.session)
       return
@@ -255,7 +255,7 @@ export async function pluginUpdateCommand(host: Host, args: string): Promise<{ t
       const target = await targetFor(host, cwd, project)
       if (!target) return { text: UNSUPPORTED }
       clearPluginUpdateNotice(host, session)
-      const terminal = (await host.session.surfaces()).includes('terminal')
+      const terminal = (await sessionSurfaces(host)).includes('terminal')
       const activate = (version: string) => {
         handedOff = true
         return activateInstalled(host, session, terminal, target.branch, version, release)

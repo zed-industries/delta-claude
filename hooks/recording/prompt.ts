@@ -66,7 +66,7 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
   if (blocked === 'restoring')
     return { drop: "Delta is restoring this thread's worktrees. Wait for the band to say they are restored, then try again. The prompt was not submitted." }
   if (blocked === 'moving')
-    return { drop: 'Delta is moving Claude to the thread folder between turns. Try again in a moment. The prompt was not submitted.' }
+    return { drop: "Delta is updating this session's worktrees between turns. Try again in a moment. The prompt was not submitted." }
   // Claude Code can start a continuation before the parent's transcript names it; look once more.
   if (runtime.binding && continuationCandidate(session, runtime.binding) && !runtime.continuationRechecked) {
     runtime.continuationRechecked = true

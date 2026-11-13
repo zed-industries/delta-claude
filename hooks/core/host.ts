@@ -22,8 +22,12 @@ export type Host = {
     /** Set when Delta runs this session over ACP and records it itself. */
     deltaAcpSession(): Promise<string | undefined>
     disableNonessentialTraffic(): Promise<string | undefined>
+    /** How Claude Code was started: `claude-desktop` in a Claude Code Desktop session. */
+    entrypoint(): Promise<string | undefined>
     home(): Promise<string | undefined>
     os(): Promise<string | undefined>
+    /** Have Claude load the instruction files of each directory `/add-dir` adds. */
+    setAdditionalDirectoriesClaudeMd(): Promise<unknown>
     userProfile(): Promise<string | undefined>
   }
   fs: Pick<EngineInterface['fs'], 'exists' | 'list' | 'stat' | 'write'> & {

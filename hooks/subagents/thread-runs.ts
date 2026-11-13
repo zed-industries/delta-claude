@@ -13,7 +13,7 @@ import {
 } from './delta-threads'
 import { claudeInteraction } from '../setup/interaction'
 import { mountThread, requireMounted, unmountThread } from '../sharing/join'
-import { hasInteractiveSurface } from '../sharing/lifecycle'
+import { hasInteractiveSurface, sessionSurfaces } from '../sharing/lifecycle'
 import { deliverNote } from '../watch/rows'
 import { type Binding, boundDirectory, report, stateFor } from '../core/session-state'
 import type { Host } from '../core/host'
@@ -113,7 +113,7 @@ async function takeoverRefusal(host: Host, name: string, running: { name: string
   const who = conversationText(running.name ?? '').trim() || 'someone'
   const refusal = `The Delta thread "${name}" is running in Delta (${who}), so Claude left it alone. ` +
     'Try again once it is idle, or ask the person to let Claude take it over.'
-  if (!hasInteractiveSurface(await host.session.surfaces())) return refusal
+  if (!hasInteractiveSurface(await sessionSurfaces(host))) return refusal
   try {
     const answer = await claudeInteraction(host).ask(
       `Claude wants to take over "${name}", which ${who} is running in Delta. Take it over?`,

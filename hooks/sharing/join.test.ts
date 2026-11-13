@@ -119,8 +119,8 @@ describe('joining', () => {
     expect(fake.session).not.toBe(previousSession)
     expect(await bandText($)).toContain(LIVE)
     expect(fake.sessionCommands).toEqual([{ command: 'clear', args: '' }, { command: 'cd', args: `${MOUNTS}/${fake.session}/delta` }])
-    // Claude's trust prompt names only a path, so the transcript says what it is and which answer joins.
-    expect(fake.logs.some((line) => line.includes('Yes, move here'))).toBe(true)
+    // Claude's trust prompt names only a path, so the transcript says what it is and which answer pauses Delta.
+    expect(fake.logs.some((line) => line.includes('Moving to the "delta" worktree.'))).toBe(true)
     // A thread with one worktree is worked in at that worktree's own checkout.
     const directory = `${MOUNTS}/${fake.session}/delta`
     expect(binding).toMatchObject({
@@ -223,6 +223,16 @@ describe('joining', () => {
     await fake.advance(2_000)
     expect(fake.unmounts).toEqual([])
     fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('a Desktop tab that reports no surfaces, as Desktop 5.11492 does, still hands the join off', async ($, on) => {
+    const fake = sharedThread(on, $, { env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' } })
+    desktopHost(fake)
+    fake.surfaces = []
+    const offer = await offerFromDesktopTab($, fake)
+    expect(fake.opened).toEqual([newSessionLink(offer.folder, HANDOFF_PROMPT)])
+    expect(fake.sessionCommands).toEqual([])
     await $.session.end(sessionEnd(fake.session))
   })
 
@@ -430,6 +440,33 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
+  test('resume adds the other worktrees again, and moves a session that joined in the thread folder to the first checkout', async ($, on) => {
+    const fake = sharedThread(on, $)
+    fake.addWorktree('zed')
+    scriptMounts(fake, ['delta', 'zed'], (owner) => `${FOLDERS}/${owner}`)
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    const session = fake.session
+    const own = `${MOUNTS}/${session}/delta`
+    // An earlier plugin version put a session with several worktrees in the thread folder.
+    const folder = `${FOLDERS}/${session}`
+    fake.store.set(`session:${session}`, { ...fake.store.get(`session:${session}`) as object, directory: folder })
+    await $.session.end({ ...sessionEnd(session), reason: 'prompt_input_exit' })
+    // Claude forgets added directories with the session.
+    fake.addedDirectories = []
+    fake.cwd = folder
+    const commands = fake.sessionCommands.length
+    await $.session.start({ ...sessionStart, cwd: folder })
+    await fake.advance(0)
+    expect(fake.sessionCommands.slice(commands)).toEqual([
+      { command: 'cd', args: own }, { command: 'add-dir', args: `${MOUNTS}/${session}/zed` }])
+    expect((fake.store.get(`session:${session}`) as any).directory).toBe(own)
+    expect((await $.prompt.submit(prompt('after restore'))).drop).toBeUndefined()
+    fake.expectClean()
+    await $.session.end(sessionEnd(session))
+  })
+
   test('a failed mount after the clear keeps the fresh session in its saved transition until a retry mounts it', async ($, on) => {
     const fake = sharedThread(on, $)
     fake.commandFault = { operation: 'mount', message: 'daemon unavailable' }
@@ -458,7 +495,7 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
-  test('a thread with three worktrees is joined in a thread folder and every worktree is checked before a prompt', async ($, on) => {
+  test("a thread with three worktrees is joined in the first one's checkout with the others added, and every worktree is checked before a prompt", async ($, on) => {
     const fake = sharedThread(on, $)
     fake.addWorktree('zed')
     fake.addWorktree('web')
@@ -467,13 +504,19 @@ describe('joining', () => {
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
     await finishJoin(fake)
     const session = fake.session
-    const folder = `${FOLDERS}/${session}`
+    const own = `${MOUNTS}/${session}/delta`
     const binding = fake.store.get(`session:${session}`) as any
-    expect(binding.directory).toBe(folder)
+    expect(binding.directory).toBe(own)
     expect(binding.mounts.map((mount: any) => [mount.name, mount.directory])).toEqual([
-      ['delta', `${MOUNTS}/${session}/delta`], ['zed', `${MOUNTS}/${session}/zed`], ['web', `${MOUNTS}/${session}/web`]])
-    expect(fake.cwd).toBe(folder)
-    expect(fake.sessionCommands.at(-1)).toEqual({ command: 'cd', args: folder })
+      ['delta', own], ['zed', `${MOUNTS}/${session}/zed`], ['web', `${MOUNTS}/${session}/web`]])
+    expect(fake.cwd).toBe(own)
+    expect(fake.sessionCommands.slice(1)).toEqual([
+      { command: 'cd', args: own },
+      { command: 'add-dir', args: `${MOUNTS}/${session}/zed` },
+      { command: 'add-dir', args: `${MOUNTS}/${session}/web` },
+    ])
+    // Claude loads the added checkouts' instructions as well as the first's.
+    expect(fake.envSet).toEqual({ CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' })
     expect((await $.prompt.submit(prompt('all mounted'))).drop).toBeUndefined()
     // One worktree that is not mounted blocks the prompt, and both the reply and the band name it.
     fake.worktreeItems!.find((tree) => tree.reference === 'zed-history#t=0')!.checkouts[0]!.active = false
@@ -487,7 +530,7 @@ describe('joining', () => {
     // Claude outside the session's directory is refused too, naming where it has to be.
     fake.cwd = `${MOUNTS}/${session}/zed`
     expect((await $.prompt.submit(prompt('wrong directory'))).drop).toBeDefined()
-    fake.cwd = folder
+    fake.cwd = own
     expect(fake.exports).toBe(0)
     expect(fake.operations().filter((operation) => operation === 'mount')).toHaveLength(1)
     expect(fake.server.mount?.directory).toBe(CHECKOUT)
@@ -495,7 +538,7 @@ describe('joining', () => {
     await $.session.end(sessionEnd(session))
   })
 
-  test('worktrees added and removed live update the mounts, tell Claude and the person, and move Claude to the thread folder once', async ($, on) => {
+  test('worktrees added and removed live update the mounts, tell Claude and the person, and add new checkouts without moving Claude', async ($, on) => {
     const fake = sharedThread(on, $)
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
@@ -513,26 +556,25 @@ describe('joining', () => {
     expect(mounts()).toBe(1)
     expect(fake.rows).toEqual([])
 
-    // A second worktree: Claude was in the first one's checkout, so it moves up to the folder.
+    // A second worktree is added to the session, which stays in the first one's checkout.
     scriptMounts(fake, ['delta', 'zed'], () => folder)
     fake.addWorktree('zed')
     await fake.advance(0)
     expect(mounts()).toBe(2)
     expect(fake.delta().filter((argv) => argv[3] === 'mount').map((argv) => argv.includes('--join'))).toEqual([true, false])
-    expect(fake.cwd).toBe(folder)
-    expect(fake.sessionCommands.at(-1)).toEqual({ command: 'cd', args: folder })
+    expect(fake.cwd).toBe(own)
+    expect(fake.sessionCommands.at(-1)).toEqual({ command: 'add-dir', args: `${MOUNTS}/${session}/zed` })
     expect((fake.store.get(`session:${session}`) as any)).toMatchObject({
-      directory: folder, mounts: [{ name: 'delta', directory: own }, { name: 'zed', directory: `${MOUNTS}/${session}/zed` }] })
+      directory: own, mounts: [{ name: 'delta', directory: own }, { name: 'zed', directory: `${MOUNTS}/${session}/zed` }] })
     // Each row's first line is what Claude is told.
     expect(fake.rows[0]).toContain('zed')
-    expect(fake.rows.at(-1)).toContain(folder)
+    expect(fake.rows.at(-1)).toContain(`${MOUNTS}/${session}/zed`)
     expect(fake.rows).toHaveLength(2)
     expect((await $.prompt.submit(prompt('two worktrees'))).drop).toBeUndefined()
     await $.turn.start(turnStart('first-turn'))
     await $.turn.complete(turnComplete('first-turn'))
 
-    // A session in the thread folder stays there as worktrees come and go.
-    const moves = fake.sessionCommands.length
+    // Worktrees that come and go after the first never move the session.
     scriptMounts(fake, ['delta', 'zed', 'web'], () => folder)
     fake.addWorktree('web')
     await fake.advance(0)
@@ -542,11 +584,12 @@ describe('joining', () => {
     scriptMounts(fake, ['delta'], () => folder)
     fake.removeWorktree('web')
     await fake.advance(0)
-    expect(fake.sessionCommands.length).toBe(moves)
-    expect(fake.cwd).toBe(folder)
-    expect((fake.store.get(`session:${session}`) as any).directory).toBe(folder)
+    expect(fake.sessionCommands.filter((entry) => entry.command === 'cd')).toHaveLength(1)
+    expect(fake.addedDirectories).toEqual([`${MOUNTS}/${session}/zed`, `${MOUNTS}/${session}/web`])
+    expect(fake.cwd).toBe(own)
+    expect((fake.store.get(`session:${session}`) as any).directory).toBe(own)
     expect((fake.store.get(`session:${session}`) as any).mounts.map((mount: any) => mount.name)).toEqual(['delta'])
-    expect(fake.rows).toHaveLength(5)
+    expect(fake.rows).toHaveLength(6)
     expect(fake.rows.at(-1)).toContain('web')
     expect(await bandText($)).toContain('web')
     expect((await $.prompt.submit(prompt('back to one'))).drop).toBeUndefined()
@@ -554,7 +597,7 @@ describe('joining', () => {
     await $.session.end(sessionEnd(session))
   })
 
-  test('a worktree added during a turn waits for the turn to end before telling Claude and moving it', async ($, on) => {
+  test('a worktree added during a turn waits for the turn to end before telling Claude and adding it', async ($, on) => {
     const fake = sharedThread(on, $)
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
@@ -565,11 +608,12 @@ describe('joining', () => {
     scriptMounts(fake, ['delta', 'zed'], () => `${FOLDERS}/${session}`)
     fake.addWorktree('zed')
     await fake.advance(0)
-    expect(fake.cwd).toBe(own)
+    expect(fake.addedDirectories).toEqual([])
     expect(fake.rows).toEqual([])
     await $.turn.complete(turnComplete('running'))
     await fake.advance(0)
-    expect(fake.cwd).toBe(`${FOLDERS}/${session}`)
+    expect(fake.cwd).toBe(own)
+    expect(fake.addedDirectories).toEqual([`${MOUNTS}/${session}/zed`])
     expect(fake.rows).toHaveLength(2)
     await $.session.end(sessionEnd(session))
   })
@@ -1027,7 +1071,7 @@ function sharedThread(on: Parameters<typeof fakeThreads>[0], engine: Engine, opt
   fake.server.checkout = 'attached'
   fake.server.mount = { thread: fake.threadId, directory: CHECKOUT, reference: REFERENCE }
   fake.server.worktrees = [{ reference: REFERENCE, name: 'delta' }]
-  scriptMounts(fake, ['delta'], (owner) => `${MOUNTS}/${owner}/delta`)
+  scriptMounts(fake, ['delta'], (owner) => `${FOLDERS}/${owner}`)
   return fake
 }
 
@@ -1055,7 +1099,6 @@ function desktopTab(on: Parameters<typeof fakeThreads>[0], engine: Engine) {
   const fake = sharedThread(on, engine)
   desktopHost(fake)
   fake.statusPatch = { title: 'Fix the parser' }
-  scriptMounts(fake, ['delta'], (owner) => owner.startsWith('desktop-') ? `${FOLDERS}/${owner}` : `${MOUNTS}/${owner}/delta`)
   return fake
 }
 

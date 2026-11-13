@@ -9,7 +9,7 @@ import { InstallationUpdates, type UpdateHost } from '../cli/install-update'
 import { claudeInteraction, offerToStopWaiting, setupEnv } from './interaction'
 import { startJoin } from '../sharing/join'
 import { isOneOf } from '../core/json'
-import { hasInteractiveSurface } from '../sharing/lifecycle'
+import { hasInteractiveSurface, sessionSurfaces } from '../sharing/lifecycle'
 import { currentOrganizationId, listOrganizations } from './organizations'
 import { pluginUpdateCommand } from '../plugin-update/updates'
 import { activation, recoveryCommand, requests, stateFor } from '../core/session-state'
@@ -24,7 +24,7 @@ import { errorText } from '../core/text'
 
 /** Run `/delta setup` for the active session and answer with what it did. */
 async function setupCommand(host: Host): Promise<string> {
-  if (!hasInteractiveSurface(await host.session.surfaces())) return HEADLESS_REFUSAL
+  if (!hasInteractiveSurface(await sessionSurfaces(host))) return HEADLESS_REFUSAL
   // The wizard stops once its session is no longer the activated one, so it needs one that is, even
   // after a hot reload or before the first prompt.
   try { await activateForCommand(host, await host.session.id()) }
@@ -71,7 +71,7 @@ export async function registerCommands(host: Host) {
  * nothing to the transcript.
  */
 export async function deltaMenu(host: Host, start: MenuStart, usage: string, form: CommandForm): Promise<{ text?: string }> {
-  if (!hasInteractiveSurface(await host.session.surfaces())) return { text: usage }
+  if (!hasInteractiveSurface(await sessionSurfaces(host))) return { text: usage }
   let action: string | undefined
   try { action = await chooseDeltaAction(claudeInteraction(host), start) }
   catch (error) {
@@ -88,7 +88,7 @@ async function manageOrganization(host: Host): Promise<string> {
   try { organization = (await listOrganizations(host)).find((known) => known.current) }
   catch (error) { return `Delta couldn't read your current team (${errorText(error)}). Manage your teams here: ${DASHBOARD_URL}` }
   if (!organization) return `Delta has no team selected. Manage your teams here: ${DASHBOARD_URL}`
-  const interactive = hasInteractiveSurface(await host.session.surfaces())
+  const interactive = hasInteractiveSurface(await sessionSurfaces(host))
   return openMembersPage({ openLink: async (url) => interactive && setupEnv(host).openLink(url) }, organization)
 }
 
@@ -145,7 +145,7 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
   try {
     await activateForCommand(host, session)
     // Sharing and joining report through the band and ask through dialogs, which only these surfaces have.
-    if (!hasInteractiveSurface(await host.session.surfaces()))
+    if (!hasInteractiveSurface(await sessionSurfaces(host)))
       return { text: `${locator ? '/delta-join' : '/delta-share'} needs an interactive Claude Code terminal or Desktop Code tab. Print mode, SDK sessions, and cloud runners aren't supported.` }
     if (locator) {
       if (stateFor(session).currentTurnId || stateFor(session).promptEntering)

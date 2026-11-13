@@ -391,8 +391,12 @@ export function fakeThreads(hostOn: On, options: {
     reloadResponse: undefined as string | undefined,
     cliIntegrations: [] as { operation: string; integration?: string; commandForm?: string }[],
     surfaces: ['terminal'] as ('terminal' | 'desktop')[],
-    builtins: ['clear', 'cd'],
+    builtins: ['clear', 'cd', 'add-dir'],
     sessionCommands: [] as { command: string; args: string }[],
+    /** The directories `/add-dir` added to the session, which Claude forgets when the session ends. */
+    addedDirectories: [] as string[],
+    /** The variables the plugin set in Claude's environment. */
+    envSet: {} as Record<string, string | undefined>,
     refuseClear: false,
     refuseCd: false,
     /** Every link the plugin opened with `open`, such as Desktop's new-session link. */
@@ -853,6 +857,10 @@ export function fakeThreads(hostOn: On, options: {
     })
     else on(event, handler)
   }) as On, { CLAUDE_CONFIG_DIR: CONFIG, HOME: '/sandbox', ...options.env })
+  on('env.set', ($, e) => {
+    fake.envSet[e.name] = e.value
+    return { value: {} }
+  })
   // The kit's bottom stores each row; this records it as the plugin's own hook passed it down.
   on('session.append', ($, e, next) => {
     fake.stored.push({
@@ -917,6 +925,10 @@ export function fakeThreads(hostOn: On, options: {
       await fake.endSession?.(fake.session)
       fake.session = `${fake.session}-fresh`
     } else if (e.command === 'cd' && !fake.refuseCd) fake.cwd = e.args
+    else if (e.command === 'add-dir') {
+      if (fake.addedDirectories.includes(e.args)) return { text: `${e.args} is already added as a working directory.` }
+      fake.addedDirectories.push(e.args)
+    }
     else if (e.command === 'rename') {
       // Claude writes the new title, or one it chose when none was typed, before the command returns.
       const title = e.args.trim() || 'chosen-by-claude'
@@ -928,7 +940,7 @@ export function fakeThreads(hostOn: On, options: {
     else if (e.command === 'reload-plugins') {
       if (fake.reloadFailure) throw new Error(fake.reloadFailure)
       if (fake.reloadResponse !== undefined) return { text: fake.reloadResponse }
-    } else if (!['clear', 'cd', 'rename'].includes(e.command)) throw new Error(`Unexpected fixture session command ${e.command}`)
+    } else if (!['clear', 'cd', 'add-dir', 'rename'].includes(e.command)) throw new Error(`Unexpected fixture session command ${e.command}`)
     return {}
   })
   // The settings menu's rows, of which the band reads the theme for its status bar's shade.

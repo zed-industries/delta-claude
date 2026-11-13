@@ -1,9 +1,20 @@
 import type { MountedThread, ThreadMount, ThreadState } from '../cli/thread-commands'
 import { samePath } from '../core/paths'
+import type { Host } from '../core/host'
 
 /** Clearing and resuming switch sessions; only exiting releases their mounts. */
 export function releasesMounts(reason: string): boolean {
   return ['prompt_input_exit', 'logout', 'other'].includes(reason)
+}
+
+/**
+ * The surfaces the session draws on. Claude Code Desktop 5.11492 reports none for its Code tabs, as
+ * a print-mode run does, so a session Desktop started counts as drawing on `desktop`.
+ */
+export async function sessionSurfaces(host: Host): Promise<readonly string[]> {
+  const surfaces = await host.session.surfaces()
+  if (surfaces.length || await host.env.entrypoint() !== 'claude-desktop') return surfaces
+  return ['desktop']
 }
 
 /** Terminal and Desktop hosts provide interactive controls and the status band. */
@@ -22,14 +33,38 @@ export function joinPreflight(status: ThreadState): 'access' | 'empty' | undefin
   if (status.worktrees.status === 'available' && !status.worktrees.items.length) return 'empty'
 }
 
-/** Compute changed worktrees and whether the checkout-to-folder transition is needed. */
-export function worktreeChanges(previous: readonly ThreadMount[], directory: string | undefined, mounted: MountedThread) {
-  return {
-    added: mounted.worktrees.filter((tree) => !previous.some((mount) => mount.reference === tree.reference)),
-    removed: previous.filter((mount) => !mounted.worktrees.some((tree) => tree.reference === mount.reference)),
-    moves: directory !== undefined && previous.some((mount) => samePath(mount.directory, directory)) &&
-      !samePath(mounted.directory, directory),
-  }
+/** The directory a joined session works in, and the other checkouts it adds with `/add-dir`. */
+export type SessionDirectories = { workingDirectory: string; additionalDirectories: string[] }
+
+/**
+ * Where a joined session works: its thread's first worktree's checkout, with the others added as
+ * working directories, as Delta's own Claude sessions do. Claude Code only makes an isolated
+ * subagent's worktree, and only loads a project's instructions, inside a checkout. Claude Code
+ * Desktop, which has no `/cd`, works in the thread folder, which links to every checkout, and so
+ * does a session whose thread has no worktree left.
+ */
+export function sessionDirectories(mounted: MountedThread, folder: boolean): SessionDirectories {
+  const [first, ...others] = mounted.worktrees
+  if (folder || !first) return { workingDirectory: mounted.directory, additionalDirectories: [] }
+  return { workingDirectory: first.directory, additionalDirectories: others.map((tree) => tree.directory) }
+}
+
+/**
+ * The worktrees a mount added and removed since `previous`, and, when the session in `directory`
+ * has to change, how: where to be, and which checkouts to add. A move adds every other checkout
+ * again; Claude adds one it already has without asking.
+ */
+export function worktreeChanges(
+  previous: readonly ThreadMount[], directory: string | undefined, mounted: MountedThread, folder: boolean,
+): { added: ThreadMount[]; removed: ThreadMount[]; update?: SessionDirectories } {
+  const added = mounted.worktrees.filter((tree) => !previous.some((mount) => mount.reference === tree.reference))
+  const removed = previous.filter((mount) => !mounted.worktrees.some((tree) => tree.reference === mount.reference))
+  const target = sessionDirectories(mounted, folder)
+  const moves = directory !== undefined && !samePath(target.workingDirectory, directory)
+  const missing = moves ? target.additionalDirectories
+    : target.additionalDirectories.filter((path) => added.some((tree) => samePath(tree.directory, path)))
+  if (!moves && !missing.length) return { added, removed }
+  return { added, removed, update: { workingDirectory: target.workingDirectory, additionalDirectories: missing } }
 }
 
 /** A confirmation cannot proceed while any background agent is still active. */

@@ -12,7 +12,7 @@ import { CONTRACT_TIMEOUT_MS, requireContract, resolveCli, threadCreate } from '
 import { authenticationHost, claudeInteraction, notifyOnce, setupEnv } from './interaction'
 import { attachWorktree, beginRestoreCheckout, checkoutNeedsMount, mountCheckout } from '../sharing/checkout'
 import { beginRestore, claimHandoff, pendingHandoff, startParticipation } from '../sharing/join'
-import { hasInteractiveSurface } from '../sharing/lifecycle'
+import { hasInteractiveSurface, sessionSurfaces } from '../sharing/lifecycle'
 import { listOrganizations, organizationName } from './organizations'
 import { startPluginUpdates } from '../plugin-update/updates'
 import { policyPath, type ProjectPolicy, readProjectPolicy, recordsAutomatically } from './project-policy'
@@ -570,7 +570,7 @@ export async function startSession(host: Host, session: string, loadedMidSession
     decideCapture(session)
   }
   // Headless sessions get no reminder and are never offered setup; only an interactive surface shows them.
-  if (!hasInteractiveSurface(await host.session.surfaces())) return
+  if (!hasInteractiveSurface(await sessionSurfaces(host))) return
   stateFor(session).reminder = syncReminder(policy)
   host.ui.invalidate()
   try {
@@ -655,7 +655,7 @@ function activateAutomatically(host: Host, session: string, root: string, upload
       if (!ownsActivation()) return
       const refusal = await misconfiguration
       if (!ownsActivation()) return
-      const interactive = hasInteractiveSurface(await host.session.surfaces())
+      const interactive = hasInteractiveSurface(await sessionSurfaces(host))
       if (!ownsActivation()) return
       if (refusal && !(refusal === SIGNED_OUT_REFUSAL && interactive)) {
         await stopAutomaticRecording(host, session, root, refusal)
