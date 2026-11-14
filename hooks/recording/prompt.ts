@@ -9,8 +9,8 @@ import { beginRestoreCheckout, checkoutNeedsMount } from '../sharing/checkout'
 import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_PROMPT } from '../sharing/handoff'
 import { ownsSteering, promptGate } from '../sharing/lifecycle'
 import {
-  activation, type HookEvent, type HookNext, isPaused, pauseCheckout, pauseNotice, recoveryAdvice, requests,
-  resumeCheckout, stateFor,
+  activation, type HookEvent, type HookNext, isPaused, offHint, pauseCheckout, pauseNotice, recoveryAdvice,
+  requests, resumeCheckout, stateFor,
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import { errorText } from '../core/text'
@@ -92,7 +92,7 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
     if (offline && !incomplete && checkoutNeedsMount(session, runtime.binding)) beginRestoreCheckout(host, session)
   } else if (runtime.pauses.has('delivery')) {
     // Watching again cannot lift a refusal, so do not restart the watcher for one.
-    return { drop: `${runtime.pauses.get('delivery') ?? pauseNotice(runtime)} The prompt was not submitted.` }
+    return { drop: `${runtime.pauses.get('delivery') ?? pauseNotice(runtime)}${offHint(runtime.binding)} The prompt was not submitted.` }
   }
   // A session that does not record offline still recovers the watcher here and refuses if it cannot.
   if (!offline && !incomplete && (!runtime.binding.thread || isPaused(runtime) || !liveFor(session))) {
@@ -120,7 +120,9 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
     // queued and retry, so the prompt proceeds rather than being dropped. A non-retryable refusal
     // or a local persistence failure still stops it.
     if (!(offline && classifyCommandFailure(error) === 'transient' && !isPaused(runtime))) {
-      const text = `Delta is not ready for this prompt: ${errorText(error)}. The prompt was not submitted.`
+      // A check that could pass next time is no reason to suggest turning Delta off.
+      const hint = classifyCommandFailure(error) === 'transient' ? '' : offHint(runtime.binding)
+      const text = `Delta is not ready for this prompt: ${errorText(error)}.${hint} The prompt was not submitted.`
       // The band names a worktree or directory that is not ready, until a prompt finds it ready.
       if (error instanceof JoinNotReadyError) pauseCheckout(runtime, 'verification', error.message)
       return { drop: text }

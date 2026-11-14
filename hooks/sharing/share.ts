@@ -155,6 +155,8 @@ export async function turnOff(host: Host, session: string): Promise<SessionOff> 
     catch (error) { await host.ui.log(`Delta mount process did not stop: ${String(error)}`, { to: 'debug' }) }
   }
   runtime.pauses.clear()
+  // A failure that held every prompt, such as a CLI too old to record with, no longer applies.
+  runtime.joinFailure = undefined
   resetRuntime(runtime)
   await releaseThreadMounts(host, session, stopped.children ?? [])
   // A share or join running for another session keeps its progress in the band.

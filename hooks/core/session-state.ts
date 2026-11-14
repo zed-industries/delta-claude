@@ -295,6 +295,14 @@ export function recoveryAdvice(binding?: Binding): string {
   return binding?.autoUpload ? 'automatic recording retries on your next prompt' : `run ${recoveryCommand(binding)}`
 }
 
+/**
+ * How to keep working without Delta when it can't recover a session on its own: `/delta off`, offered
+ * after an error text. A joined session works in a folder Delta mounted for it and can't turn it off.
+ */
+export function offHint(binding?: Binding): string {
+  return binding?.joined || binding?.joinTransition ? '' : ' Run /delta off to turn Delta off for this session.'
+}
+
 /** The transcript path Claude last reported for each session in this process. */
 const transcriptPaths = new Map<string, string>()
 

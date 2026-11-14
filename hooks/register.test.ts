@@ -1002,6 +1002,7 @@ describe('sharing', () => {
     expect(refusals()).toBe(1)
     expect(fake.logs.find((log) => log.includes("won't retry it in this session"))).toContain(
       `${CHECKOUT} is a checkout Delta manages for another thread`)
+    expect(fake.logs.find((log) => log.includes("won't retry it in this session"))).toContain('Run /delta off')
     for (const [index, text] of ['first', 'second'].entries()) {
       expect((await $.prompt.submit(prompt(text))).drop).toBeUndefined()
       await $.tool.call(bash(`after-refusal-${index}`, 'echo local'))
@@ -1019,6 +1020,23 @@ describe('sharing', () => {
     expect(fake.records().map((record) => record.update)).toEqual(expect.arrayContaining([
       expect.objectContaining({ toolCallId: 'after-refusal-0' }), expect.objectContaining({ toolCallId: 'after-refusal-1' }),
     ]))
+    fake.expectClean()
+  })
+
+  test('a session Delta blocks for good points to /delta off, which lets its prompts through', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('one')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    // The CLI is now too old for this plugin, which only updating Delta fixes.
+    fake.contractRange = { min: 1, max: 4 }
+    await $.session.start(sessionStart)
+    await fake.settle()
+    const blocked = await $.prompt.submit(prompt('blocked'))
+    expect(blocked.drop).toContain('participation is blocked')
+    expect(blocked.drop).toContain('Run /delta off')
+    expect(((await $.command.run(typedDelta('off'))) as any).text).toContain('Delta is off for this session')
+    expect((await $.prompt.submit(prompt('without Delta'))).drop).toBeUndefined()
     fake.expectClean()
   })
 

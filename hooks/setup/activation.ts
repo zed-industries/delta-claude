@@ -17,8 +17,8 @@ import { listOrganizations, organizationName } from './organizations'
 import { startPluginUpdates } from '../plugin-update/updates'
 import { policyPath, type ProjectPolicy, readProjectPolicy, recordsAutomatically } from './project-policy'
 import {
-  activation, type AutoUpload, type Binding, boundDirectory, drawnRowKey, isPaused, key, ledgerKey, load, pauseCheckout,
-  producerOf, rememberTranscriptPath, report, requests, resumeCheckout, save, serial, sessions,
+  activation, type AutoUpload, type Binding, boundDirectory, drawnRowKey, isPaused, key, ledgerKey, load, offHint,
+  pauseCheckout, producerOf, rememberTranscriptPath, report, requests, resumeCheckout, save, serial, sessions,
   type SessionState, stateFor, stillActive, storedBinding, transcriptPathOf,
 } from '../core/session-state'
 import type { Host } from '../core/host'
@@ -125,7 +125,9 @@ export async function activate(host: Host, session: string, isCurrent = () => tr
       try { await requireContract(host, session) }
       catch (error) {
         if (!ownsActivation()) return
-        const text = `Delta participation is blocked: ${errorText(error)}`
+        const hint = offHint(binding)
+        const text = hint ? `Delta participation is blocked: ${errorText(error).replace(/[.\s]+$/, '')}.${hint}`
+          : `Delta participation is blocked: ${errorText(error)}`
         // Only an explicit /delta share or /delta join after updating Delta lifts this pause.
         pauseCheckout(runtime, 'delivery', text)
         runtime.joinFailure = text

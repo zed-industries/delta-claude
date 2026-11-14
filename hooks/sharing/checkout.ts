@@ -10,7 +10,7 @@ import {
 import { classifyCommandFailure, DeltaCommandError } from '../cli/thread-commands'
 import { samePath } from '../core/paths'
 import {
-  activation, type Binding, load, recoveryCommand, requests, save, serial, sessions, stateFor,
+  activation, type Binding, load, offHint, recoveryCommand, requests, save, serial, sessions, stateFor,
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import { errorText } from '../core/text'
@@ -112,10 +112,10 @@ export function beginRestoreCheckout(host: Host, session: string) {
       const refusal = managedCheckoutRefusal(error, runtime.binding?.checkout ?? 'this folder')
       const reason = errorText(refusal).replace(/[.\s]+$/, '')
       const text = permanent
-        ? `Delta couldn't restore this checkout's synchronization and won't retry it in this session: ${reason}. Prompts still record locally.`
+        ? `Delta couldn't restore this checkout's synchronization and won't retry it in this session: ${reason}. Prompts still record locally.${offHint(runtime.binding)}`
         : background
         ? `Delta couldn't restore this checkout's synchronization: ${errorText(error)}. Prompts still record locally, and the next one retries.`
-        : `Delta couldn't restore this checkout: ${errorText(error)}. Retry ${recoveryCommand(runtime.binding)}; the prompt was not submitted.`
+        : `Delta couldn't restore this checkout: ${errorText(error)}. Retry ${recoveryCommand(runtime.binding)}; the prompt was not submitted.${offHint(runtime.binding)}`
       if (permanent) runtime.checkoutRefusal = text
       if (!background) runtime.joinFailure = text
       setProgress(host, text, 'error')
