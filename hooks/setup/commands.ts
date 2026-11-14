@@ -16,9 +16,9 @@ import { activation, recoveryCommand, requests, stateFor } from '../core/session
 import type { Host } from '../core/host'
 import {
   DASHBOARD_URL, emailsIn, HEADLESS_REFUSAL, InteractionDismissedError, InteractionUnavailableError, membersUrl,
-  openMembersPage, type Organization, runSetupWizard, startSync, stopSync,
+  openMembersPage, type Organization, runSetupWizard,
 } from './setup'
-import { shareFailureText, startShare } from '../sharing/share'
+import { shareFailureText, startShare, type SessionOff, turnOff } from '../sharing/share'
 import { unshare } from '../sharing/unshare'
 import { errorText } from '../core/text'
 
@@ -34,13 +34,6 @@ async function setupCommand(host: Host): Promise<string> {
   return outcome.text
 }
 
-/** Run `/delta stop` or `/delta start` for the active session's checkout, and update the band to match. */
-async function stopOrStartCommand(host: Host, action: 'stop' | 'start'): Promise<string> {
-  const outcome = await (action === 'stop' ? stopSync : startSync)(setupEnv(host))
-  if (outcome.status === 'wrote') await refreshReminder(host, await host.session.id())
-  return outcome.text
-}
-
 /**
  * Make `session` the activated one for a command that needs it. The start the command's notice began
  * activates the session too, so the command waits for it and activates only what it left inactive.
@@ -51,7 +44,7 @@ async function activateForCommand(host: Host, session: string) {
 }
 
 /** Every `/delta` action, for a surface that can't show the menu and for an action it doesn't know. */
-export const DELTA_USAGE = 'Usage: /delta share [<email>…] | /delta unshare | /delta join <shared-link-or-thread> | /delta setup | /delta stop | /delta start | /delta update | /delta plugin-update [check | notifications on|off] | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage'
+export const DELTA_USAGE = 'Usage: /delta share [<email>…] | /delta unshare | /delta off | /delta join <shared-link-or-thread> | /delta setup | /delta update | /delta plugin-update [check | notifications on|off] | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage'
 /** `/delta-join` typed without its link. */
 export const JOIN_USAGE = 'Usage: /delta-join <link>. Paste the Delta link someone shared with you, such as /delta-join https://delta.dev/join/…, or a thread ID.'
 /** `/delta-org` typed without an action. */
@@ -59,7 +52,7 @@ export const ORG_USAGE = 'Usage: /delta-org list (your teams), /delta-org curren
 
 /** Add `/delta`, and a command of its own for each of its actions, to Claude's slash-command menu. */
 export async function registerCommands(host: Host) {
-  await host.command.register({ name: 'delta', description: 'Share, unshare, or join a Delta session, set up syncing, stop or start sync, choose a team, or update Delta', argumentHint: 'share [<email>…] | unshare | join <shared-link-or-thread> | setup | stop | start | update | plugin-update | org list | org current | org switch <ID> | org manage' })
+  await host.command.register({ name: 'delta', description: 'Share, unshare, or join a Delta session, turn Delta off for it, set up syncing, choose a team, or update Delta', argumentHint: 'share [<email>…] | unshare | off | join <shared-link-or-thread> | setup | update | plugin-update | org list | org current | org switch <ID> | org manage' })
   // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
   // appears in the slash-command menu.
   await host.command.register({ name: 'delta-share', description: 'Delta: sync this session and its code to DeltaDB, and choose who sees it', argumentHint: '[<email>…]' })
@@ -67,8 +60,6 @@ export async function registerCommands(host: Host) {
   // Claude's menu shows a command's description but not its argument hint, so the description carries the format.
   await host.command.register({ name: 'delta-join', description: 'Delta: join a shared conversation. Needs its link: /delta-join <link>', argumentHint: '<shared-link-or-thread>' })
   await host.command.register({ name: 'delta-setup', description: 'Delta: choose which sessions in this repository sync to DeltaDB' })
-  await host.command.register({ name: 'delta-stop', description: "Delta: stop syncing this session and this repository's sessions until /delta-start" })
-  await host.command.register({ name: 'delta-start', description: 'Delta: resume syncing this session and this repository after /delta-stop' })
   await host.command.register({ name: 'delta-update', description: 'Delta: update the installed Delta app and CLI' })
   await host.command.register({ name: 'delta-plugin-update', description: 'Delta: update this Claude Code plugin and apply it when supported', argumentHint: 'check | notifications on|off' })
   await host.command.register({ name: 'delta-org', description: 'Delta: manage your team. /delta-org list, current, switch <ID>, invite <email>, or manage', argumentHint: 'list | current | switch <ID> | invite <email>… | manage' })
@@ -120,9 +111,11 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
     return pluginUpdateCommand(host, action.slice('plugin-update'.length).trim())
   if (action === 'update') return { text: await installationUpdates.update(installUpdateHost(host), form) }
   if (action === 'org manage') return { text: await manageOrganization(host) }
-  // Stopping and starting rewrite the checkout's setting, as setup does, so they need no activation or
-  // interactive surface. Stopping also stops this session's sync, which it refuses while a share or join runs.
-  if (action === 'stop' || action === 'start') return { text: await stopOrStartCommand(host, action) }
+  if (action === 'off') {
+    const session = await host.session.id()
+    await sessionBegun(session)
+    return { text: offText(await turnOff(host, session)) }
+  }
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
   if (/^(?:setup|share|join)\b/.test(action) && await offerToStopWaiting(host)) return {}
   // The setup wizard only writes the checkout's policy; it needs no session binding.
@@ -178,6 +171,18 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
     setProgress(host, text, 'error')
     return { text }
   }
+}
+
+/** What `/delta off` answers. */
+function offText(outcome: SessionOff): string {
+  if (outcome.kind === 'none') return "Delta isn't syncing this session, so there's nothing to turn off."
+  if (outcome.kind === 'already off') return 'Delta is already off for this session. Run /delta-share to turn it back on.'
+  if (outcome.kind === 'refused') return `Delta stays on for this session: ${outcome.reason}.`
+  const queued = !outcome.queued ? ''
+    : outcome.queued === 1 ? " 1 recorded row hadn't reached Delta yet; it's sent when you turn Delta back on."
+    : ` ${outcome.queued} recorded rows hadn't reached Delta yet; they're sent when you turn Delta back on.`
+  return "Delta is off for this session: it doesn't record this conversation or sync this checkout, including after you resume it. " +
+    `Run /delta-share to turn it back on; what you say meanwhile is added to the thread then.${queued}`
 }
 
 export const installationUpdates = new InstallationUpdates()

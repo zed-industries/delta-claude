@@ -291,7 +291,7 @@ async function drainPending(host: Host, session: string): Promise<boolean> {
     while (delivering()) {
       const binding = await serial(async () => load(host, session))
       // A conversation that continued in another session delivers from there.
-      // A stopped session's queue waits for it to resume.
+      // A session turned off keeps its queue until /delta share turns it back on.
       if (!binding.thread || !binding.pending.length || binding.continuedIn || binding.stopped) return true
       // A recovered outbox checks the CLI's contract before its first append, so an incompatible CLI
       // records nothing. An answer that arrives after the session ended or was activated again belongs
@@ -571,7 +571,7 @@ export async function drain(host: Host, session: string): Promise<void> {
  */
 async function failDelivery(host: Host, session: string, error: unknown): Promise<never> {
   const state = sessions.get(session)
-  // A stopped session's queue waits for it to resume: a send that outlived the stop says nothing.
+  // A session turned off keeps its queue until /delta share: a send that outlived turning off says nothing.
   if (state?.binding?.stopped) throw new DeltaSendError(errorText(error), false)
   if (!(error instanceof DeltaCommandError)) throw error
   // A session that ended or was replaced must not retry, pause, or speak in the active one's transcript.

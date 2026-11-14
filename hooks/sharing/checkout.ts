@@ -77,7 +77,8 @@ export function beginRestoreCheckout(host: Host, session: string) {
   if (background) runtime.restoringCheckout = true
   else runtime.restoring = true
   setProgress(host, 'Restoring this checkout’s synchronization…', 'active')
-  const owns = () => activation.session === session && sessions.get(session) === runtime
+  // /delta off ends a restore still running, and stops a mount that comes up after it.
+  const owns = () => activation.session === session && sessions.get(session) === runtime && !runtime.binding?.stopped
   host.clock.after(0, async () => {
     let mounted = false
     try {

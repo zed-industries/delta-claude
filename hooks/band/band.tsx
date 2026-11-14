@@ -156,10 +156,9 @@ function statusShown(): boolean {
 }
 
 /** How the band reminds a session Delta does not sync, by the checkout's setting. */
-export type SyncReminder = 'manual' | 'not set up' | 'stopped'
+export type SyncReminder = 'manual' | 'not set up'
 const REMINDERS: Record<SyncReminder, { text: string; command: string }> = {
   manual: { text: 'Not syncing', command: '/delta-share' },
-  stopped: { text: 'Sync stopped', command: '/delta-start' },
   'not set up': { text: 'Not set up', command: '/delta-setup' },
 }
 

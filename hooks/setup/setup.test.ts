@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import {
   type Interaction, InteractionDismissedError, InteractionUnavailableError, inviteResultsFrom, offerOnboarding,
-  runSetupWizard, type SessionStop, type SetupEnv, startSync, stopSync,
+  runSetupWizard, type SetupEnv,
 } from './setup'
 
 /** An environment over an in-memory file, with the questions answered from a queue. */
@@ -16,12 +16,6 @@ function harness(options: {
   login?: string
   /** Who already sees this session; nobody unless set. */
   audience?: 'none' | 'private' | 'shared'
-  /** What stopping this session's own sync answers; it wasn't syncing unless set. */
-  sessionStop?: SessionStop
-  /** Whether this session was stopped, so starting resumes it; not unless set. */
-  sessionStopped?: boolean
-  /** Why this stopped session can't resume now, when it can't. */
-  resumeRefused?: string
   failWrite?: boolean
   failCreate?: boolean
   failInvite?: string
@@ -43,8 +37,6 @@ function harness(options: {
   const invites: { organization: string; emails: string[] }[] = []
   const opened: string[] = []
   let signIns = 0
-  let sessionStops = 0
-  let resumes = 0
   const interaction: Interaction = {
     async ask(question, askOptions) {
       // Claude's `$.ui.ask` shows plain-text options only; anything else cannot be drawn.
@@ -93,17 +85,8 @@ function harness(options: {
     },
     sessionAudience: async () => options.audience ?? 'none',
     shareSession: async (audience) => { shares.push(audience); return true },
-    stopSession: async () => { sessionStops++; return options.sessionStop ?? { kind: 'none' } },
-    resumeSession: async () => {
-      resumes++
-      if (options.resumeRefused) return { kind: 'refused', reason: options.resumeRefused }
-      return { kind: options.sessionStopped ? 'resumed' : 'none' }
-    },
   }
-  return {
-    env, interaction, asks, logs, writes, creates, invites, others, opened, current: () => file, shares: () => shares,
-    signIns: () => signIns, sessionStops: () => sessionStops, resumes: () => resumes,
-  }
+  return { env, interaction, asks, logs, writes, creates, invites, others, opened, current: () => file, shares: () => shares, signIns: () => signIns }
 }
 
 describe('setup wizard', () => {
@@ -416,100 +399,3 @@ function memoryStore() {
   const backend = { get: async (key: string) => store.get(key), set: async (key: string, value: unknown) => { store.set(key, value) } }
   return { store, backend }
 }
-
-describe('/delta stop and /delta start', () => {
-  const automatic = JSON.stringify({ threads: { mode: 'private', organization: 'org-1' } })
-
-  test('stop saves the setting with its mode and team, keeps it out of Git, and start returns to it', async () => {
-    const exclude = '/repo/.git/info/exclude'
-    const h = harness({ file: automatic, commonDir: '/repo/.git' })
-    const stopped = await stopSync(h.env)
-    expect(stopped.status).toBe('wrote')
-    expect(stopped.text).toContain('/delta-start')
-    expect(JSON.parse(h.current()!)).toEqual({ threads: { mode: 'private', organization: 'org-1', stopped: true } })
-    expect(h.others.get(exclude)).toBe('/.delta/settings.json\n')
-    // Stopping twice changes nothing and says how to resume.
-    expect(await stopSync(h.env)).toEqual({ status: 'unchanged', text: expect.stringContaining('/delta-start') })
-    expect(h.writes).toHaveLength(1)
-
-    const started = await startSync(h.env)
-    expect(started.status).toBe('wrote')
-    expect(started.text).toContain('Private sync')
-    expect(JSON.parse(h.current()!)).toEqual(JSON.parse(automatic))
-    expect((await startSync(h.env)).status).toBe('unchanged')
-  })
-
-  test('stop works in a checkout that was never set up, and start then points to setup', async () => {
-    const h = harness({ file: undefined })
-    expect((await stopSync(h.env)).status).toBe('wrote')
-    expect(JSON.parse(h.current()!)).toEqual({ threads: { stopped: true } })
-    expect((await startSync(h.env)).text).toContain('/delta-setup')
-  })
-
-  test('stop also stops a session that syncs, and says so', async () => {
-    const h = harness({ file: automatic, sessionStop: { kind: 'stopped', queued: 0 } })
-    const stopped = await stopSync(h.env)
-    expect(stopped.status).toBe('wrote')
-    expect(stopped.text).toContain('This session stopped syncing too.')
-    expect(stopped.text).not.toContain('keeps syncing')
-    expect(h.sessionStops()).toBe(1)
-    const quiet = harness({ file: automatic })
-    expect((await stopSync(quiet.env)).text).not.toContain('This session')
-  })
-
-  test('stop in an already stopped repository still stops a session that syncs', async () => {
-    const stoppedFile = JSON.stringify({ threads: { mode: 'private', organization: 'org-1', stopped: true } })
-    const h = harness({ file: stoppedFile, sessionStop: { kind: 'stopped', queued: 0 } })
-    const outcome = await stopSync(h.env)
-    expect(outcome.status).toBe('wrote')
-    expect(outcome.text).toContain('Stopped syncing this session')
-    expect(outcome.text).toContain('already stopped for this repository')
-    expect(h.writes).toEqual([])
-    // Nothing syncing and nothing to save is the only unchanged stop.
-    const idle = harness({ file: stoppedFile })
-    expect(await stopSync(idle.env)).toEqual({ status: 'unchanged', text: expect.stringContaining('/delta-start') })
-  })
-
-  test('stop says when rows wait to be sent, and why a session it cannot stop keeps syncing', async () => {
-    const lossy = harness({ file: automatic, sessionStop: { kind: 'stopped', queued: 3 } })
-    expect((await stopSync(lossy.env)).text).toContain("3 recorded rows hadn't reached Delta yet; they're sent when this session resumes.")
-    const joined = harness({ file: automatic, sessionStop: { kind: 'refused', reason: 'it joined a shared thread; close it to leave' } })
-    const outcome = await stopSync(joined.env)
-    expect(outcome.status).toBe('wrote')
-    expect(outcome.text).toContain('This session keeps syncing: it joined a shared thread; close it to leave.')
-  })
-
-  test('start resumes a stopped session, with or without the repository stopped', async () => {
-    const stoppedFile = JSON.stringify({ threads: { mode: 'private', organization: 'org-1', stopped: true } })
-    const both = harness({ file: stoppedFile, sessionStopped: true })
-    const outcome = await startSync(both.env)
-    expect(outcome.status).toBe('wrote')
-    expect(outcome.text).toContain('This session syncs into its thread again')
-    expect(outcome.text).not.toContain("This session isn't syncing")
-    // A repository started again elsewhere still resumes this session.
-    const sessionOnly = harness({ file: automatic, sessionStopped: true })
-    expect(await startSync(sessionOnly.env)).toEqual({ status: 'wrote', text: expect.stringContaining('Resumed syncing this session') })
-    expect(sessionOnly.writes).toEqual([])
-    const neither = harness({ file: automatic })
-    expect((await startSync(neither.env)).status).toBe('unchanged')
-    expect(neither.resumes()).toBe(1)
-    const busy = harness({ file: automatic, resumeRefused: 'a share or join is still running' })
-    expect(await startSync(busy.env)).toEqual({ status: 'unchanged', text: 'This session stays stopped: a share or join is still running.' })
-  })
-
-  test('a failed save stops nothing', async () => {
-    const h = harness({ file: automatic, failWrite: true, sessionStop: { kind: 'stopped', queued: 0 } })
-    expect((await stopSync(h.env)).status).toBe('failed')
-    expect(h.sessionStops()).toBe(0)
-  })
-
-  test('an unreadable setting, a failed write, or no checkout changes nothing and says why', async () => {
-    const broken = harness({ file: '{ broken' })
-    expect(await stopSync(broken.env)).toEqual({ status: 'failed', text: expect.stringContaining('/delta-setup') })
-    expect(broken.writes).toEqual([])
-    const readOnly = harness({ file: automatic, failWrite: true })
-    expect(await stopSync(readOnly.env)).toEqual({ status: 'failed', text: expect.stringContaining('could not save') })
-    const outside = harness({ root: null })
-    expect(await stopSync(outside.env)).toEqual({ status: 'failed', text: expect.stringContaining('needs a Git checkout') })
-  })
-})

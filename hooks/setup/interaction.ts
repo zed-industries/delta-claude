@@ -13,9 +13,7 @@ import {
   type AskOption, type AskOptions, type Interaction, InteractionDismissedError, InteractionUnavailableError,
   type SetupEnv,
 } from './setup'
-import {
-  beginShare, checkoutRoot, gitRemotes, resumeSessionSync, sessionSyncs, stopSessionSync,
-} from '../sharing/share'
+import { beginShare, checkoutRoot, gitRemotes, sessionSyncs } from '../sharing/share'
 import { errorText } from '../core/text'
 
 /** The sign-in waiting on the person's browser, which running a Delta command again offers to stop. */
@@ -147,8 +145,6 @@ export function setupEnv(host: Host): SetupEnv {
       return sessionSyncs(binding) ? 'private' : 'none'
     },
     shareSession: async (audience) => beginShare(host, await host.session.id(), { kind: audience }),
-    stopSession: async () => stopSessionSync(host, await host.session.id()),
-    resumeSession: async () => resumeSessionSync(host, await host.session.id()),
   }
 }
 

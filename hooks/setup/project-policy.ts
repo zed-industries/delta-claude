@@ -20,11 +20,6 @@ export type ProjectPolicy = {
   configured: boolean
   /** Why an existing policy could not be used, for a one-time notice. */
   problem?: string
-  /**
-   * `/delta stop` paused automatic sync for this checkout. The mode and organization stay saved, so
-   * `/delta start` returns to them; until then no new session syncs on its own.
-   */
-  stopped?: true
 }
 
 /** A policy file as read from disk: the effective policy, the raw document, and whether it parsed. */
@@ -45,18 +40,9 @@ export function policyPath(checkoutRoot: string): string {
 /**
  * Read the effective policy from a file's text, or from `undefined` when there is none. A missing
  * file, a missing `threads` key, or a missing `mode` is unconfigured; malformed JSON or an invalid
- * mode leaves the checkout recording manually with a `problem` a person can act on. A file with
- * `threads.stopped` set is stopped whatever its mode, and counts as configured, since stopping is a choice.
+ * mode leaves the checkout recording manually with a `problem` a person can act on.
  */
 export function readProjectPolicy(text: string | undefined): PolicyFile {
-  const file = readPolicyDocument(text)
-  const threads = file.document?.threads
-  if (!isJsonObject(threads) || threads.stopped !== true) return file
-  return { ...file, policy: { ...file.policy, configured: true, stopped: true } }
-}
-
-/** The policy a file's mode and organization describe, before `/delta stop` is applied. */
-function readPolicyDocument(text: string | undefined): PolicyFile {
   if (text === undefined) return { policy: { mode: 'manual', configured: false } }
   let document: unknown
   try { document = JSON.parse(text) }
@@ -88,7 +74,6 @@ function readPolicyDocument(text: string | undefined): PolicyFile {
 /**
  * Serialize a policy, preserving every unknown top-level and nested key of the previous document.
  * Every mode keeps `organization` when given: the automatic modes sync to it, and `manual` shares to it.
- * Choosing a mode is a decision to sync that way, so it clears a `/delta stop`.
  */
 export function serializeProjectPolicy(
   previous: Record<string, unknown> | undefined, mode: ThreadMode, organization?: string,
@@ -96,27 +81,13 @@ export function serializeProjectPolicy(
   const document = isJsonObject(previous) ? { ...previous } : {}
   const threads = isJsonObject(document.threads) ? { ...document.threads } : {}
   threads.mode = mode
-  delete threads.stopped
   if (organization === undefined) delete threads.organization
   else threads.organization = organization
   document.threads = threads
   return `${JSON.stringify(document, null, 2)}\n`
 }
 
-/**
- * Serialize `/delta stop` (`stopped` true) or `/delta start` (false) into a document, preserving
- * every other key, the mode and organization included, so starting again returns to them.
- */
-export function serializeStopped(previous: Record<string, unknown> | undefined, stopped: boolean): string {
-  const document = isJsonObject(previous) ? { ...previous } : {}
-  const threads = isJsonObject(document.threads) ? { ...document.threads } : {}
-  if (stopped) threads.stopped = true
-  else delete threads.stopped
-  document.threads = threads
-  return `${JSON.stringify(document, null, 2)}\n`
-}
-
 /** Whether a policy records automatically without an explicit `/delta share`. */
 export function recordsAutomatically(policy: ProjectPolicy): boolean {
-  return !policy.stopped && (policy.mode === 'private' || policy.mode === 'organization')
+  return policy.mode === 'private' || policy.mode === 'organization'
 }

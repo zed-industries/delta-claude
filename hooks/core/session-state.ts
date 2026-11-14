@@ -56,10 +56,11 @@ export type Binding = {
   mounts?: ThreadMount[]
   url?: string
   /**
-   * `/delta stop` paused this session: nothing it says is recorded and `snapshot` is cleared, but its
-   * thread, producer and sequence stay, so `/delta start` or `/delta share` resumes the same thread.
+   * Turned off with `/delta off`, at this point in the conversation: nothing it says is recorded and
+   * `snapshot` is cleared, but its thread, producer and sequence stay, so `/delta share` resumes the same
+   * thread and adds what was said since.
    */
-  stopped?: true
+  stopped?: StopPoint
   /** The audience Delta reports for the thread, shown apart from the link. */
   visibility?: 'private' | 'organization' | 'unlisted'
   /** Delta's background upload of this thread, as status last reported it. */
@@ -109,6 +110,12 @@ export type Binding = {
    */
   continuedIn?: string
 }
+
+/**
+ * Where a conversation stood when Delta was turned off: a digest of Claude's last reply, absent before
+ * its first, and the sequence the thread had reached.
+ */
+export type StopPoint = { reply?: string; sequence: number }
 
 /** The producer a binding records as; see {@link Binding.producer}. */
 export function producerOf(binding: { session: string; producer?: string }): string {

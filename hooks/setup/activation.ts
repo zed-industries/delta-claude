@@ -96,7 +96,7 @@ export async function activate(host: Host, session: string, isCurrent = () => tr
       await report(host, new Error(`The join directory transition is incomplete. Run /delta-join ${binding.joinTransition.locator} to retry the saved mount${binding.directory ? ` at ${binding.directory}` : ''}; prompts remain blocked.`))
       return
     }
-    // A session `/delta stop` paused keeps its thread but starts nothing until it is resumed.
+    // A session turned off with /delta off keeps its thread but starts nothing until /delta share.
     if (binding.stopped) return
     // A session Desktop started in a hand-off's folder joins it before its first prompt.
     if (!binding.snapshot && !binding.joined && !runtime.handoffClaim) {
@@ -422,7 +422,8 @@ async function continuationOf(host: Host, transcript: string): Promise<string | 
  * history, as a continuation does, and it has recorded nothing of its own.
  */
 export function continuationCandidate(session: string, binding: Binding): boolean {
-  return sessionStarts.get(session) === 'resume' && !binding.thread && !binding.snapshot && !binding.joinTransition
+  return sessionStarts.get(session) === 'resume' && !binding.thread && !binding.snapshot && !binding.joinTransition &&
+    !binding.stopped
 }
 
 /** The recording session whose conversation Claude Code continued as `session`, if any. */
@@ -434,7 +435,7 @@ export async function continuedFrom(host: Host, session: string): Promise<Bindin
   for (const storeKey of keys) {
     if (!storeKey.startsWith('session:') || storeKey === key(session)) continue
     const candidate = await storedBinding(host, storeKey)
-    // A conversation `/delta stop` paused is continued too, and stays paused in its new session.
+    // A conversation turned off with /delta off is continued too, and stays off in its new session.
     if (!candidate?.thread || !(candidate.snapshot || candidate.stopped)) continue
     if (candidate.continuedIn === session) return candidate
     if (candidate.continuedIn || !candidate.transcript) continue
@@ -608,13 +609,12 @@ function onboardingStore(host: Host): OnboardingStore {
 }
 
 /**
- * The band's reminder for a session while Delta does not sync it: a stopped checkout points to
- * /delta-start, one with any other setting to /delta-share, and one never set up to /delta-setup. A syncing session's band says `Syncing`
+ * The band's reminder for a session while Delta does not sync it: a checkout with any setting points
+ * to /delta-share, and one never set up to /delta-setup. A syncing session's band says `Syncing`
  * instead, so an automatic checkout's sessions show this only when they are not syncing, as a session
  * started before the setting was saved, or one Delta could not start.
  */
 function syncReminder(policy: ProjectPolicy): SyncReminder {
-  if (policy.stopped) return 'stopped'
   // Someone who chose a setting is not nudged toward setup every session.
   return policy.configured ? 'manual' : 'not set up'
 }
@@ -644,7 +644,9 @@ function activateAutomatically(host: Host, session: string, root: string, upload
     const existing = await serial(() => load(host, session))
     if (!ownsActivation()) return
     // A session that already holds a thread, or a binding that is not ours, is never re-created.
-    if (existing.thread || (existing.snapshot && !existing.autoUpload) || existing.joined || existing.joinTransition) return
+    // A session turned off with /delta off stays off until /delta share.
+    if (existing.thread || (existing.snapshot && !existing.autoUpload) || existing.joined || existing.joinTransition ||
+        existing.stopped) return
     if (existing.pendingActivation?.refusal) {
       finishProgress(host, existing.pendingActivation.refusal.band, 'error')
       return
@@ -814,7 +816,8 @@ function activationRefusal(error: unknown, organization: string): ActivationRefu
 async function stopAutomaticRecording(host: Host, session: string, root: string, refusal: ActivationRefusal) {
   await serial(async () => {
     const binding = await load(host, session)
-    if (!binding.autoUpload || binding.thread) return
+    // A session turned off keeps its binding, so /delta share can bring it back.
+    if (!binding.autoUpload || binding.thread || binding.stopped) return
     if (binding.pendingActivation) {
       await save(host, { ...binding, pendingActivation: { ...binding.pendingActivation, refusal } })
       return

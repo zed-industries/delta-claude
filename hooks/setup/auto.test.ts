@@ -1,7 +1,7 @@
 import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import {
   abovePrompt, CHECKOUT, drawBandText, fakeThreads, policy, POLICY, prompt, sessionEnd, sessionStart, shareCommand,
-  testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
+  testsWithHeldClockWait, turnComplete, turnStart, typedDelta, userText,
 } from '../testing/fake-thread-commands'
 import { ONBOARDING_DECLINED, ONBOARDING_QUESTION } from './setup'
 
@@ -22,14 +22,18 @@ function seedEnded(store: Map<string, unknown>, id: string, overrides: Record<st
   store.set(`appended:${id}`, { thread: 't', items: {} })
 }
 
-type ReminderKind = 'manual' | 'not set up' | 'stopped' | 'none'
+type ReminderKind = 'manual' | 'not set up' | 'none'
 
 /** The reminder the band shows a session Delta does not sync, by what it tells the person. */
 async function reminderKind($: Engine): Promise<ReminderKind> {
   const band = await drawBandText($)
-  if (band.includes('Sync stopped') && band.includes('/delta-start')) return 'stopped'
   if (band.includes('Not syncing') && band.includes('/delta-share')) return 'manual'
   return band.includes('Not set up') && band.includes('/delta-setup') ? 'not set up' : 'none'
+}
+
+/** Claude's reply `text`, as the conversation Claude reads holds it. */
+function reply(text: string) {
+  return { role: 'assistant' as const, content: [{ type: 'text' as const, text }] }
 }
 
 /** Store a recorded session for the fixture's session to resume; `overrides` change any binding field. */
@@ -123,31 +127,6 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
-  test('a new session in a stopped repository never activates, and /delta-start lets the next one', async ($, on) => {
-    const fake = fakeThreads(on)
-    fake.files.set(POLICY, JSON.stringify({ threads: { mode: 'organization', organization: 'org-1', stopped: true } }))
-    await startAuto($, fake)
-    expect(fake.server.thread).toBeUndefined()
-    expect(fake.operations()).not.toContain('create')
-    expect(binding(fake)).toBeUndefined()
-    await $.command.run({ ...typedDelta('start'), command: 'delta-start', args: '' } as never)
-    await fake.settle()
-    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'organization', organization: 'org-1' } })
-    fake.expectClean()
-  })
-
-  test('/delta stop saves the stop, and the next new session does not sync', async ($, on) => {
-    const fake = fakeThreads(on)
-    fake.files.set(POLICY, policy('manual', 'org-1'))
-    await startAuto($, fake)
-    const result = await $.command.run(typedDelta('stop'))
-    await fake.settle()
-    expect(JSON.stringify(result)).toContain('Stopped Delta sync')
-    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'manual', organization: 'org-1', stopped: true } })
-    expect(await reminderKind($)).toBe('stopped')
-    fake.expectClean()
-  })
-
   /** Run one composer turn with `text`, as Claude does, and let its delivery finish. */
   async function turn($: Engine, fake: ReturnType<typeof fakeThreads>, id: string, text: string) {
     await $.prompt.submit(prompt(text))
@@ -165,53 +144,83 @@ describe('automatic activation', () => {
   const recorded = (fake: ReturnType<typeof fakeThreads>, text: string) =>
     fake.updates().some((record) => JSON.stringify(record.update).includes(text))
 
-  test('/delta stop pauses a session that syncs, and /delta start resumes it into the same thread', async ($, on) => {
+  test('/delta off stops a session that syncs, and /delta-share brings it back with what was said meanwhile', async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('private', 'org-1'))
     await startAuto($, fake)
     const thread = binding(fake).thread
-    await turn($, fake, 'native-before', 'before the stop')
-    expect(recorded(fake, 'before the stop')).toBe(true)
+    await turn($, fake, 'native-before', 'before turning off')
+    expect(recorded(fake, 'before turning off')).toBe(true)
+    // The last message is the note a cancelled turn leaves, which the next prompt merges into.
+    fake.messages = [userText('before turning off'), reply('answer before'), userText('[Request interrupted by user]')]
 
-    const result = await $.command.run(typedDelta('stop'))
+    const result = await $.command.run(typedDelta('off'))
     await fake.settle()
-    expect(JSON.stringify(result)).toContain('This session stopped syncing too.')
-    expect(binding(fake)).toMatchObject({ thread, snapshot: false, stopped: true })
+    expect(JSON.stringify(result)).toContain('Delta is off for this session')
+    expect(binding(fake)).toMatchObject({ thread, snapshot: false, stopped: { reply: expect.any(String) } })
     expect(fake.live()).toBeUndefined()
-    expect(await reminderKind($)).toBe('stopped')
+    await turn($, fake, 'native-during', 'while off')
+    fake.messages = [...fake.messages.slice(0, -1), userText('[Request interrupted by user]\nwhile off'), reply('reply while off')]
+    expect(recorded(fake, 'while off')).toBe(false)
+    expect(JSON.stringify(await $.command.run(typedDelta('off')))).toContain('already off')
 
-    await turn($, fake, 'native-during', 'while stopped')
-    expect(recorded(fake, 'while stopped')).toBe(false)
-    expect(binding(fake)).toMatchObject({ thread, stopped: true })
-    // Stopping again finds nothing left to stop.
-    expect(JSON.stringify(await $.command.run(typedDelta('stop')))).toContain('already stopped')
+    // A resumed session stays off: it restores nothing and records nothing.
+    await $.session.end(sessionEnd(fake.session))
+    const mounts = fake.operations().filter((operation) => operation === 'worktree mount').length
+    await startAuto($, fake, 'resume')
+    await turn($, fake, 'native-resumed', 'resumed while off')
+    fake.messages = [...fake.messages, userText('resumed while off'), reply('second reply while off')]
+    expect(fake.operations().filter((operation) => operation === 'worktree mount')).toHaveLength(mounts)
+    expect(recorded(fake, 'resumed while off')).toBe(false)
 
-    expect(JSON.stringify(await $.command.run(typedDelta('start')))).toContain('This session syncs into its thread again')
-    await fake.settle()
+    await runShare($, fake, 'share')
     expect(binding(fake)).toMatchObject({ thread, snapshot: true })
     expect(binding(fake).stopped).toBeUndefined()
-    await turn($, fake, 'native-after', 'after the start')
-    expect(recorded(fake, 'after the start')).toBe(true)
-    expect(recorded(fake, 'while stopped')).toBe(false)
+    expect(recorded(fake, 'reply while off')).toBe(true)
+    expect(recorded(fake, 'resumed while off')).toBe(true)
+    expect(recorded(fake, 'second reply while off')).toBe(true)
+    expect(recorded(fake, 'answer before')).toBe(false)
+    // What was recorded before turning off isn't exported again.
+    expect(fake.updates().filter((record) => JSON.stringify(record.update).includes('before turning off'))).toHaveLength(1)
+    await turn($, fake, 'native-after', 'after turning back on')
+    expect(recorded(fake, 'after turning back on')).toBe(true)
     expect(fake.server.thread).toBe(thread)
     fake.expectClean()
   })
 
-  test('/delta share after /delta stop resumes the same thread without exporting again', async ($, on) => {
+  test('/delta-share after a compaction leaves out what was said while off, and says so', async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('private', 'org-1'))
     await startAuto($, fake)
-    const thread = binding(fake).thread
-    await turn($, fake, 'native-before', 'before the stop')
-    await $.command.run(typedDelta('stop'))
+    fake.messages = [userText('before turning off'), reply('answer before')]
+    await $.command.run(typedDelta('off'))
     await fake.settle()
-    const exports = fake.exports
+    fake.messages = [userText('Compacted summary'), userText('said while off'), reply('reply while off')]
     await runShare($, fake, 'share')
-    expect(binding(fake)).toMatchObject({ thread, snapshot: true })
     expect(binding(fake).stopped).toBeUndefined()
-    expect(fake.exports).toBe(exports)
-    await turn($, fake, 'native-after', 'after the share')
-    expect(recorded(fake, 'after the share')).toBe(true)
+    expect(recorded(fake, 'said while off')).toBe(false)
+    expect(recorded(fake, 'reply while off')).toBe(false)
+    expect(fake.logs.join('\n')).toContain('compacted this conversation while Delta was off')
+    fake.expectClean()
+  })
+
+  test('/delta off stays in force when the /delta-share meant to lift it fails at the mount', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('private', 'org-1'))
+    await startAuto($, fake)
+    fake.messages = [userText('before turning off'), reply('answer before')]
+    await $.command.run(typedDelta('off'))
+    await fake.settle()
+    fake.commandFault = {
+      operation: 'worktree mount', code: 'failed', reason: 'worktree_directory_in_use', retryable: false,
+      message: 'Checkout is managed by another thread',
+    }
+    await runShare($, fake, 'share')
+    expect(binding(fake).stopped).toBeDefined()
+    const mounts = fake.operations().filter((operation) => operation === 'worktree mount').length
+    await turn($, fake, 'native-still-off', 'still off')
+    expect(recorded(fake, 'still off')).toBe(false)
+    expect(fake.operations().filter((operation) => operation === 'worktree mount')).toHaveLength(mounts)
     fake.expectClean()
   })
 
@@ -356,8 +365,6 @@ describe('automatic activation', () => {
     { name: 'an unconfigured checkout is told how to set up', expected: 'not set up' },
     { name: 'a Manual checkout is told how to share, not to set up', expected: 'manual',
       arrange: (fake) => { fake.files.set(POLICY, policy('manual')) } },
-    { name: 'a stopped checkout is told how to resume', expected: 'stopped',
-      arrange: (fake) => { fake.files.set(POLICY, JSON.stringify({ threads: { mode: 'private', organization: 'org-1', stopped: true } })) } },
     { name: 'a headless session gets none', expected: 'none', arrange: (fake) => { fake.surfaces = [] } },
     { name: 'a session with an unfinished join gets none', source: 'resume', expected: 'none',
       arrange: (fake) => { seedResumed(fake, { snapshot: false, joinTransition: { locator: 'x' } }) } },
