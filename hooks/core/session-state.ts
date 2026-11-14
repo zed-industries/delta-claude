@@ -268,7 +268,7 @@ export function isPaused(state: SessionState) {
 
 export function pauseNotice(state: SessionState) {
   return [...state.pauses.values()].find((notice) => notice !== undefined)
-    ?? `checkout sharing is paused; ${recoveryAdvice(state.binding)}`
+    ?? `Delta stopped syncing this session; ${recoveryAdvice(state.binding)}`
 }
 
 export function serial<T>(task: () => Promise<T>): Promise<T> {
@@ -362,7 +362,7 @@ export function boundDirectory(binding?: Binding): string | undefined {
 export async function report(host: Host, error: unknown) {
   // A delivery failure was already shown, with its retry or pause, where it was classified.
   if (error instanceof DeltaSendError) return
-  const text = `Delta sharing paused: ${errorText(error)}. ${recoveryAdvice(sessions.get(activation.session)?.binding)}.`
+  const text = `Delta stopped syncing this session: ${errorText(error)}. ${recoveryAdvice(sessions.get(activation.session)?.binding)}.`
   await host.ui.status(text)
   await host.ui.log(text)
 }

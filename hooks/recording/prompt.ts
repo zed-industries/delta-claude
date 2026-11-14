@@ -107,7 +107,7 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
   }
   try {
     if (runtime.captureFailure || runtime.binding.captureFailure)
-      throw new Error(`local conversation capture is paused; ${recoveryAdvice(runtime.binding)} before continuing`)
+      throw new Error(`local conversation capture stopped; ${recoveryAdvice(runtime.binding)} before continuing`)
     // A prompt that arrives mid-activation records locally while create, upload, and attach finish,
     // and one that arrives while the checkout's mount is restored, or after Delta refused to restore
     // it, records locally: an unmounted checkout cannot pass verification.

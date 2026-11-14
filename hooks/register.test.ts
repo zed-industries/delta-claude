@@ -1954,7 +1954,7 @@ describe('native turns', () => {
       expect(fake.aborts).toEqual(['native-unsaved'])
       expect(fake.starts()).toEqual([])
       expect((fake.store.get(`session:${fake.session}`) as any).next).toBe(1)
-      expect(fake.statuses.some((status) => status?.includes('sharing paused'))).toBe(true)
+      expect(fake.statuses.some((status) => status?.includes('stopped syncing'))).toBe(true)
       fake.expectClean()
     })
 

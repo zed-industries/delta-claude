@@ -479,7 +479,7 @@ async function consumeConversation(
     if (failure instanceof DeltaCommandError && failure.hints.retryable === false) {
       // A retryable failure is a lost connection, but a non-retryable one needs a person:
       // reconnecting cannot bring back a deleted thread or restored access on its own.
-      const notice = `Delta sharing paused: ${failure.message}. ${permanentFailureAdvice(failure.code, !!stateFor(session).binding?.autoUpload, failure.reason)}, then ${recoveryAdvice(stateFor(session).binding)}.`
+      const notice = `Delta stopped syncing this session: ${failure.message}. ${permanentFailureAdvice(failure.code, !!stateFor(session).binding?.autoUpload, failure.reason)}, then ${recoveryAdvice(stateFor(session).binding)}.`
       pauseCheckout(stateFor(session), 'delivery', notice)
       failWatch(host, notice)
       await host.ui.log(notice, { to: 'transcript' })

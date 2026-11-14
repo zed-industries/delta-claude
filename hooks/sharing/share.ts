@@ -206,7 +206,7 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   if (runtime.unsaved.length) await flushUnsaved(host, session)
   binding = await serial(() => load(host, session))
   if (runtime.captureFailure || binding.captureFailure)
-    throw new Error(`a stored Claude row could not be saved locally (${runtime.captureFailure ?? binding.captureFailure}); sharing is paused to avoid an incomplete transcript`)
+    throw new Error(`a stored Claude row could not be saved locally (${runtime.captureFailure ?? binding.captureFailure}); Delta stopped syncing to avoid an incomplete transcript`)
   // A repository Delta can't identify fails at the attach, after everything else; say so before asking.
   const unidentified = remoteRefusal(await gitRemotes(host, await checkoutRoot(host)), '/delta-share')
   if (unidentified) throw new ShareRefusalError(unidentified)
@@ -370,7 +370,7 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   await drain(host, session)
   for (const child of children.values()) if (child.session === session) void deliverChild(host, child)
   if (isPaused(runtime))
-    throw new Error('checkout sharing is paused; saved messages remain queued until reattachment succeeds')
+    throw new Error('Delta stopped syncing this session; saved messages remain queued until reattachment succeeds')
   if (runtime.captureFailure || runtime.unsaved.length)
     throw new Error('a live row could not be saved locally; fix the outbox error and retry /delta-share')
   await verifyCheckout(host, await load(host, session))

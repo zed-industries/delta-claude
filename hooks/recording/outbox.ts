@@ -4,7 +4,7 @@ import { parseAppendReceipt } from '../cli/thread-commands'
 /** Split a durable JSONL record without cutting a UTF-16 surrogate pair. */
 export function outboxChunks(line: string, sequence: number): string[] {
   if (new TextEncoder().encode(line).length > 16 * 1024 * 1024)
-    throw new Error(`record ${sequence} exceeds Delta's 16 MiB JSONL limit; sharing paused`)
+    throw new Error(`record ${sequence} exceeds Delta's 16 MiB JSONL limit`)
   const chunks: string[] = []
   let offset = 0
   while (offset < line.length) {
@@ -55,7 +55,7 @@ export function appendBatch(
  */
 export function pendingRecordTurn(line: string, sequence: number): number | undefined {
   const record = JSON.parse(line)
-  const invalid = () => new Error(`invalid pending record ${sequence}; sharing paused without changing its record`)
+  const invalid = () => new Error(`invalid pending record ${sequence}; the record was left unchanged`)
   // Every saved envelope was written with JSON.stringify plus a newline; requiring that
   // representation also rejects duplicate keys.
   if (!record || line !== JSON.stringify(record) + '\n' ||

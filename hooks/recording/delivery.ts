@@ -167,7 +167,7 @@ async function writeRecord(host: Host, binding: Binding, body: RecordBody): Prom
 async function readRecord(host: Host, entry: Entry): Promise<string> {
   const line = (await Promise.all(entry.files.map((path) => host.fs.read(path)))).join('')
   if (await digest(line) !== entry.digest)
-    throw new Error(`outbox record ${entry.sequence} changed on disk; sharing paused`)
+    throw new Error(`outbox record ${entry.sequence} changed on disk`)
   return line
 }
 
@@ -586,7 +586,7 @@ async function failDelivery(host: Host, session: string, error: unknown): Promis
   if (refused) state.refusedOffline = true
   const pausedText = refused
     ? "Delta couldn't publish this thread's offline changes."
-    : `Delta sharing paused: ${failure.message}. The message stays queued. ${permanentFailureAdvice(error.code, !!state.binding?.autoUpload, error.reason)}, then ${recoveryAdvice(state.binding)}.`
+    : `Delta stopped syncing this session: ${failure.message}. The message stays queued. ${permanentFailureAdvice(error.code, !!state.binding?.autoUpload, error.reason)}, then ${recoveryAdvice(state.binding)}.`
   if (!willRetry) {
     pauseCheckout(state, decision.pause, pausedText)
   } else scheduleSendRetry(host, session, error.hints.retryAfterMs)

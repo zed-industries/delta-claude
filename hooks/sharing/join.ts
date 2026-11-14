@@ -111,7 +111,7 @@ async function joinSession(host: Host, request: JoinRequest) {
       await assertJoinSession(host, request.session, request)
       await verifyCheckout(host, await load(host, request.session))
       if (isPaused(runtime) || runtime.unsaved.length)
-        throw new Error('Joined participation remains paused; saved records remain queued')
+        throw new Error('Delta is still stopped for this joined session; saved records remain queued')
       // The band reports the rejoin through the finished notice; the transcript keeps only conversation.
       host.ui.log(`Reconnected to the joined Delta thread in Claude session ${request.session}; the checkout and producer state were preserved.`, { to: 'debug' })
       finishProgress(host, 'Joined the shared thread', 'done')
@@ -482,7 +482,7 @@ async function enterDirectory(
   await check()
   if (await host.session.id() !== session || !samePath(await host.session.cwd(), directory) ||
       !samePath(await host.session.root(), directory))
-    throw new Error('Claude did not keep the session in the exact mounted directory; participation remains paused')
+    throw new Error('Claude did not keep the session in the exact mounted directory; Delta stays stopped for this session')
 }
 
 /**

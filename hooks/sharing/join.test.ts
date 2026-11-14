@@ -848,8 +848,8 @@ describe('joining', () => {
     fake.live()!.exit(1)
     await fake.settle()
     expect(fake.aborts).toEqual(['native-running'])
-    // Sharing pauses at the drop, as it did before the watch's phases were modelled.
-    expect((await $.prompt.submit(prompt('during teardown'))).drop).toContain('checkout sharing is paused')
+    // Syncing stops at the drop, as it did before the watch's phases were modelled.
+    expect((await $.prompt.submit(prompt('during teardown'))).drop).toContain('Delta stopped syncing this session')
     fake.holdAbort = undefined
     release()
     await $.turn.complete(turnComplete('native-running', 'aborted'))
