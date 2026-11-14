@@ -10,7 +10,7 @@ import {
 import { classifyCommandFailure, DeltaCommandError } from '../cli/thread-commands'
 import { samePath } from '../core/paths'
 import {
-  activation, type Binding, load, recoveryCommand, requests, save, serial, sessions, stateFor,
+  activation, type Binding, load, pauseSessionHint, recoveryCommand, requests, save, serial, sessions, stateFor,
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import { errorText } from '../core/text'
@@ -77,7 +77,8 @@ export function beginRestoreCheckout(host: Host, session: string) {
   if (background) runtime.restoringCheckout = true
   else runtime.restoring = true
   setProgress(host, 'Restoring this checkout’s synchronization…', 'active')
-  const owns = () => activation.session === session && sessions.get(session) === runtime
+  // /delta pause ends a restore still running, and stops a mount that comes up after it.
+  const owns = () => activation.session === session && sessions.get(session) === runtime && !runtime.binding?.stopped
   host.clock.after(0, async () => {
     let mounted = false
     try {
@@ -111,10 +112,10 @@ export function beginRestoreCheckout(host: Host, session: string) {
       const refusal = managedCheckoutRefusal(error, runtime.binding?.checkout ?? 'this folder')
       const reason = errorText(refusal).replace(/[.\s]+$/, '')
       const text = permanent
-        ? `Delta couldn't restore this checkout's synchronization and won't retry it in this session: ${reason}. Prompts still record locally.`
+        ? `Delta couldn't restore this checkout's synchronization and won't retry it in this session: ${reason}. Prompts still record locally.${pauseSessionHint(runtime.binding)}`
         : background
         ? `Delta couldn't restore this checkout's synchronization: ${errorText(error)}. Prompts still record locally, and the next one retries.`
-        : `Delta couldn't restore this checkout: ${errorText(error)}. Retry ${recoveryCommand(runtime.binding)}; the prompt was not submitted.`
+        : `Delta couldn't restore this checkout: ${errorText(error)}. Retry ${recoveryCommand(runtime.binding)}; the prompt was not submitted.${pauseSessionHint(runtime.binding)}`
       if (permanent) runtime.checkoutRefusal = text
       if (!background) runtime.joinFailure = text
       setProgress(host, text, 'error')

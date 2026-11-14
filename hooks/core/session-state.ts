@@ -55,6 +55,12 @@ export type Binding = {
   /** Every worktree of a joined session's thread, as the last `thread mount` placed them. */
   mounts?: ThreadMount[]
   url?: string
+  /**
+   * Paused with `/delta pause`, at this point in the conversation: nothing it says is recorded and
+   * `snapshot` is cleared, but its thread, producer and sequence stay, so `/delta share` resumes the same
+   * thread and adds what was said since.
+   */
+  stopped?: StopPoint
   /** The audience Delta reports for the thread, shown apart from the link. */
   visibility?: 'private' | 'organization' | 'unlisted'
   /** Delta's background upload of this thread, as status last reported it. */
@@ -104,6 +110,12 @@ export type Binding = {
    */
   continuedIn?: string
 }
+
+/**
+ * Where a conversation stood when Delta was paused: a digest of Claude's last reply, absent before
+ * its first, and the sequence the thread had reached.
+ */
+export type StopPoint = { reply?: string; sequence: number }
 
 /** The producer a binding records as; see {@link Binding.producer}. */
 export function producerOf(binding: { session: string; producer?: string }): string {
@@ -281,6 +293,14 @@ export function recoveryCommand(binding?: Binding) {
  */
 export function recoveryAdvice(binding?: Binding): string {
   return binding?.autoUpload ? 'automatic recording retries on your next prompt' : `run ${recoveryCommand(binding)}`
+}
+
+/**
+ * How to keep working without Delta when it can't recover a session on its own: `/delta pause`, offered
+ * after an error text. A joined session works in a folder Delta mounted for it and can't be paused.
+ */
+export function pauseSessionHint(binding?: Binding): string {
+  return binding?.joined || binding?.joinTransition ? '' : ' Run /delta pause to keep working without Delta in this session.'
 }
 
 /** The transcript path Claude last reported for each session in this process. */

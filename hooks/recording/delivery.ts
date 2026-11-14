@@ -291,7 +291,8 @@ async function drainPending(host: Host, session: string): Promise<boolean> {
     while (delivering()) {
       const binding = await serial(async () => load(host, session))
       // A conversation that continued in another session delivers from there.
-      if (!binding.thread || !binding.pending.length || binding.continuedIn) return true
+      // A paused session keeps its queue until /delta share syncs it again.
+      if (!binding.thread || !binding.pending.length || binding.continuedIn || binding.stopped) return true
       // A recovered outbox checks the CLI's contract before its first append, so an incompatible CLI
       // records nothing. An answer that arrives after the session ended or was activated again belongs
       // to that earlier lifetime: it neither appends nor reports, and the current one checks for itself.
@@ -309,7 +310,7 @@ async function drainPending(host: Host, session: string): Promise<boolean> {
         // any other session waits, and drain decides how long to keep asking.
         const state = sessions.get(session)
         const permanent = classifyCommandFailure(error) === 'permanent'
-        if (state && permanent) pauseCheckout(state, 'verification')
+        if (state && permanent && !state.binding?.stopped) pauseCheckout(state, 'verification')
         if (permanent || !recordsOffline(session, binding)) throw error
       }
       const { count, fenced, failure } = await appendPending(host, {
@@ -569,8 +570,10 @@ export async function drain(host: Host, session: string): Promise<void> {
  * Queued records keep their sequence, so an unchanged retry is always safe.
  */
 async function failDelivery(host: Host, session: string, error: unknown): Promise<never> {
-  if (!(error instanceof DeltaCommandError)) throw error
   const state = sessions.get(session)
+  // A paused session keeps its queue until /delta share: a send that outlived the pause says nothing.
+  if (state?.binding?.stopped) throw new DeltaSendError(errorText(error), false)
+  if (!(error instanceof DeltaCommandError)) throw error
   // A session that ended or was replaced must not retry, pause, or speak in the active one's transcript.
   if (!state || activation.session !== session) throw new DeltaSendError(error.message, false)
   const decision = deliveryFailure(state, error, state.pauses.has('verification'))

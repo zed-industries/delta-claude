@@ -17,8 +17,8 @@ import { listOrganizations, organizationName } from './organizations'
 import { startPluginUpdates } from '../plugin-update/updates'
 import { policyPath, type ProjectPolicy, readProjectPolicy, recordsAutomatically } from './project-policy'
 import {
-  activation, type AutoUpload, type Binding, boundDirectory, drawnRowKey, isPaused, key, ledgerKey, load, pauseCheckout,
-  producerOf, rememberTranscriptPath, report, requests, resumeCheckout, save, serial, sessions,
+  activation, type AutoUpload, type Binding, boundDirectory, drawnRowKey, isPaused, key, ledgerKey, load, pauseSessionHint,
+  pauseCheckout, producerOf, rememberTranscriptPath, report, requests, resumeCheckout, save, serial, sessions,
   type SessionState, stateFor, stillActive, storedBinding, transcriptPathOf,
 } from '../core/session-state'
 import type { Host } from '../core/host'
@@ -96,6 +96,8 @@ export async function activate(host: Host, session: string, isCurrent = () => tr
       await report(host, new Error(`The join directory transition is incomplete. Run /delta-join ${binding.joinTransition.locator} to retry the saved mount${binding.directory ? ` at ${binding.directory}` : ''}; prompts remain blocked.`))
       return
     }
+    // A session paused with /delta pause keeps its thread but starts nothing until /delta share.
+    if (binding.stopped) return
     // A session Desktop started in a hand-off's folder joins it before its first prompt.
     if (!binding.snapshot && !binding.joined && !runtime.handoffClaim) {
       const handoff = await pendingHandoff(host, await host.session.cwd())
@@ -123,7 +125,9 @@ export async function activate(host: Host, session: string, isCurrent = () => tr
       try { await requireContract(host, session) }
       catch (error) {
         if (!ownsActivation()) return
-        const text = `Delta participation is blocked: ${errorText(error)}`
+        const hint = pauseSessionHint(binding)
+        const text = hint ? `Delta participation is blocked: ${errorText(error).replace(/[.\s]+$/, '')}.${hint}`
+          : `Delta participation is blocked: ${errorText(error)}`
         // Only an explicit /delta share or /delta join after updating Delta lifts this pause.
         pauseCheckout(runtime, 'delivery', text)
         runtime.joinFailure = text
@@ -420,7 +424,8 @@ async function continuationOf(host: Host, transcript: string): Promise<string | 
  * history, as a continuation does, and it has recorded nothing of its own.
  */
 export function continuationCandidate(session: string, binding: Binding): boolean {
-  return sessionStarts.get(session) === 'resume' && !binding.thread && !binding.snapshot && !binding.joinTransition
+  return sessionStarts.get(session) === 'resume' && !binding.thread && !binding.snapshot && !binding.joinTransition &&
+    !binding.stopped
 }
 
 /** The recording session whose conversation Claude Code continued as `session`, if any. */
@@ -432,7 +437,8 @@ export async function continuedFrom(host: Host, session: string): Promise<Bindin
   for (const storeKey of keys) {
     if (!storeKey.startsWith('session:') || storeKey === key(session)) continue
     const candidate = await storedBinding(host, storeKey)
-    if (!candidate?.thread || !candidate.snapshot) continue
+    // A conversation paused with /delta pause is continued too, and stays paused in its new session.
+    if (!candidate?.thread || !(candidate.snapshot || candidate.stopped)) continue
     if (candidate.continuedIn === session) return candidate
     if (candidate.continuedIn || !candidate.transcript) continue
     if (candidate.endedAt !== undefined && candidate.endedAt < now - CONTINUATION_HORIZON_MS) continue
@@ -640,7 +646,9 @@ function activateAutomatically(host: Host, session: string, root: string, upload
     const existing = await serial(() => load(host, session))
     if (!ownsActivation()) return
     // A session that already holds a thread, or a binding that is not ours, is never re-created.
-    if (existing.thread || (existing.snapshot && !existing.autoUpload) || existing.joined || existing.joinTransition) return
+    // A session paused with /delta pause stays paused until /delta share.
+    if (existing.thread || (existing.snapshot && !existing.autoUpload) || existing.joined || existing.joinTransition ||
+        existing.stopped) return
     if (existing.pendingActivation?.refusal) {
       finishProgress(host, existing.pendingActivation.refusal.band, 'error')
       return
@@ -810,7 +818,8 @@ function activationRefusal(error: unknown, organization: string): ActivationRefu
 async function stopAutomaticRecording(host: Host, session: string, root: string, refusal: ActivationRefusal) {
   await serial(async () => {
     const binding = await load(host, session)
-    if (!binding.autoUpload || binding.thread) return
+    // A paused session keeps its binding, so /delta share can bring it back.
+    if (!binding.autoUpload || binding.thread || binding.stopped) return
     if (binding.pendingActivation) {
       await save(host, { ...binding, pendingActivation: { ...binding.pendingActivation, refusal } })
       return

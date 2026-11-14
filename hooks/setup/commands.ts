@@ -18,7 +18,7 @@ import {
   DASHBOARD_URL, emailsIn, HEADLESS_REFUSAL, InteractionDismissedError, InteractionUnavailableError, membersUrl,
   openMembersPage, type Organization, runSetupWizard,
 } from './setup'
-import { shareFailureText, startShare } from '../sharing/share'
+import { shareFailureText, startShare, type SessionPause, pauseSession } from '../sharing/share'
 import { unshare } from '../sharing/unshare'
 import { errorText } from '../core/text'
 
@@ -44,7 +44,7 @@ async function activateForCommand(host: Host, session: string) {
 }
 
 /** Every `/delta` action, for a surface that can't show the menu and for an action it doesn't know. */
-export const DELTA_USAGE = 'Usage: /delta share [<email>…] | /delta unshare | /delta join <shared-link-or-thread> | /delta setup | /delta update | /delta plugin-update [check | notifications on|off] | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage'
+export const DELTA_USAGE = 'Usage: /delta share [<email>…] | /delta unshare | /delta pause | /delta join <shared-link-or-thread> | /delta setup | /delta update | /delta plugin-update [check | notifications on|off] | /delta org list | /delta org current | /delta org switch <ID> | /delta org invite <email>… | /delta org manage'
 /** `/delta-join` typed without its link. */
 export const JOIN_USAGE = 'Usage: /delta-join <link>. Paste the Delta link someone shared with you, such as /delta-join https://delta.dev/join/…, or a thread ID.'
 /** `/delta-org` typed without an action. */
@@ -52,7 +52,7 @@ export const ORG_USAGE = 'Usage: /delta-org list (your teams), /delta-org curren
 
 /** Add `/delta`, and a command of its own for each of its actions, to Claude's slash-command menu. */
 export async function registerCommands(host: Host) {
-  await host.command.register({ name: 'delta', description: 'Share, unshare, or join a Delta session, set up syncing, choose a team, or update Delta', argumentHint: 'share [<email>…] | unshare | join <shared-link-or-thread> | setup | update | plugin-update | org list | org current | org switch <ID> | org manage' })
+  await host.command.register({ name: 'delta', description: 'Share, unshare, or join a Delta session, pause it, set up syncing, choose a team, or update Delta', argumentHint: 'share [<email>…] | unshare | pause | join <shared-link-or-thread> | setup | update | plugin-update | org list | org current | org switch <ID> | org manage' })
   // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
   // appears in the slash-command menu.
   await host.command.register({ name: 'delta-share', description: 'Delta: sync this session and its code to DeltaDB, and choose who sees it', argumentHint: '[<email>…]' })
@@ -111,6 +111,11 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
     return pluginUpdateCommand(host, action.slice('plugin-update'.length).trim())
   if (action === 'update') return { text: await installationUpdates.update(installUpdateHost(host), form) }
   if (action === 'org manage') return { text: await manageOrganization(host) }
+  if (action === 'pause') {
+    const session = await host.session.id()
+    await sessionBegun(session)
+    return { text: pauseText(await pauseSession(host, session)) }
+  }
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
   if (/^(?:setup|share|join)\b/.test(action) && await offerToStopWaiting(host)) return {}
   // The setup wizard only writes the checkout's policy; it needs no session binding.
@@ -166,6 +171,18 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
     setProgress(host, text, 'error')
     return { text }
   }
+}
+
+/** What `/delta pause` answers. */
+function pauseText(outcome: SessionPause): string {
+  if (outcome.kind === 'none') return "Delta isn't syncing this session, so there's nothing to pause."
+  if (outcome.kind === 'already paused') return 'Delta is already paused for this session. Run /delta-share to sync it again.'
+  if (outcome.kind === 'refused') return `Delta can't pause this session: ${outcome.reason}.`
+  const queued = !outcome.queued ? ''
+    : outcome.queued === 1 ? " 1 recorded row hadn't reached Delta yet; it's sent when the session syncs again."
+    : ` ${outcome.queued} recorded rows hadn't reached Delta yet; they're sent when the session syncs again.`
+  return "Delta is paused for this session: it doesn't record this conversation or sync this checkout, including after you resume it. " +
+    `Run /delta-share to sync it again; what you say meanwhile is added to the thread then.${queued}`
 }
 
 export const installationUpdates = new InstallationUpdates()
