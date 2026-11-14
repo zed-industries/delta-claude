@@ -145,7 +145,7 @@ describe('automatic activation', () => {
     ['user_message', 'agent_message'].includes(record.update?.sessionUpdate)
       ? [[record.update!.sessionUpdate, record.update!.content.map((part: { text: string }) => part.text).join('')]] : [])
 
-  test('/delta pause holds through a resume and a failed /delta-share, and /delta-share adds what was said meanwhile', async ($, on) => {
+  test('/delta pause holds from the moment a session resumes, through a resume and a failed /delta-share, and /delta-share adds what was said meanwhile', async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('private', 'org-1'))
     await startAuto($, fake)
@@ -154,19 +154,21 @@ describe('automatic activation', () => {
     await turn($, fake, 'native-before', 'before pausing')
     // The last message is the note a cancelled turn leaves, which the next prompt merges into.
     fake.messages = [userText('before pausing'), reply('answer before'), userText('[Request interrupted by user]')]
+    // Paused as it resumes, before the restore of its checkout runs, it doesn't sync once that restore does.
+    await $.session.end(sessionEnd(fake.session))
+    fake.turns = 1
+    await $.session.start(sessionStart)
     await $.command.run(typedDelta('pause'))
     await fake.settle()
-    expect(fake.live()).toBeUndefined()
+    expect(fake.activeCheckouts.size).toBe(0)
     await turn($, fake, 'native-during', 'while paused')
     fake.messages = [...fake.messages.slice(0, -1), userText('[Request interrupted by user]\nwhile paused'), reply('reply while paused')]
 
-    // A resumed session restores no checkout.
+    // Resumed again, it stays paused.
     await $.session.end(sessionEnd(fake.session))
-    const mounted = mounts()
     await startAuto($, fake, 'resume')
     await turn($, fake, 'native-resumed', 'resumed while paused')
     fake.messages = [...fake.messages, userText('resumed while paused'), reply('second reply while paused')]
-    expect(mounts()).toBe(mounted)
 
     // A /delta-share that fails at the mount leaves it paused, so the next prompt restores nothing either.
     fake.commandFault = {
@@ -196,9 +198,12 @@ describe('automatic activation', () => {
     ]
     expect(said(fake)).toEqual(resumed)
 
-    // Paused again, then a compaction drops the reply it stopped at, so nothing said meanwhile can be placed.
+    // Paused again, now syncing its checkout and watching the thread, then a compaction drops the reply it stopped at, so
+    // nothing said meanwhile can be placed.
     await $.command.run(typedDelta('pause'))
     await fake.settle()
+    expect(fake.activeCheckouts.size).toBe(0)
+    expect(fake.live()).toBeUndefined()
     fake.messages = [userText('Compacted summary'), userText('said while paused'), reply('reply after compaction')]
     await runShare($, fake, 'share')
     expect(said(fake)).toEqual(resumed)

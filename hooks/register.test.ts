@@ -985,77 +985,55 @@ describe('sharing', () => {
     fake.expectClean()
   })
 
-  test('resume reports a permanent checkout restore refusal once and does not retry it on each prompt', async ($, on) => {
+  test("a resumed session retries a restore that can still work, reports one Delta refuses once, and points what Delta can't recover from at /delta pause", async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
+    const mounts = () => fake.operations().filter((operation) => operation === 'worktree mount').length
+    const refusals = () => fake.logs.filter((log) => log.includes("won't retry it in this session"))
+
+    // A failure that could pass next time is retried by the next prompt.
+    await $.session.end(sessionEnd(fake.session))
+    fake.commandFault = {
+      operation: 'worktree mount', code: 'app_unavailable', message: 'Delta is unreachable', retryable: true,
+    }
+    await $.session.start(sessionStart)
+    await fake.settle()
+    fake.commandFault = undefined
+    expect((await $.prompt.submit(prompt('retry the restore'))).drop).toBeUndefined()
+    await fake.settleUntil(() => fake.activeCheckouts.size === 1)
+
+    // Delta's final refusal is reported once, explained, and not retried; prompts keep recording locally.
     await $.session.end(sessionEnd(fake.session))
     fake.commandFault = {
       operation: 'worktree mount', code: 'failed', reason: 'worktree_directory_in_use', retryable: false,
       message: 'Checkout is managed by another thread',
     }
-    const mounts = () => fake.operations().filter((operation) => operation === 'worktree mount').length
-    const refusals = () => fake.logs.filter((log) => log.includes("won't retry it in this session")).length
     await $.session.start(sessionStart)
     await fake.settle()
     const attempts = mounts()
-    expect(refusals()).toBe(1)
-    const refusal = fake.logs.find((log) => log.includes("won't retry it in this session"))
-    expect(refusal).toContain(`${CHECKOUT} is a checkout Delta manages for another thread`)
-    expect(refusal).toContain('Run /delta pause')
-    for (const [index, text] of ['first', 'second'].entries()) {
-      expect((await $.prompt.submit(prompt(text))).drop).toBeUndefined()
-      await $.tool.call(bash(`after-refusal-${index}`, 'echo local'))
-      await fake.settle()
-    }
+    expect((await $.prompt.submit(prompt('after the refusal'))).drop).toBeUndefined()
+    await $.tool.call(bash('after-refusal', 'echo local'))
+    await fake.settle()
     expect(mounts()).toBe(attempts)
-    expect(refusals()).toBe(1)
-
+    expect(refusals()).toHaveLength(1)
+    expect(refusals()[0]).toContain(`${CHECKOUT} is a checkout Delta manages for another thread`)
+    expect(refusals()[0]).toContain('Run /delta pause')
     // An explicit share restores the checkout and delivers what was recorded meanwhile.
     fake.commandFault = undefined
     await fake.share($)
     await fake.settle()
     expect(fake.activeCheckouts.size).toBe(1)
-    expect((fake.store.get(`session:${fake.session}`) as any).pending).toEqual([])
-    expect(fake.records().map((record) => record.update)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ toolCallId: 'after-refusal-0' }), expect.objectContaining({ toolCallId: 'after-refusal-1' }),
-    ]))
-    fake.expectClean()
-  })
+    expect(new Set(fake.updates().flatMap((record) => record.update?.toolCallId ?? []))).toEqual(new Set(['after-refusal']))
 
-  test('a session Delta blocks for good points to /delta pause, which lets its prompts through', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [userText('one')] })
-    await $.session.start(sessionStart)
-    await fake.share($)
+    // A CLI too old for this plugin blocks every prompt until Delta is updated, or the session pauses.
     await $.session.end(sessionEnd(fake.session))
-    // The CLI is now too old for this plugin, which only updating Delta fixes.
     fake.contractRange = { min: 1, max: 4 }
     await $.session.start(sessionStart)
     await fake.settle()
     expect((await $.prompt.submit(prompt('blocked'))).drop).toContain('Run /delta pause')
     await $.command.run(typedDelta('pause'))
     expect((await $.prompt.submit(prompt('without Delta'))).drop).toBeUndefined()
-    fake.expectClean()
-  })
-
-  test('resume retries a retryable checkout restore failure on the next prompt', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [userText('one')] })
-    await $.session.start(sessionStart)
-    await fake.share($)
-    await $.session.end(sessionEnd(fake.session))
-    fake.commandFault = {
-      operation: 'worktree mount', code: 'app_unavailable', message: 'Delta is unreachable', retryable: true,
-    }
-    const mounts = () => fake.operations().filter((operation) => operation === 'worktree mount').length
-    await $.session.start(sessionStart)
-    await fake.settle()
-    const attempts = mounts()
-    expect(attempts).toBeGreaterThan(0)
-    fake.commandFault = undefined
-    expect((await $.prompt.submit(prompt('retry the restore'))).drop).toBeUndefined()
-    await fake.settleUntil(() => fake.activeCheckouts.size === 1)
-    expect(mounts()).toBeGreaterThan(attempts)
-    expect(fake.logs.some((log) => log.includes("won't retry it in this session"))).toBe(false)
     fake.expectClean()
   })
 
