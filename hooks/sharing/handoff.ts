@@ -1,9 +1,10 @@
 /**
- * Hands a join from Claude Code Desktop to a new Desktop session in the thread's folder.
+ * Hands a join from Claude Code Desktop to a new Desktop session in the thread's code.
  *
  * The tab mounts the thread, records the hand-off in a file every Claude process on the machine can
- * read, and opens Desktop's new-session screen on the thread's folder with an opening line filled
- * in. Sending it starts a session there, which claims the record and joins in place.
+ * read, and opens Desktop's new-session screen on the thread's first worktree's checkout with an
+ * opening line filled in. Sending it starts a session there, which claims the record and joins in
+ * place.
  *
  * The person sends the line because Desktop's own session tools refuse a session a plugin starts.
  * It is not `/delta join`, because Desktop breaks a command a link fills in, and it is not dropped,
@@ -11,13 +12,16 @@
  * records instead.
  */
 
-/** A join handed from a Desktop tab to the session Desktop starts in the thread's folder. */
+/** A join handed from a Desktop tab to the session Desktop starts in the thread's code. */
 export type Handoff = {
   /** The mount owner, which the new session takes over. */
   owner: string
   thread: string
   locator: string
-  /** The thread folder the new session starts in, as `thread mount` reported it. */
+  /**
+   * The folder the new session starts in, as `thread mount` reported it: the thread's first
+   * worktree's checkout.
+   */
   directory: string
   created: number
 }

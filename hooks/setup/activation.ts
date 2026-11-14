@@ -12,7 +12,7 @@ import { CONTRACT_TIMEOUT_MS, requireContract, resolveCli, threadCreate } from '
 import { authenticationHost, claudeInteraction, notifyOnce, setupEnv } from './interaction'
 import { attachWorktree, beginRestoreCheckout, checkoutNeedsMount, mountCheckout } from '../sharing/checkout'
 import { beginRestore, claimHandoff, pendingHandoff, startParticipation } from '../sharing/join'
-import { hasInteractiveSurface } from '../sharing/lifecycle'
+import { hasInteractiveSurface, sessionSurfaces } from '../sharing/lifecycle'
 import { listOrganizations, organizationName } from './organizations'
 import { startPluginUpdates } from '../plugin-update/updates'
 import { policyPath, type ProjectPolicy, readProjectPolicy, recordsAutomatically } from './project-policy'
@@ -197,6 +197,8 @@ let endedSession: string | undefined
 let successor: 'clear' | 'resume' | 'join' | undefined
 /** The starts being worked out, so two hooks that notice one session wait for the same work. */
 const noticing = new Map<string, Promise<boolean>>()
+/** The session starts {@link noticeSession} began and that are still running, for {@link sessionBegun}. */
+const beginnings = new Map<string, Promise<unknown>>()
 /** How often a session's transcript was looked for and not found, which stops the looking at {@link MAX_TRANSCRIPT_MISSES}. */
 const transcriptMisses = new Map<string, number>()
 const MAX_TRANSCRIPT_MISSES = 3
@@ -242,7 +244,19 @@ export async function noticeSession(host: Host, session?: string) {
   noticing.set(id, deciding)
   let begins: boolean
   try { begins = await deciding } finally { noticing.delete(id) }
-  if (begins) void beginSession(host, id).catch((error) => report(host, error))
+  if (begins) {
+    const beginning = beginSession(host, id).catch((error) => report(host, error)).finally(() => beginnings.delete(id))
+    beginnings.set(id, beginning)
+  }
+}
+
+/**
+ * Wait for the start {@link noticeSession} began for `session`, which activates it unless something
+ * already had. Work that needs the session activated waits for this rather than activating beside it,
+ * as two activations of one session stop each other.
+ */
+export async function sessionBegun(session: string) {
+  await beginnings.get(session)
 }
 
 /**
@@ -559,7 +573,7 @@ export async function startSession(host: Host, session: string, loadedMidSession
     decideCapture(session)
   }
   // Headless sessions get no reminder and are never offered setup; only an interactive surface shows them.
-  if (!hasInteractiveSurface(await host.session.surfaces())) return
+  if (!hasInteractiveSurface(await sessionSurfaces(host))) return
   stateFor(session).reminder = syncReminder(policy)
   host.ui.invalidate()
   try {
@@ -645,7 +659,7 @@ function activateAutomatically(host: Host, session: string, root: string, upload
       if (!ownsActivation()) return
       const refusal = await misconfiguration
       if (!ownsActivation()) return
-      const interactive = hasInteractiveSurface(await host.session.surfaces())
+      const interactive = hasInteractiveSurface(await sessionSurfaces(host))
       if (!ownsActivation()) return
       if (refusal && !(refusal === SIGNED_OUT_REFUSAL && interactive)) {
         await stopAutomaticRecording(host, session, root, refusal)

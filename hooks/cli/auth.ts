@@ -91,7 +91,7 @@ export async function requireAuthentication(
   // Here and for sign-in, a dismissed dialog, or a surface that cannot ask, declines like "Not now".
   const resolveAccess = async (value: JsonObject) => {
     if (value.reason !== 'terms_not_accepted') throw authFailure(value, recovery, retry)
-    const url = typeof value.url === 'string' ? value.url : 'https://zed.dev/delta/terms'
+    const url = typeof value.url === 'string' ? value.url : 'https://dashboard.zed.dev/delta-beta'
     const accept = 'Open the beta terms'
     const answer = await host.ask('Delta needs you to accept its beta terms before it can sync. Open them in your browser?',
       [accept, 'Not now']).catch(() => undefined)

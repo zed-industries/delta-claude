@@ -125,7 +125,7 @@ export const shareCommand = {
 /** The band above the prompt: the hook context the plugin draws its status and queued message rows in. */
 export const abovePrompt = {
   component: 'AbovePrompt', requestId: 'above-prompt', surface: 'terminal',
-  props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 80,
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 12, bodyColumns: 80,
     scroll: { offset: 0, bodyRows: 12 }, view: {} },
 } as const
 
@@ -391,8 +391,12 @@ export function fakeThreads(hostOn: On, options: {
     reloadResponse: undefined as string | undefined,
     cliIntegrations: [] as { operation: string; integration?: string; commandForm?: string }[],
     surfaces: ['terminal'] as ('terminal' | 'desktop')[],
-    builtins: ['clear', 'cd'],
+    builtins: ['clear', 'cd', 'add-dir'],
     sessionCommands: [] as { command: string; args: string }[],
+    /** The directories `/add-dir` added to the session, which Claude forgets when the session ends. */
+    addedDirectories: [] as string[],
+    /** The variables the plugin set in Claude's environment. */
+    envSet: {} as Record<string, string | undefined>,
     refuseClear: false,
     refuseCd: false,
     /** Every link the plugin opened with `open`, such as Desktop's new-session link. */
@@ -555,12 +559,20 @@ export function fakeThreads(hostOn: On, options: {
     /** Replaces the default watch readiness and snapshot. */
     onWatch: undefined as ((watch: Watch, index: number) => void) | undefined,
     commandFault: undefined as { operation: string; message: string; code?: string; reason?: string; retryable?: boolean; after?: boolean; exitCode?: number } | undefined,
-    /** The recording-contract range `thread contract` reports; overrides the fixture's `{min:1,max:6}`. */
+    /** The recording-contract range `thread contract` reports; overrides the fixture's range. */
     contractRange: undefined as { min?: number; max?: number } | undefined,
     /** Answers `thread contract` like a CLI that predates it: clap error on stderr, exit 2, no JSON. */
     contractUnknownSubcommand: false,
     /** Every `thread contract` the plugin asked for, counted apart from the recording commands. */
     contractChecks: 0,
+    /**
+     * Every `thread capture` as `[action, reference, tool_use_id, time, external_id]`, apart from the
+     * recording commands. `time` is its `--started-at` or `--ended-at`.
+     */
+    captures: [] as string[][],
+    captureFailure: undefined as string | undefined,
+    /** Holds each capture's answer so tests can exercise calls without a CLI response. */
+    holdCaptures: undefined as Promise<void> | undefined,
     authCalls: [] as string[][],
     authReplies: [] as { status: string; [key: string]: unknown }[],
     holdAuth: undefined as Promise<void> | undefined,
@@ -845,6 +857,10 @@ export function fakeThreads(hostOn: On, options: {
     })
     else on(event, handler)
   }) as On, { CLAUDE_CONFIG_DIR: CONFIG, HOME: '/sandbox', ...options.env })
+  on('env.set', ($, e) => {
+    fake.envSet[e.name] = e.value
+    return { value: {} }
+  })
   // The kit's bottom stores each row; this records it as the plugin's own hook passed it down.
   on('session.append', ($, e, next) => {
     fake.stored.push({
@@ -909,6 +925,10 @@ export function fakeThreads(hostOn: On, options: {
       await fake.endSession?.(fake.session)
       fake.session = `${fake.session}-fresh`
     } else if (e.command === 'cd' && !fake.refuseCd) fake.cwd = e.args
+    else if (e.command === 'add-dir') {
+      if (fake.addedDirectories.includes(e.args)) return { text: `${e.args} is already added as a working directory.` }
+      fake.addedDirectories.push(e.args)
+    }
     else if (e.command === 'rename') {
       // Claude writes the new title, or one it chose when none was typed, before the command returns.
       const title = e.args.trim() || 'chosen-by-claude'
@@ -920,7 +940,7 @@ export function fakeThreads(hostOn: On, options: {
     else if (e.command === 'reload-plugins') {
       if (fake.reloadFailure) throw new Error(fake.reloadFailure)
       if (fake.reloadResponse !== undefined) return { text: fake.reloadResponse }
-    } else if (!['clear', 'cd', 'rename'].includes(e.command)) throw new Error(`Unexpected fixture session command ${e.command}`)
+    } else if (!['clear', 'cd', 'add-dir', 'rename'].includes(e.command)) throw new Error(`Unexpected fixture session command ${e.command}`)
     return {}
   })
   // The settings menu's rows, of which the band reads the theme for its status bar's shade.
@@ -1194,6 +1214,21 @@ export function fakeThreads(hostOn: On, options: {
         operation: 'listed',
         organizations: fake.organizations ?? [{ id: 'org-1', name: 'Zed', current: true }],
       }))
+    }
+    // Capture runs around tool calls, so it is recorded apart from the recording commands.
+    if (operation === 'capture') {
+      const [action, reference] = [parsed!.positionals[2]!, parsed!.positionals[3]!]
+      const toolUseId = String(parsed!.options['--tool-call-id'])
+      fake.captures.push([action, reference, toolUseId,
+        String(parsed!.options[action === 'start' ? '--started-at' : '--ended-at']),
+        String(parsed!.options['--external-id'])])
+      const answer = fake.captureFailure ? output('', 1, fake.captureFailure)
+        : output(JSON.stringify({
+          operation: 'capture', thread_id: fake.server.thread, tool_call_id: toolUseId,
+          capturing: action === 'start', checkouts: action === 'start' ? 1 : 0,
+        }))
+      await fake.holdCaptures
+      return answer
     }
     // The recording-contract probe is counted on its own (`contractChecks`) so tests asserting the
     // plugin's recording commands through `commands`/`delta()`/`operations()` stay unaffected by it.
@@ -1936,7 +1971,7 @@ function cliArguments(argv: readonly string[]) {
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
     if (argument === '--json' || argument === '--force' || argument === '--join' || argument === '--existing-checkout' || argument === '--shared-worktrees' || argument === '--isolated-worktrees') { options[argument] = true; continue }
-    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name'].includes(argument)) return undefined
+    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name', '--tool-call-id', '--started-at', '--ended-at'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined
     options[argument] = value

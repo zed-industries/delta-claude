@@ -990,6 +990,64 @@ describe('sharing', () => {
     fake.expectClean()
   })
 
+  test('resume reports a permanent checkout restore refusal once and does not retry it on each prompt', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('one')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    fake.commandFault = {
+      operation: 'worktree mount', code: 'failed', reason: 'worktree_directory_in_use', retryable: false,
+      message: 'Checkout is managed by another thread',
+    }
+    const mounts = () => fake.operations().filter((operation) => operation === 'worktree mount').length
+    const refusals = () => fake.logs.filter((log) => log.includes("won't retry it in this session")).length
+    await $.session.start(sessionStart)
+    await fake.settle()
+    const attempts = mounts()
+    expect(refusals()).toBe(1)
+    expect(fake.logs.find((log) => log.includes("won't retry it in this session"))).toContain(
+      `${CHECKOUT} is a checkout Delta manages for another thread`)
+    for (const [index, text] of ['first', 'second'].entries()) {
+      expect((await $.prompt.submit(prompt(text))).drop).toBeUndefined()
+      await $.tool.call(bash(`after-refusal-${index}`, 'echo local'))
+      await fake.settle()
+    }
+    expect(mounts()).toBe(attempts)
+    expect(refusals()).toBe(1)
+
+    // An explicit share restores the checkout and delivers what was recorded meanwhile.
+    fake.commandFault = undefined
+    await fake.share($)
+    await fake.settle()
+    expect(fake.activeCheckouts.size).toBe(1)
+    expect((fake.store.get(`session:${fake.session}`) as any).pending).toEqual([])
+    expect(fake.records().map((record) => record.update)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolCallId: 'after-refusal-0' }), expect.objectContaining({ toolCallId: 'after-refusal-1' }),
+    ]))
+    fake.expectClean()
+  })
+
+  test('resume retries a retryable checkout restore failure on the next prompt', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('one')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    fake.commandFault = {
+      operation: 'worktree mount', code: 'app_unavailable', message: 'Delta is unreachable', retryable: true,
+    }
+    const mounts = () => fake.operations().filter((operation) => operation === 'worktree mount').length
+    await $.session.start(sessionStart)
+    await fake.settle()
+    const attempts = mounts()
+    expect(attempts).toBeGreaterThan(0)
+    fake.commandFault = undefined
+    expect((await $.prompt.submit(prompt('retry the restore'))).drop).toBeUndefined()
+    await fake.settleUntil(() => fake.activeCheckouts.size === 1)
+    expect(mounts()).toBeGreaterThan(attempts)
+    expect(fake.logs.some((log) => log.includes("won't retry it in this session"))).toBe(false)
+    fake.expectClean()
+  })
+
   test('resume checks authenticated denied access without deriving it from a URL', async ($, on) => {
       const fake = fakeThreads(on, { messages: [userText('one')] })
       await $.session.start(sessionStart)
@@ -1480,6 +1538,62 @@ describe('recording', () => {
     await $.tool.call(bash('after', 'echo after'))
     await fake.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
+    fake.expectClean()
+  })
+
+  test('every editing call runs without waiting for Delta to capture it', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    let release!: () => void
+    fake.holdCaptures = new Promise<void>((resolve) => { release = resolve })
+    await $.tool.call(bash('first', 'echo first'))
+    await $.tool.call(bash('second', 'echo second'))
+    await fake.settleUntil(() => fake.captures.length === 4)
+    release()
+    await fake.settle()
+    expect(fake.captures.map(([action, , toolUseId]) => [action, toolUseId]))
+      .toEqual([['start', 'first'], ['stop', 'first'], ['start', 'second'], ['stop', 'second']])
+    for (const [start, stop] of [fake.captures.slice(0, 2), fake.captures.slice(2)])
+      expect(Number(start![3])).toBeLessThanOrEqual(Number(stop![3]))
+    fake.expectClean()
+  })
+
+  test('capture uses the negotiated contract and becomes available after activation', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.contractRange = { min: 8, max: 10 }
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.tool.call(bash('old-cli', 'echo old'))
+    await fake.settle()
+    expect(fake.captures).toEqual([])
+    expect(fake.records().some((record) => record.update?.toolCallId === 'old-cli')).toBe(true)
+    fake.contractRange = { min: 8, max: 11 }
+    await $.session.end(sessionEnd(fake.session))
+    await $.session.start(sessionStart)
+    await fake.settle()
+    await $.tool.call(bash('new-cli', 'echo new'))
+    await fake.settle()
+    expect(fake.captures.map(([action, , id]) => [action, id])).toEqual([
+      ['start', 'new-cli'], ['stop', 'new-cli'],
+    ])
+    fake.expectClean()
+  })
+
+  test('a failed capture process does not disable later captures', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    fake.captureFailure = 'process stopped before answering'
+    await $.tool.call(bash('failed', 'echo failed'))
+    await fake.settle()
+    fake.captureFailure = undefined
+    await $.tool.call(bash('recovered', 'echo recovered'))
+    await fake.settle()
+    expect(fake.captures.map(([action, , id]) => [action, id])).toEqual([
+      ['start', 'failed'], ['stop', 'failed'], ['start', 'recovered'], ['stop', 'recovered'],
+    ])
+    expect(fake.debugLogs.some((text) => text.includes('process stopped before answering'))).toBe(true)
     fake.expectClean()
   })
 })
@@ -3438,7 +3552,7 @@ describe('the recording contract', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 11, max: 12 }
+    fake.contractRange = { min: 12, max: 13 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -3475,7 +3589,7 @@ describe('the recording contract', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 11, max: 12 }
+    fake.contractRange = { min: 12, max: 13 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
@@ -3497,7 +3611,7 @@ describe('the recording contract', () => {
     const checksAtAppend: number[] = []
     fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
     // An incompatible CLI is refused before anything is appended.
-    fake.contractRange = { min: 11, max: 12 }
+    fake.contractRange = { min: 12, max: 13 }
     await $.session.start(sessionStart)
     await fake.settle()
     expect(checksAtAppend).toEqual([])

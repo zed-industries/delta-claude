@@ -47,7 +47,10 @@ export type Binding = {
    * Desktop hand-off, the owner the offering tab mounted under.
    */
   owner?: string
-  /** The directory a joined session works in: the checkout of a thread's only worktree, else the thread folder. */
+  /**
+   * The directory a joined session works in: its thread's first worktree's checkout, or in Claude
+   * Code Desktop the checkout or thread folder Desktop started it in.
+   */
   directory?: string
   /** Every worktree of a joined session's thread, as the last `thread mount` placed them. */
   mounts?: ThreadMount[]
@@ -203,8 +206,17 @@ export type SessionState = {
   restoring?: true
   /** A saved checkout's mount is being restored while prompts proceed and record locally. */
   restoringCheckout?: true
-  /** Where Claude has to move between turns, because its worktree is no longer the thread's one directory. */
-  moveTo?: string
+  /**
+   * Why Delta refused to restore the saved checkout's mount for good, such as a folder it manages for
+   * another thread. Prompts keep recording locally, and nothing restores the checkout again until an
+   * explicit /delta-share or the session resumes.
+   */
+  checkoutRefusal?: string
+  /**
+   * Where Claude has to be between turns, and the checkouts it has to add, because the thread's
+   * worktrees changed.
+   */
+  moveTo?: { workingDirectory: string; additionalDirectories: string[] }
   /**
    * A move is running. It outlasts `moveTo`, which a move clears before telling Claude where it went,
    * so a target that arrives meanwhile waits for the next turn's end rather than starting a second move.
@@ -371,6 +383,7 @@ export function resetRuntime(runtime: SessionState) {
   runtime.mounted = undefined
   runtime.restoring = undefined
   runtime.restoringCheckout = undefined
+  runtime.checkoutRefusal = undefined
   runtime.moveTo = undefined
   runtime.notes = []
   runtime.nativeTurns.clear()

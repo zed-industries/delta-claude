@@ -149,6 +149,9 @@ its own opens a menu of these actions.
 | `/delta-org manage` | Open the selected team's members page on the dashboard |
 
 Sharing and joining need an interactive Claude Code terminal or Desktop Code tab.
+In Desktop, `/delta-join` opens a new Code session in the thread's first worktree.
+Desktop doesn't let the plugin add the thread's other worktrees, so the transcript
+gives the `/add-dir` command to run for each, on joining and when one is attached later.
 
 ## Privacy
 

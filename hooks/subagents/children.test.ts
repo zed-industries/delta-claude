@@ -1,7 +1,7 @@
 import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import {
-  CHECKOUT, childActor, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
+  bash, CHECKOUT, childActor, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
   turnComplete, turnStart, userText,
 } from '../testing/fake-thread-commands'
 
@@ -36,6 +36,93 @@ describe('subagents', () => {
     // The parent's agent sent the prompt; the child's own output is only on the child's thread.
     expect(records[1]!.update?._meta?.delta?.sender).toEqual({ external_id: fake.session })
     expect(JSON.stringify(fake.records())).not.toContain('Parser looks fine')
+    fake.expectClean()
+  })
+
+  test('child captures retain their timestamps until the thread exists, without holding up tools', async ($, on) => {
+    const fake = await sharedSession($, on)
+    await mainTurn($, 'main')
+    const agentId = await spawn($)
+    let releaseCreation!: () => void
+    const creation = new Promise<void>((resolve) => { releaseCreation = resolve })
+    fake.holdRun = (operation) => operation === 'create' ? creation : undefined
+    await $.turn.start({ ...turnStart('child-turn'), agentId } as never)
+    const finishedAt = String(fake.clock.now())
+    await $.tool.call({ ...bash('finished', 'echo first'), agentId } as never)
+    await fake.settle()
+    // Old starts are submitted unchanged; Delta, not the plugin, decides whether to refuse them.
+    await fake.advance(61_000)
+    const startedAt = String(fake.clock.now())
+    let releaseTool!: () => void
+    fake.holdTool = new Promise<void>((resolve) => { releaseTool = resolve })
+    const running = $.tool.call({ ...bash('running', 'echo second'), agentId } as never)
+    await fake.settle()
+    expect(fake.captures).toEqual([])
+
+    fake.holdRun = undefined
+    releaseCreation()
+    await fake.settleUntil(() => fake.captures.length === 3)
+    const reference = fake.server.subagents.get(agentId)!.reference
+    const submitted = [
+      ['start', reference, 'finished', finishedAt, agentId],
+      ['stop', reference, 'finished', finishedAt, agentId],
+      ['start', reference, 'running', startedAt, agentId],
+    ]
+    expect(fake.captures).toEqual(submitted)
+    await fake.advance(61_000)
+    const endedAt = String(fake.clock.now())
+    fake.holdTool = undefined
+    releaseTool()
+    await running
+    await fake.settle()
+    const readyAt = String(fake.clock.now())
+    await $.tool.call({ ...bash('ready', 'echo third'), agentId } as never)
+    await fake.settle()
+    expect(fake.captures).toEqual([
+      ...submitted, ['stop', reference, 'running', endedAt, agentId],
+      ['start', reference, 'ready', readyAt, agentId], ['stop', reference, 'ready', readyAt, agentId],
+    ])
+    fake.expectClean()
+  })
+
+  test('a child with its own checkout retains captures until the mount is ready', async ($, on) => {
+    const fake = await sharedSession($, on)
+    await mainTurn($, 'main')
+    const agentId = await spawn($)
+    fake.cwd = `${CHECKOUT}/.claude/worktrees/own-${agentId}`
+    let release!: () => void
+    fake.holdCheckoutMount = new Promise<void>((resolve) => { release = resolve })
+    await $.turn.start({ ...turnStart('child-turn'), agentId } as never)
+    await fake.settleUntil(() => fake.commands.some((argv) => argv.includes('mount') && argv.includes(fake.cwd)))
+    const at = String(fake.clock.now())
+    await $.tool.call({ ...bash('edit', 'echo edit'), agentId } as never)
+    await fake.settle()
+    expect(fake.captures).toEqual([])
+    fake.holdCheckoutMount = undefined
+    release()
+    await fake.settle()
+    const reference = fake.server.subagents.get(agentId)!.reference
+    expect(fake.captures).toEqual([
+      ['start', reference, 'edit', at, agentId], ['stop', reference, 'edit', at, agentId],
+    ])
+    fake.expectClean()
+  })
+
+  test('ending the session discards captures still waiting for a child thread', async ($, on) => {
+    const fake = await sharedSession($, on)
+    await mainTurn($, 'main')
+    const agentId = await spawn($)
+    let release!: () => void
+    const creation = new Promise<void>((resolve) => { release = resolve })
+    fake.holdRun = (operation) => operation === 'create' ? creation : undefined
+    await $.turn.start({ ...turnStart('child-turn'), agentId } as never)
+    await $.tool.call({ ...bash('edit', 'echo edit'), agentId } as never)
+    await fake.settle()
+    await $.session.end(sessionEnd(fake.session))
+    fake.holdRun = undefined
+    release()
+    await fake.settle()
+    expect(fake.captures).toEqual([])
     fake.expectClean()
   })
 

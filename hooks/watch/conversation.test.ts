@@ -112,6 +112,12 @@ describe('conversation', () => {
     })
     expect(itemMarkdown(result, 'thread')).toBe('Landed: Land Changes\nmain 2d867ce6c CI passed')
     expect(renderItem(result, 'thread')).toContain('"event":"landed"')
+    const fork = item(
+      'Saved changes in /repo to a fork\n<local-changes-forked directory="/repo" fork="delta://worktree/h#t=f">\nTo bring them in, run `delta worktree merge`.\n</local-changes-forked>',
+      { kind: 'local_changes_forked' },
+    )
+    expect(itemDisplay(fork, 'thread')).toBe('Delta activity:\nSaved changes in /repo to a fork')
+    expect(renderItem(fork, 'thread')).toContain('delta worktree merge')
     expect(isDrawnItem(item('metadata', { kind: 'model_changed' }))).toBe(false)
   })
 

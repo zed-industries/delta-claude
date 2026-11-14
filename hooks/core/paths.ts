@@ -1,7 +1,11 @@
-/** Compare absolute Windows paths by separators only; Unix spelling and case remain significant. */
+/**
+ * Compare absolute Windows paths by separators only, and without the `\\?\` prefix Delta's
+ * canonical paths carry and Claude drops; Unix spelling and case remain significant.
+ */
 export function pathKey(path: string, ...counterparts: string[]): string {
   const windows = (value: string) => /^[a-z]:[\\/]/i.test(value) || value.startsWith('\\\\')
-  return windows(path) || counterparts.some(windows) ? path.replace(/\\/g, '/') : path
+  if (!windows(path) && !counterparts.some(windows)) return path
+  return path.replace(/\\/g, '/').replace(/^\/\/\?\/UNC\//i, '//').replace(/^\/\/\?\//, '')
 }
 
 /**

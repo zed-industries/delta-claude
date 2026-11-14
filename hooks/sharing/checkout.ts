@@ -7,9 +7,10 @@ import { finishProgress, setProgress } from '../band/band'
 import {
   hasWorktreeMount, requireContract, worktreeAttach, worktreeCreate, worktreeList, worktreeMount,
 } from '../cli/delta-cli'
+import { classifyCommandFailure, DeltaCommandError } from '../cli/thread-commands'
 import { samePath } from '../core/paths'
 import {
-  activation, type Binding, load, recoveryCommand, save, serial, sessions, stateFor,
+  activation, type Binding, load, recoveryCommand, requests, save, serial, sessions, stateFor,
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import { errorText } from '../core/text'
@@ -66,17 +67,19 @@ export function checkoutNeedsMount(session: string, binding: Binding): boolean {
  * Reclaim a saved user checkout before resuming recording in its directory. A session that records
  * offline keeps taking prompts meanwhile: their records queue, and mounting the existing checkout
  * imports the edits they make. Delta waits for a connection before mounting a shared checkout, so
- * holding prompts for the mount would hold them for as long as the session is offline.
+ * holding prompts for the mount would hold them for as long as the session is offline. A refusal
+ * Delta marks permanent is reported once and not retried: another attempt would get the same answer.
  */
 export function beginRestoreCheckout(host: Host, session: string) {
   const runtime = stateFor(session)
-  if (runtime.restoring || runtime.restoringCheckout) return
+  if (runtime.restoring || runtime.restoringCheckout || runtime.checkoutRefusal) return
   const background = recordsOffline(session, runtime.binding)
   if (background) runtime.restoringCheckout = true
   else runtime.restoring = true
   setProgress(host, 'Restoring this checkout’s synchronization…', 'active')
   const owns = () => activation.session === session && sessions.get(session) === runtime
   host.clock.after(0, async () => {
+    let mounted = false
     try {
       const binding: Binding = await serial(() => load(host, session))
       if (!owns()) return
@@ -85,6 +88,7 @@ export function beginRestoreCheckout(host: Host, session: string) {
       await mountCheckout(host, binding, async () => {
         if (!owns()) throw new Error('The session ended while its checkout was being restored')
       })
+      mounted = true
       if (!owns()) return
       runtime.joinFailure = undefined
       if (binding.snapshot) {
@@ -99,10 +103,19 @@ export function beginRestoreCheckout(host: Host, session: string) {
       await finishRestoredActivation(host, session, binding, owns)
     } catch (error) {
       if (!owns()) return
-      // Prompts that record offline keep going, and the next one retries the restore.
-      const text = background
+      // Prompts that record offline keep going, and the next one retries a restore that could still
+      // succeed. Only Delta's own final answer to the mount stops that: steps after the mount, such as
+      // delivery, fail for reasons of their own, and a share running meanwhile mounts the checkout itself.
+      const permanent = background && !mounted && !requests.share && error instanceof DeltaCommandError &&
+        classifyCommandFailure(error) === 'permanent'
+      const refusal = managedCheckoutRefusal(error, runtime.binding?.checkout ?? 'this folder')
+      const reason = errorText(refusal).replace(/[.\s]+$/, '')
+      const text = permanent
+        ? `Delta couldn't restore this checkout's synchronization and won't retry it in this session: ${reason}. Prompts still record locally.`
+        : background
         ? `Delta couldn't restore this checkout's synchronization: ${errorText(error)}. Prompts still record locally, and the next one retries.`
         : `Delta couldn't restore this checkout: ${errorText(error)}. Retry ${recoveryCommand(runtime.binding)}; the prompt was not submitted.`
+      if (permanent) runtime.checkoutRefusal = text
       if (!background) runtime.joinFailure = text
       setProgress(host, text, 'error')
       await host.ui.log(text, { to: 'transcript' })
@@ -111,4 +124,13 @@ export function beginRestoreCheckout(host: Host, session: string) {
       else runtime.restoring = undefined
     }
   })
+}
+
+/**
+ * What a share or restore says when `root` is a checkout Delta manages for another thread that no
+ * session here joined. Delta reports it from whichever step binds the folder; today that is the mount.
+ */
+export function managedCheckoutRefusal(error: unknown, root: string): unknown {
+  if (!(error instanceof DeltaCommandError && error.reason === 'worktree_directory_in_use')) return error
+  return new Error(`${root} is a checkout Delta manages for another thread, so it can't be shared as this one. Run /delta-join with that thread's link to work there (${error.message})`)
 }

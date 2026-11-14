@@ -80,8 +80,10 @@ function hostOf($: EngineInterface): Host {
       claudeConfigDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
       deltaAcpSession: () => $.env.get('DELTA_ACP_SESSION'),
       disableNonessentialTraffic: () => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'),
+      entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'),
       home: () => $.env.get('HOME'),
       os: () => $.env.get('OS'),
+      setAdditionalDirectoriesClaudeMd: () => $.env.set('CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD', '1'),
       userProfile: () => $.env.get('USERPROFILE'),
     },
     fs: {

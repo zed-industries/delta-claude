@@ -14,7 +14,8 @@ import {
 } from '../recording/delivery'
 import { deliveryRetryDelay } from '../recording/delivery-policy'
 import {
-  checkoutSyncing, stopWorktreeMount, threadCreate, threadMergeCommandLine, threadWatch, verifiedContract, watchEvents,
+  checkoutSyncing, hasWorktreeMount, stopWorktreeMount, threadCreate, threadMergeCommandLine, threadWatch,
+  verifiedContract, watchEvents,
 } from '../cli/delta-cli'
 import { attachWorktree, mountCheckout } from '../sharing/checkout'
 import { mountThread, unmountThread } from '../sharing/join'
@@ -29,6 +30,7 @@ import type { Host } from '../core/host'
 import { snapshotMessages } from '../recording/snapshot'
 import { errorText } from '../core/text'
 import { CHILD_CONTRACT_VERSION, classifyCommandFailure, DeltaCommandError } from '../cli/thread-commands'
+import { capturesEdits, type EditCapture, startCapture } from '../recording/edit-capture'
 import { ToolRecords } from '../recording/tool-records'
 import { recordThreadSummary } from '../recording/thread-summary'
 import { adoptThread, isAdoptionSpawn, reportClaudeRun } from './thread-runs'
@@ -45,6 +47,7 @@ export type ChildRuntime = {
   /** A foreground child runs inside its parent's turn, so stopping it ends that turn. */
   foreground: boolean
   tools: ToolRecords
+  pendingCaptures: Set<EditCapture>
   /** Rows waiting for the turn start that fixes the sequence they carry; see `heldRows`. */
   heldRows: HeldRow[]
   currentTurnId?: string
@@ -269,7 +272,7 @@ export async function parentDirectories(host: Host, binding: Pick<ChildBinding, 
   const bound = boundDirectory(session)
   if (!bound) return []
   if (!session?.joined) return [bound]
-  // A joined thread with one worktree works in that worktree's own directory.
+  // A joined session works in one worktree's checkout and adds the others' as working directories.
   const mounted = (session.mounts ?? []).map((mount) => mount.directory)
   return [bound, ...mounted.filter((directory) => !samePath(directory, bound))]
 }
@@ -460,6 +463,10 @@ async function deliverChildOnce(host: Host, child: ChildRuntime) {
   }
   if (binding.checkout && binding.checkoutReference)
     await mountCheckout(host, { session: child.session, checkout: binding.checkout, checkoutReference: binding.checkoutReference })
+  if (children.get(child.agentId) === child) {
+    for (const capture of child.pendingCaptures) capture.submit(reference)
+    child.pendingCaptures.clear()
+  }
   watchChildTurn(host, child, binding)
   while (binding.pending.length) {
     const { count, fenced, failure } = await appendPending(host, {
@@ -697,7 +704,7 @@ async function stopChild(host: Host, child: ChildRuntime) {
 export function addChild(session: string, agentId: string, sender: string, foreground: boolean): ChildRuntime {
   const child: ChildRuntime = {
     session, agentId, sender, foreground, tools: new ToolRecords(), heldRows: [], queue: Promise.resolve(),
-    retryAttempts: 0,
+    pendingCaptures: new Set(), retryAttempts: 0,
   }
   children.set(agentId, child)
   return child
@@ -720,6 +727,7 @@ export function forgetSubagents(session: string) {
   for (const [agentId, child] of children) {
     if (child.session !== session) continue
     child.retryTimer?.cancel()
+    child.pendingCaptures.clear()
     children.delete(agentId)
   }
 }
@@ -734,7 +742,7 @@ type Fork = { thread: string; reference: string; owner: string; directory?: stri
  * The child works in the fork of the worktree its parent works in, which Delta checks out inside the
  * parent's checkout: Claude lets a subagent edit inside the session's directories without asking, as in
  * a worktree of its own, but asks for a directory it was merely sent to elsewhere. Only a parent that
- * works in a thread folder itself, as a joined thread with several worktrees does, gets the fork's.
+ * works in a thread folder itself, as a joined Claude Code Desktop session does, gets the fork's.
  */
 async function forkWorktrees(host: Host, binding: ChildBinding): Promise<Fork | undefined> {
   const { session, agentId, parent, name } = binding
@@ -951,7 +959,22 @@ export async function recordChildRow(host: Host, e: HookEvent<'session.append'>,
 
 /** A recorded subagent's tool call finished; its result is recorded on its thread. */
 export async function recordChildToolCall(host: Host, e: HookEvent<'tool.call'>, agentId: string, next: HookNext<'tool.call'>) {
-  const result = await next(e)
+  const editing = e.tool_use_id && capturesEdits(e.tool) ? await childFor(host, agentId) : undefined
+  const binding = editing && await loadChild(host, editing)
+  const capture = editing && e.tool_use_id
+    ? await startCapture(host, editing.session, { externalId: editing.agentId, toolUseId: e.tool_use_id })
+    : undefined
+  if (editing && capture && children.get(agentId) === editing) {
+    if (binding?.thread && binding.reference &&
+        (!binding.checkout || hasWorktreeMount(editing.session, binding.checkout))) {
+      capture.submit(binding.reference)
+    } else {
+      editing.pendingCaptures.add(capture)
+      void deliverChild(host, editing)
+    }
+  }
+  // Capture ends as the call does, so later edits are not the call's.
+  const result = await next(e).finally(() => capture?.stop())
   const id = e.tool_use_id
   if (!id || !('result' in result) || result.result === undefined) return result
   const child = await childFor(host, agentId)

@@ -1,6 +1,6 @@
 /**
  * `/delta join` and what a joined session keeps up: mounting the thread's worktrees, moving Claude
- * into them, Desktop hand-offs, and restoring and releasing mounts.
+ * into the first and adding the others, Desktop hand-offs, and restoring and releasing mounts.
  */
 import { activate, finishRestoredActivation, handedOff, pluginData } from '../setup/activation'
 import { AccessRequiredError, requireAuthentication } from '../cli/auth'
@@ -14,7 +14,8 @@ import {
 import { type Handoff, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff } from './handoff'
 import { authenticationHost, OPEN_TIMEOUT_MS } from '../setup/interaction'
 import {
-  activeBackgroundAgents, joinPreflight, missingJoinCommands, releasesMounts, worktreeChanges,
+  activeBackgroundAgents, joinPreflight, missingJoinCommands, releasesMounts,
+  type SessionDirectories, sessionDirectories, sessionSurfaces, worktreeChanges,
 } from './lifecycle'
 import { samePath } from '../core/paths'
 import {
@@ -23,7 +24,7 @@ import {
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import {
-  classifyCommandFailure, DeltaCommandError, type MountedThread, type ThreadState,
+  classifyCommandFailure, DeltaCommandError, type MountedThread, type ThreadMount, type ThreadState,
 } from '../cli/thread-commands'
 import { errorText } from '../core/text'
 import { isRetrying, isCurrentReady, startConversation, statusFields, stopConversation } from '../watch/watch'
@@ -118,8 +119,8 @@ async function joinSession(host: Host, request: JoinRequest) {
     }
     // Claude Code Desktop has no `/cd`, applies its own folder tool's move only when a model turn
     // ends, which a join run from a command never has, and never moves a worktree session at all.
-    // So a Desktop join starts a new session in the thread's folder instead.
-    const handsOff = (await host.session.surfaces()).includes('desktop')
+    // So a Desktop join starts a new session in the thread's first worktree's checkout instead.
+    const handsOff = await inDesktop(host)
     // `/delta join` is the request, and the fresh session leaves this one resumable, so the only
     // question is Claude's own folder trust prompt.
     if (!handsOff) await requireJoinCommands(host, ['clear', 'cd'])
@@ -232,15 +233,17 @@ async function completeJoin(host: Host, session: string, plan: JoinPlan, request
   )
   await check()
   requireMounted(mounted, plan.thread)
+  const directories = sessionDirectories(mounted, await desktopRoot(host))
   // Remember the verified destination even if Claude refuses /cd; the retry notice must name it.
   await serial(async () => {
     await check()
-    await save(host, { ...await load(host, session), directory: mounted.directory }, () => !request.cancelled)
+    await save(host, { ...await load(host, session), directory: directories.workingDirectory },
+      () => !request.cancelled)
   })
-  await enterDirectory(host, session, mounted.directory, check)
+  await enterDirectories(host, session, directories, mounted.worktrees, check)
   const binding: Binding = {
     session, thread: plan.thread, locator: plan.locator, joined: true,
-    owner: plan.owner ?? session, directory: mounted.directory, mounts: mounted.worktrees,
+    owner: plan.owner ?? session, directory: directories.workingDirectory, mounts: mounted.worktrees,
     // snapshot means live recording is enabled, not that old history must be exported.
     snapshot: true, next: 1, pending: [],
   }
@@ -260,8 +263,8 @@ async function completeJoin(host: Host, session: string, plan: JoinPlan, request
   await startConversation(host, session)
   // The band reports the join through the finished notice; the way back to the previous session stays in the debug log.
   host.ui.log(plan.owner
-    ? `Joined Delta in Claude session ${session} at ${mounted.directory}, taking over mount owner ${plan.owner}.`
-    : `Joined Delta in fresh Claude session ${session} at ${mounted.directory}. Resume the previous session with claude --resume ${plan.session} from ${plan.cwd}.`,
+    ? `Joined Delta in Claude session ${session} at ${directories.workingDirectory}, taking over mount owner ${plan.owner}.`
+    : `Joined Delta in fresh Claude session ${session} at ${directories.workingDirectory}. Resume the previous session with claude --resume ${plan.session} from ${plan.cwd}.`,
     { to: 'debug' })
   finishProgress(host, 'Joined the shared thread', 'done')
 }
@@ -287,8 +290,8 @@ function handoffPath(owner: string) { return `${pluginData}/handoffs/${owner}.js
 
 /**
  * Hand a Desktop tab's join to a new Desktop session: mount the thread under an owner of its own,
- * record the hand-off, and open Desktop's new-session screen on the thread folder. Nothing in this
- * tab changes.
+ * record the hand-off, and open Desktop's new-session screen on the checkout a joined session works
+ * in. Nothing in this tab changes.
  */
 async function offerHandoff(host: Host, request: JoinRequest, status: ThreadState) {
   const owner = `desktop-${crypto.randomUUID()}`
@@ -298,24 +301,27 @@ async function offerHandoff(host: Host, request: JoinRequest, status: ThreadStat
     host, { session: request.session, thread: status.thread_id, locator: request.locator, owner },
     { reportJoin: true, form: request.form },
   )
+  // A new-session link names one folder; the session asks the person to add the other checkouts.
+  const directory = sessionDirectories(mounted).workingDirectory
   const handoff: Handoff = {
-    owner, thread: status.thread_id, locator: request.locator, directory: mounted.directory,
-    created: await host.clock.now(),
+    owner, thread: status.thread_id, locator: request.locator, directory, created: await host.clock.now(),
   }
+  const worktree = mounted.worktrees.find((tree) => samePath(tree.directory, directory))
+  const place = worktree ? `"${worktree.name}" worktree` : 'folder'
   try {
     await check()
     requireMounted(mounted, status.thread_id)
     await host.fs.write(handoffPath(owner), JSON.stringify(handoff))
-    const link = newSessionLink(mounted.directory, HANDOFF_PROMPT)
+    const link = newSessionLink(directory, HANDOFF_PROMPT)
     const opened = await host.process.run(['open', link], { timeoutMs: OPEN_TIMEOUT_MS }).catch((error) => ({ exitCode: 1, stderr: errorText(error) }))
     stateFor(request.session).offered = handoff
     const thread = status.title?.trim() ? `“${status.title.trim()}”` : 'the thread'
     if (opened.exitCode === 0)
-      setProgress(host, `Press Enter in the new Claude Code Desktop session to join ${thread} there; this tab stays as it is. Desktop may ask you to trust the thread's folder. It waits 5 minutes.`, 'active')
+      setProgress(host, `Press Enter in the new Claude Code Desktop session to join ${thread} there; this tab stays as it is. Desktop may ask you to trust the thread's ${place}. It waits 5 minutes.`, 'active')
     else {
       // Opening links from a plugin needs macOS's `open`; anywhere else the person opens it.
       setProgress(host, `Open the link in this transcript, then press Enter in the new session to join ${thread} there. It waits 5 minutes.`, 'active')
-      await host.ui.log(`Open this link to start a Claude Code session in the Delta thread's folder: ${link}`, { to: 'transcript' })
+      await host.ui.log(`Open this link to start a Claude Code session in the Delta thread's ${place}: ${link}`, { to: 'transcript' })
     }
     host.clock.after(HANDOFF_POLL_MS, () => watchHandoff(host, request.session, handoff))
   } catch (error) {
@@ -404,18 +410,73 @@ export function requireMounted(mounted: MountedThread, thread: string | undefine
   if (!mounted.worktrees.length) throw new Error('This thread has no worktree to join')
 }
 
+async function inDesktop(host: Host) {
+  return (await sessionSurfaces(host)).includes('desktop')
+}
+
+/** In Claude Code Desktop, which has no `/cd`, the directory the session started in and has to stay in. */
+async function desktopRoot(host: Host): Promise<string | undefined> {
+  return await inDesktop(host) ? host.session.root() : undefined
+}
+
+/**
+ * Put Claude in a working directory and add the additional ones. Claude asks before adding each,
+ * and forgets them when the session ends, so a resumed session adds them again. In Desktop the
+ * person adds them.
+ */
+async function enterDirectories(
+  host: Host, session: string, directories: SessionDirectories, mounts: readonly ThreadMount[],
+  check: () => Promise<void>, reason: 'join' | 'added' = 'join',
+) {
+  const name = (path: string) => mounts.find((mount) => samePath(mount.directory, path))?.name
+  const working = name(directories.workingDirectory)
+  await enterDirectory(host, session, directories.workingDirectory,
+    working ? `the "${working}" worktree` : "the thread's folder", check)
+  const count = directories.additionalDirectories.length
+  if (!count) return
+  // Desktop runs no `/add-dir` a plugin asks for ("no command named /add-dir in this session"), but
+  // runs one the person types.
+  const desktop = await inDesktop(host)
+  if (!desktop) await requireJoinCommands(host, ['add-dir'])
+  await host.env.setAdditionalDirectoriesClaudeMd()
+  await check()
+  const names = directories.additionalDirectories.map((path) => `"${name(path) ?? path}"`)
+  const listed = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0]
+  const worktrees = `${listed} ${count === 1 ? 'worktree' : 'worktrees'}`
+  if (desktop) {
+    const them = count === 1 ? 'it' : 'them'
+    const refusal = reason === 'added'
+      ? `The ${worktrees} ${count === 1 ? 'was' : 'were'} added to this thread. Claude Code Desktop doesn't let Delta add ${them} to this session.`
+      : `Claude Code Desktop doesn't let Delta add the ${worktrees} to this session.`
+    await host.ui.log([
+      `${refusal} To work in ${them} here too, run:`,
+      ...directories.additionalDirectories.map((directory) => `/add-dir ${directory}`),
+    ].join('\n'), { to: 'transcript' })
+    return
+  }
+  setProgress(host, `Waiting for you to add the ${worktrees}…`, 'active')
+  // Claude's prompt names only a path, and hides the band while it is open.
+  await host.ui.log(reason === 'added' ? `${worktrees} added.` : `Adding the ${worktrees}.`, { to: 'transcript' })
+  for (const directory of directories.additionalDirectories) {
+    await check()
+    await host.command.run({ command: 'add-dir', args: directory })
+  }
+}
+
 /**
  * Move Claude into a mount's directory unless it is already there. Claude resumes in the directory
  * it was launched from, and `/cd` is the only way a plugin changes the session's directory.
  */
-async function enterDirectory(host: Host, session: string, directory: string, check: () => Promise<void>) {
+async function enterDirectory(
+  host: Host, session: string, directory: string, label: string, check: () => Promise<void>,
+) {
   if (await isInDirectory(host, directory)) return
   await requireJoinCommands(host, ['cd'])
   await check()
-  setProgress(host, "Waiting for you to trust the thread's folder…", 'active')
-  // Claude's trust prompt names only a path, so say what the folder is and which answer joins.
+  setProgress(host, `Waiting for you to move to ${label}…`, 'active')
+  // Claude's trust prompt names only a path, so say what it is and which answer pauses Delta.
   await host.ui.log(
-    `Delta put this thread's code in its own folder for this session. Claude Code asks before working in a new folder: choose "Yes, move here" to continue. "No, stay put" pauses Delta in this session until you run /delta-join again.`,
+    `Moving to ${label}. Choosing "No, stay put" pauses Delta until you run /delta-join again.`,
     { to: 'transcript' })
   await host.command.run({ command: 'cd', args: directory })
   await check()
@@ -435,10 +496,14 @@ async function restoreMounts(host: Host, session: string, check: () => Promise<v
   const mounted = await mountThread(host, binding)
   await check()
   requireMounted(mounted, binding.thread)
-  await enterDirectory(host, session, mounted.directory, check)
+  const directories = sessionDirectories(mounted, await desktopRoot(host))
+  await enterDirectories(host, session, directories, mounted.worktrees, check)
   await serial(async () => {
     await check()
-    await save(host, { ...await load(host, session), owner: binding.owner ?? session, directory: mounted.directory, mounts: mounted.worktrees })
+    await save(host, {
+      ...await load(host, session),
+      owner: binding.owner ?? session, directory: directories.workingDirectory, mounts: mounted.worktrees,
+    })
   })
   stateFor(session).mounted = true
 }
@@ -511,21 +576,39 @@ async function applyWorktrees(host: Host, session: string, listed: { reference: 
   const mounted = await mountThread(host, binding)
   if (activation.session !== session || mounted.thread_id !== binding.thread) return
   await serial(async () => save(host, { ...await load(host, session), mounts: mounted.worktrees }))
-  const { added, removed, moves } = worktreeChanges(previous, binding.directory, mounted)
+  const desktop = await desktopRoot(host)
+  const { added, removed, update } = worktreeChanges(previous, binding.directory, mounted, desktop)
   if (!added.length && !removed.length) return
   const names = (trees: { name: string }[]) => trees.map((tree) => tree.name).join(', ')
   const changes = [added.length ? `added ${names(added)}` : '', removed.length ? `removed ${names(removed)}` : ''].filter(Boolean).join('; ')
-  finishProgress(host, `Thread worktrees changed: ${changes}${moves ? ' · moving to the thread folder' : ''}`, 'done')
+  const moves = !!update && !samePath(update.workingDirectory, binding.directory ?? update.workingDirectory)
+  // Desktop cannot add a directory for the person, so there is nothing to wait for the turn's end.
+  const asks = !!update && !moves && desktop !== undefined
+  finishProgress(host, `Thread worktrees changed: ${changes}${moves ? ` · moving to ${update.workingDirectory}` : ''}`, 'done')
   await deliverNote(host, session, [
     `[Delta] This thread's worktrees changed (${changes}). They are now:`,
     ...mounted.worktrees.map((tree) => `- ${tree.name}: ${tree.directory}`),
-    moves ? `Delta will move this session to ${mounted.directory}, which links to each of them, once the current turn ends.`
+    moves ? `Delta will move this session to ${update.workingDirectory} and add the others as working directories once the current turn ends.`
+      : asks ? `This session's directory is ${binding.directory}. Delta asked the person to add the new worktrees as working directories with /add-dir.`
+      : update ? `This session's directory is ${binding.directory}. Delta will add the new worktrees as working directories once the current turn ends.`
       : `This session's directory is ${binding.directory}.`,
   ].join('\n'))
-  if (moves) {
-    runtime.moveTo = mounted.directory
-    scheduleMove(host, session)
+  if (!update) return
+  if (asks) {
+    await enterDirectories(host, session, update, mounted.worktrees, async () => {
+      if (activation.session !== session) throw new Error('The session ended while its worktrees changed')
+    }, 'added')
+    return
   }
+  // An update still waiting for the turn to end keeps the checkouts it would add that remain.
+  const pending = (runtime.moveTo?.additionalDirectories ?? []).filter((path) =>
+    !samePath(path, update.workingDirectory) &&
+    mounted.worktrees.some((tree) => samePath(tree.directory, path)))
+  runtime.moveTo = {
+    workingDirectory: update.workingDirectory,
+    additionalDirectories: [...new Set([...pending, ...update.additionalDirectories])],
+  }
+  scheduleMove(host, session)
 }
 
 export function scheduleMove(host: Host, session: string) {
@@ -535,27 +618,31 @@ export function scheduleMove(host: Host, session: string) {
   host.clock.after(0, () => moveSession(host, session))
 }
 
-/** Move Claude from a worktree's checkout to the thread folder, between turns. */
+/** Move Claude to the thread's first worktree and add the others, between turns. */
 async function moveSession(host: Host, session: string) {
   const runtime = stateFor(session)
-  const directory = runtime.moveTo
+  const target = runtime.moveTo
   try {
     // A turn that began since is the one whose end moves the session.
-    if (!directory || activation.session !== session || rowsHeld(session)) return
+    if (!target || activation.session !== session || rowsHeld(session)) return
     const binding = await serial(() => load(host, session))
     if (!binding.directory || !await isInDirectory(host, binding.directory)) { runtime.moveTo = undefined; return }
     const check = async () => { if (activation.session !== session) throw new Error('The session ended during the move') }
-    await enterDirectory(host, session, directory, check)
-    await serial(async () => save(host, { ...await load(host, session), directory }))
+    const moves = !samePath(target.workingDirectory, binding.directory)
+    await enterDirectories(host, session, target, binding.mounts ?? [], check, moves ? 'join' : 'added')
+    await serial(async () => save(host, { ...await load(host, session), directory: target.workingDirectory }))
     runtime.moveTo = undefined
     resumeCheckout(runtime, 'verification')
-    finishProgress(host, 'Moved to the thread folder', 'done')
-    await deliverNote(host, session, `[Delta] This session's directory is now ${directory}. It links to each worktree of the thread.`)
+    finishProgress(host, moves ? `Moved to ${target.workingDirectory}` : 'Added the new worktrees', 'done')
+    await deliverNote(host, session, [
+      ...moves ? [`[Delta] This session's directory is now ${target.workingDirectory}.`] : [],
+      ...target.additionalDirectories.length ? [`${moves ? '' : '[Delta] '}Delta added ${target.additionalDirectories.join(', ')} as working directories.`] : [],
+    ].join(' '))
     void drain(host, session).catch((error) => report(host, error))
   } catch (error) {
     runtime.moveTo = undefined
     if (activation.session !== session) return
-    const text = `Delta couldn't move Claude to the thread folder ${directory}: ${errorText(error)}. The session stays where it is; /cd there to work across every worktree.`
+    const text = `Delta couldn't move Claude to ${target?.workingDirectory} and add the thread's other worktrees: ${errorText(error)}. The session stays where it is; /cd there and /add-dir the others to work across every worktree.`
     setProgress(host, text, 'error')
     await host.ui.log(text, { to: 'transcript' })
   } finally {

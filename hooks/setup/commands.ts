@@ -1,7 +1,7 @@
 /**
  * The `/delta` command and its dedicated forms: parsing, the menu, and running each action.
  */
-import { activate, noticeSession, refreshReminder } from './activation'
+import { activate, noticeSession, refreshReminder, sessionBegun } from './activation'
 import { setProgress, showUpdateProgress } from '../band/band'
 import { type CommandForm, orgCommand } from '../cli/delta-cli'
 import { chooseDeltaAction, type MenuStart } from './delta-menu'
@@ -9,7 +9,7 @@ import { InstallationUpdates, type UpdateHost } from '../cli/install-update'
 import { claudeInteraction, offerToStopWaiting, setupEnv } from './interaction'
 import { startJoin } from '../sharing/join'
 import { isOneOf } from '../core/json'
-import { hasInteractiveSurface } from '../sharing/lifecycle'
+import { hasInteractiveSurface, sessionSurfaces } from '../sharing/lifecycle'
 import { currentOrganizationId, listOrganizations } from './organizations'
 import { pluginUpdateCommand } from '../plugin-update/updates'
 import { activation, recoveryCommand, requests, stateFor } from '../core/session-state'
@@ -24,7 +24,11 @@ import { errorText } from '../core/text'
 
 /** Run `/delta setup` for the active session and answer with what it did. */
 async function setupCommand(host: Host): Promise<string> {
-  if (!hasInteractiveSurface(await host.session.surfaces())) return HEADLESS_REFUSAL
+  if (!hasInteractiveSurface(await sessionSurfaces(host))) return HEADLESS_REFUSAL
+  // The wizard stops once its session is no longer the activated one, so it needs one that is, even
+  // after a hot reload or before the first prompt.
+  try { await activateForCommand(host, await host.session.id()) }
+  catch (error) { return `Delta couldn't start setup: ${errorText(error)}` }
   const outcome = await runSetupWizard(setupEnv(host), claudeInteraction(host))
   if (outcome.status === 'wrote') await refreshReminder(host, await host.session.id())
   return outcome.text
@@ -35,6 +39,15 @@ async function stopOrStartCommand(host: Host, action: 'stop' | 'start'): Promise
   const outcome = await (action === 'stop' ? stopSync : startSync)(setupEnv(host))
   if (outcome.status === 'wrote') await refreshReminder(host, await host.session.id())
   return outcome.text
+}
+
+/**
+ * Make `session` the activated one for a command that needs it. The start the command's notice began
+ * activates the session too, so the command waits for it and activates only what it left inactive.
+ */
+async function activateForCommand(host: Host, session: string) {
+  await sessionBegun(session)
+  if (session !== activation.session || !stateFor(session).binding) await activate(host, session)
 }
 
 /** Every `/delta` action, for a surface that can't show the menu and for an action it doesn't know. */
@@ -67,7 +80,7 @@ export async function registerCommands(host: Host) {
  * nothing to the transcript.
  */
 export async function deltaMenu(host: Host, start: MenuStart, usage: string, form: CommandForm): Promise<{ text?: string }> {
-  if (!hasInteractiveSurface(await host.session.surfaces())) return { text: usage }
+  if (!hasInteractiveSurface(await sessionSurfaces(host))) return { text: usage }
   let action: string | undefined
   try { action = await chooseDeltaAction(claudeInteraction(host), start) }
   catch (error) {
@@ -84,7 +97,7 @@ async function manageOrganization(host: Host): Promise<string> {
   try { organization = (await listOrganizations(host)).find((known) => known.current) }
   catch (error) { return `Delta couldn't read your current team (${errorText(error)}). Manage your teams here: ${DASHBOARD_URL}` }
   if (!organization) return `Delta has no team selected. Manage your teams here: ${DASHBOARD_URL}`
-  const interactive = hasInteractiveSurface(await host.session.surfaces())
+  const interactive = hasInteractiveSurface(await sessionSurfaces(host))
   return openMembersPage({ openLink: async (url) => interactive && setupEnv(host).openLink(url) }, organization)
 }
 
@@ -112,7 +125,7 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
   if (action === 'stop' || action === 'start') return { text: await stopOrStartCommand(host, action) }
   // A share, join, or setup started now would sign in again beside the wait, so it asks about that instead.
   if (/^(?:setup|share|join)\b/.test(action) && await offerToStopWaiting(host)) return {}
-  // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
+  // The setup wizard only writes the checkout's policy; it needs no session binding.
   if (action === 'setup') return { text: await setupCommand(host) }
   const locator = /^join\s+(\S+)$/.exec(action)?.[1]
   const organization = /^org\s+(?:(list|current)|(switch)\s+(\S+))$/.exec(action)
@@ -142,9 +155,9 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
   }
   const session = await host.session.id()
   try {
-    if (session !== activation.session || !stateFor(session).binding) await activate(host, session)
+    await activateForCommand(host, session)
     // Sharing and joining report through the band and ask through dialogs, which only these surfaces have.
-    if (!hasInteractiveSurface(await host.session.surfaces()))
+    if (!hasInteractiveSurface(await sessionSurfaces(host)))
       return { text: `${locator ? '/delta-join' : '/delta-share'} needs an interactive Claude Code terminal or Desktop Code tab. Print mode, SDK sessions, and cloud runners aren't supported.` }
     if (locator) {
       if (stateFor(session).currentTurnId || stateFor(session).promptEntering)

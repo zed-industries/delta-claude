@@ -1039,6 +1039,22 @@ describe('setup dialogs and notices', () => {
     fake.expectClean()
   })
 
+  test('/delta setup before the plugin has seen the session start still runs its questions', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = (question: any) => {
+      const text = question.questions[0].question
+      const offered = question.questions[0].options.map((option: { label: string }) => option.label)
+      const answer = offered.find((label: string) => label === 'Zed' || label.startsWith('Private sync'))
+      return { result: { answers: { [text]: answer } } }
+    }
+    // A hot reload installs the plugin without replaying session.start, and no prompt has activated it yet.
+    const { text } = await $.command.run({ ...typedDelta('setup') } as never)
+    expect(text).not.toContain('changed during setup')
+    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-1' } })
+    expect(text).toContain('Saved Private sync with Zed to .delta/settings.json')
+    fake.expectClean()
+  })
+
   test('/delta setup offers to create an organization when the account has none, and syncs to it', async ($, on) => {
     const fake = fakeThreads(on)
     fake.organizations = []

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import {
-  activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, promptGate, releasesMounts,
-  worktreeChanges,
+  activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, promptGate,
+  releasesMounts, sessionDirectories, worktreeChanges,
 } from './lifecycle'
 import { cliFixture } from '../testing/cli-fixtures'
 import type { MountedThread, ThreadMount, ThreadState } from '../cli/thread-commands'
@@ -44,27 +44,46 @@ test('pending share and join operations hold prompts until the operation ends', 
   expect(promptGate({})).toBeUndefined()
 })
 
-test('worktree changes name additions and removals, moving out of a checkout only once', () => {
-  const delta = { reference: 'delta', name: 'delta', directory: '/checkout/delta', state: 'mounted' } as ThreadMount
-  const zed = { reference: 'zed', name: 'zed', directory: '/checkout/zed', state: 'mounted' } as ThreadMount
-  const web = { reference: 'web', name: 'web', directory: '/checkout/web', state: 'mounted' } as ThreadMount
-  for (const [previous, directory, next, added, removed, moves] of [
-    [[delta], '/checkout/delta', [delta, zed], ['zed'], [], true],
-    [[delta, zed], '/folder', [delta, zed, web], ['web'], [], false],
-    [[delta, zed, web], '/folder', [delta, web], [], ['zed'], false],
-    [[delta, web], '/folder', [delta], [], ['web'], false],
+test('a joined session works in its first checkout and adds the rest, and in Desktop stays where it started', () => {
+  const mounted = (...names: string[]) => ({ ...cliFixture('mount'), directory: '/folder',
+    worktrees: names.map((name) => ({ reference: name, name, directory: `/checkout/${name}`, state: 'mounted' })) }) as MountedThread
+  expect(sessionDirectories(mounted('delta', 'zed', 'web')))
+    .toEqual(directories('/checkout/delta', '/checkout/zed', '/checkout/web'))
+  expect(sessionDirectories(mounted())).toEqual(directories('/folder'))
+  expect(sessionDirectories(mounted('delta', 'zed'), '/folder')).toEqual(directories('/folder'))
+  expect(sessionDirectories(mounted('delta', 'zed'), '/checkout/zed')).toEqual(directories('/checkout/zed', '/checkout/delta'))
+  // A Desktop session whose own worktree is gone falls back to the thread folder.
+  expect(sessionDirectories(mounted('zed'), '/checkout/delta')).toEqual(directories('/folder'))
+})
+
+test('worktree changes add new checkouts in place and move only when the first worktree changes', () => {
+  const tree = (name: string) => ({ reference: name, name, directory: `/checkout/${name}`, state: 'mounted' }) as ThreadMount
+  const [delta, zed, web] = [tree('delta'), tree('zed'), tree('web')]
+  for (const [previous, directory, next, desktopRoot, added, removed, update] of [
+    [[delta], '/checkout/delta', [delta, zed], undefined, ['zed'], [], directories('/checkout/delta', '/checkout/zed')],
+    [[delta, zed], '/checkout/delta', [delta, zed, web], undefined, ['web'], [], directories('/checkout/delta', '/checkout/web')],
+    [[delta, zed, web], '/checkout/delta', [delta, web], undefined, [], ['zed'], undefined],
+    // The session leaves a removed first worktree and adds every remaining other again.
+    [[delta, zed, web], '/checkout/delta', [zed, web], undefined, [], ['delta'], directories('/checkout/zed', '/checkout/web')],
+    [[delta], '/checkout/delta', [], undefined, [], ['delta'], directories('/folder')],
+    // A session that joined in the thread folder moves to its first checkout at the next change.
+    [[delta], '/folder', [delta, zed], undefined, ['zed'], [], directories('/checkout/delta', '/checkout/zed')],
+    // Desktop stays in the thread folder, and in a checkout only adds the new worktree.
+    [[delta], '/folder', [delta, zed], '/folder', ['zed'], [], undefined],
+    [[delta], '/checkout/delta', [delta, zed], '/checkout/delta', ['zed'], [], directories('/checkout/delta', '/checkout/zed')],
   ] as const) {
     const result = worktreeChanges(previous, directory,
-      { ...cliFixture('mount'), directory: '/folder', worktrees: [...next] } as MountedThread)
+      { ...cliFixture('mount'), directory: '/folder', worktrees: [...next] } as MountedThread, desktopRoot)
     expect(result.added.map((tree) => tree.name)).toEqual([...added])
     expect(result.removed.map((tree) => tree.name)).toEqual([...removed])
-    expect(result.moves).toBe(moves)
+    expect(result.update).toEqual(update)
   }
-  const mount = { ...delta, directory: String.raw`C:\checkout\delta` }
-  expect(worktreeChanges([mount], 'C:/checkout/delta',
-    { ...cliFixture('mount'), directory: mount.directory, worktrees: [mount] } as MountedThread))
-    .toEqual({ added: [], removed: [], moves: false })
+  const mount = { ...delta, directory: String.raw`\\?\C:\checkout\delta` }
   expect(worktreeChanges([mount], 'C:/checkout/delta',
     { ...cliFixture('mount'), directory: 'C:/folder', worktrees: [mount] } as MountedThread))
-    .toEqual({ added: [], removed: [], moves: true })
+    .toEqual({ added: [], removed: [] })
 })
+
+function directories(workingDirectory: string, ...additionalDirectories: string[]) {
+  return { workingDirectory, additionalDirectories }
+}
