@@ -22,13 +22,12 @@ function seedEnded(store: Map<string, unknown>, id: string, overrides: Record<st
   store.set(`appended:${id}`, { thread: 't', items: {} })
 }
 
-type ReminderKind = 'manual' | 'not set up' | 'none'
+type ReminderKind = 'manual' | 'none'
 
 /** The reminder the band shows a session Delta does not sync, by what it tells the person. */
 async function reminderKind($: Engine): Promise<ReminderKind> {
   const band = await drawBandText($)
-  if (band.includes('Not syncing') && band.includes('/delta-share')) return 'manual'
-  return band.includes('Not set up') && band.includes('/delta-setup') ? 'not set up' : 'none'
+  return band.includes('Not syncing') && band.includes('/delta-share') ? 'manual' : 'none'
 }
 
 /** Claude's reply `text`, as the conversation Claude reads holds it. */
@@ -345,7 +344,8 @@ describe('automatic activation', () => {
   })
 
   const reminderCases: { name: string; source?: string; expected: ReminderKind; arrange?: (fake: ReturnType<typeof fakeThreads>) => void }[] = [
-    { name: 'an unconfigured checkout is told how to set up', expected: 'not set up' },
+    // The startup offer asks about setup; the band doesn't nudge toward it all session.
+    { name: 'an unconfigured checkout gets none', expected: 'none' },
     { name: 'a Manual checkout is told how to share, not to set up', expected: 'manual',
       arrange: (fake) => { fake.files.set(POLICY, policy('manual')) } },
     { name: 'a headless session gets none', expected: 'none', arrange: (fake) => { fake.surfaces = [] } },
@@ -400,9 +400,9 @@ describe('automatic activation', () => {
 
   test('the band switches from its reminder to Syncing as soon as the session is shared, and stays so on resume', async ($, on) => {
     const fake = fakeThreads(on)
-    fake.answerQuestion = async () => ({ result: { answers: {} } })
+    fake.files.set(POLICY, policy('manual'))
     await startAuto($, fake)
-    expect(await reminderKind($)).toBe('not set up')
+    expect(await reminderKind($)).toBe('manual')
     // The share's own question is answered as the fake answers it by default: with the organization.
     fake.answerQuestion = undefined
     // While the share runs, its progress takes the reminder's place.

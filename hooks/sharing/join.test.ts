@@ -246,7 +246,7 @@ describe('joining', () => {
     await fake.settle()
     await fake.advance(0)
     await fake.settle()
-    expect(await bandText($)).not.toMatch(/Not set up|Not syncing/)
+    expect(await bandText($)).not.toMatch(/Not syncing/)
     release()
     await starting
     await $.session.end(sessionEnd(fake.session))

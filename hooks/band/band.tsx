@@ -155,11 +155,10 @@ function statusShown(): boolean {
   return !!watchedSession() || !!currentProgress() || !!watchStatus().error || !!activeReminder()
 }
 
-/** How the band reminds a session Delta does not sync, by the checkout's setting. */
-export type SyncReminder = 'manual' | 'not set up'
+/** How the band reminds a session Delta does not sync in a checkout set up to sync only when shared. */
+export type SyncReminder = 'manual'
 const REMINDERS: Record<SyncReminder, { text: string; command: string }> = {
   manual: { text: 'Not syncing', command: '/delta-share' },
-  'not set up': { text: 'Not set up', command: '/delta-setup' },
 }
 
 /**
@@ -170,7 +169,7 @@ const REMINDERS: Record<SyncReminder, { text: string; command: string }> = {
 function activeReminder(): { text: string; command: string } | undefined {
   const runtime = sessions.get(activation.session)
   if (!runtime?.reminder || currentProgress() || watchStatus().error || runtime.binding?.joinTransition) return
-  if (runtime.reminder === 'manual' && runtime.syncReminderDismissed) return
+  if (runtime.syncReminderDismissed) return
   return REMINDERS[runtime.reminder]
 }
 

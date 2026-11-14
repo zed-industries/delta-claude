@@ -611,14 +611,14 @@ function onboardingStore(host: Host): OnboardingStore {
 }
 
 /**
- * The band's reminder for a session while Delta does not sync it: a checkout with any setting points
- * to /delta-share, and one never set up to /delta-setup. A syncing session's band says `Syncing`
- * instead, so an automatic checkout's sessions show this only when they are not syncing, as a session
- * started before the setting was saved, or one Delta could not start.
+ * The band's reminder for a session while Delta does not sync it: a checkout with a setting points to
+ * /delta-share. A syncing session's band says `Syncing` instead, so an automatic checkout's sessions
+ * show this only when they are not syncing, as a session started before the setting was saved, or one
+ * Delta could not start. A checkout never set up shows nothing: setup is offered once per repository
+ * when a session starts, not nudged on the band all session.
  */
-function syncReminder(policy: ProjectPolicy): SyncReminder {
-  // Someone who chose a setting is not nudged toward setup every session.
-  return policy.configured ? 'manual' : 'not set up'
+function syncReminder(policy: ProjectPolicy): SyncReminder | undefined {
+  return policy.configured ? 'manual' : undefined
 }
 
 /** Auto-activations already running in this process, so a repeated startup hook cannot create twice. */
