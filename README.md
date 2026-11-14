@@ -113,12 +113,12 @@ you name by email address. `/delta-share ada@example.com` invites them directly.
 `/delta-unshare` makes the current thread private without stopping sync. People
 invited explicitly retain access.
 
-`/delta off` turns Delta off for the current session. It first sends what it
+`/delta pause` pauses Delta for the current session. It first sends what it
 recorded, then stops recording the conversation and syncing its checkout, and it
-stays off if you resume the session. `/delta-share` turns it back on in the same
-thread and adds what was said meanwhile, unless Claude compacted the conversation
-in between. A session that joined a thread with `/delta-join` can't be turned off,
-since it works in the thread's folder.
+stays paused if you resume the session. Who can see the thread doesn't change.
+`/delta-share` syncs it again in the same thread and adds what was said meanwhile,
+unless Claude compacted the conversation in between. A session that joined a thread
+with `/delta-join` can't be paused, since it works in the thread's folder.
 
 ### Commands
 

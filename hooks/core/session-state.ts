@@ -56,7 +56,7 @@ export type Binding = {
   mounts?: ThreadMount[]
   url?: string
   /**
-   * Turned off with `/delta off`, at this point in the conversation: nothing it says is recorded and
+   * Paused with `/delta pause`, at this point in the conversation: nothing it says is recorded and
    * `snapshot` is cleared, but its thread, producer and sequence stay, so `/delta share` resumes the same
    * thread and adds what was said since.
    */
@@ -112,7 +112,7 @@ export type Binding = {
 }
 
 /**
- * Where a conversation stood when Delta was turned off: a digest of Claude's last reply, absent before
+ * Where a conversation stood when Delta was paused: a digest of Claude's last reply, absent before
  * its first, and the sequence the thread had reached.
  */
 export type StopPoint = { reply?: string; sequence: number }
@@ -296,11 +296,11 @@ export function recoveryAdvice(binding?: Binding): string {
 }
 
 /**
- * How to keep working without Delta when it can't recover a session on its own: `/delta off`, offered
- * after an error text. A joined session works in a folder Delta mounted for it and can't turn it off.
+ * How to keep working without Delta when it can't recover a session on its own: `/delta pause`, offered
+ * after an error text. A joined session works in a folder Delta mounted for it and can't be paused.
  */
-export function offHint(binding?: Binding): string {
-  return binding?.joined || binding?.joinTransition ? '' : ' Run /delta off to turn Delta off for this session.'
+export function pauseSessionHint(binding?: Binding): string {
+  return binding?.joined || binding?.joinTransition ? '' : ' Run /delta pause to keep working without Delta in this session.'
 }
 
 /** The transcript path Claude last reported for each session in this process. */

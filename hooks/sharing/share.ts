@@ -93,28 +93,28 @@ export function sessionSyncs(binding: Binding | undefined): boolean {
   return !!binding?.url || !!binding?.autoUpload
 }
 
-/** How long `/delta off` waits for recorded rows to reach Delta before it stops the session anyway. */
-const OFF_DRAIN_MS = 5_000
+/** How long `/delta pause` waits for recorded rows to reach Delta before it pauses the session anyway. */
+const PAUSE_DRAIN_MS = 5_000
 
 /**
- * What turning Delta off did: `none` when the session wasn't syncing, `already off`, `off` with how many recorded
+ * What pausing a session did: `none` when it wasn't syncing, `already paused`, `paused` with how many recorded
  * rows hadn't reached Delta yet and wait for it to sync again, or `refused` with why it keeps syncing.
  */
-export type SessionOff =
-  | { kind: 'none' } | { kind: 'already off' } | { kind: 'off'; queued: number } | { kind: 'refused'; reason: string }
+export type SessionPause =
+  | { kind: 'none' } | { kind: 'already paused' } | { kind: 'paused'; queued: number } | { kind: 'refused'; reason: string }
 
 /**
- * Turn Delta off for a session, for `/delta off`: send what it recorded, then mark its binding `stopped`
+ * Pause Delta for a session, for `/delta pause`: send what it recorded, then mark its binding `stopped`
  * and clear `snapshot`, which every recording path and the band's `Syncing` read. The binding keeps its
  * thread, producer and sequence, and where the conversation stood, so `/delta share` resumes the same
  * thread and adds what was said meanwhile. Its watch, checkout mount and subagents' mounts stop; the
  * checkout's files stay as they are. A joined session, a turn underway, a share or join in flight, or a
  * running subagent is refused, since stopping under any of them would cut a live transition.
  */
-export async function turnOff(host: Host, session: string): Promise<SessionOff> {
+export async function pauseSession(host: Host, session: string): Promise<SessionPause> {
   const runtime = stateFor(session)
   const binding = runtime.binding
-  if (binding?.stopped) return { kind: 'already off' }
+  if (binding?.stopped) return { kind: 'already paused' }
   if (!binding?.snapshot) return { kind: 'none' }
   if (binding.joined || binding.joinTransition)
     return { kind: 'refused', reason: "it joined a shared thread and works in that thread's folder, which it leaves when the session ends" }
@@ -122,20 +122,20 @@ export async function turnOff(host: Host, session: string): Promise<SessionOff> 
     return { kind: 'refused', reason: 'a share or join is still running; try again when it finishes' }
   if (runtime.currentTurnId)
     return { kind: 'refused', reason: 'a turn is running; try again when it finishes' }
-  // A recorded subagent may be working in a mount turning off releases.
+  // A recorded subagent may be working in a mount pausing releases.
   if (binding.children?.length && activeBackgroundAgents(await host.agent.list()))
     return { kind: 'refused', reason: 'a subagent is still running; try again when it finishes' }
   // Send what was recorded first, but never wait long: Delta may be unreachable, which is often why it
-  // is being turned off. What is left stays queued with its sequence and is sent when the session syncs again.
+  // is being paused. What is left stays queued with its sequence and is sent when the session syncs again.
   const cancelled = new AbortController()
   try {
     if (runtime.unsaved.length) await flushUnsaved(host, session)
     if (binding.thread)
-      await Promise.race([drain(host, session), host.clock.sleep(OFF_DRAIN_MS, { signal: cancelled.signal })])
+      await Promise.race([drain(host, session), host.clock.sleep(PAUSE_DRAIN_MS, { signal: cancelled.signal })])
   } catch { /* whatever didn't reach Delta stays queued and is counted below */ }
   finally { cancelled.abort() }
   const reply = await lastReply(host)
-  // Saved before anything stops, so a checkout restore still running sees the session is off rather
+  // Saved before anything stops, so a checkout restore still running sees the session is paused rather
   // than reporting the mount stopped under it. An automatic session whose thread isn't created yet keeps
   // its staged setup the same way, and finishes it when it syncs again.
   const stopped = await serial(async () => {
@@ -161,7 +161,7 @@ export async function turnOff(host: Host, session: string): Promise<SessionOff> 
   await releaseThreadMounts(host, session, stopped.children ?? [])
   // A share or join running for another session keeps its progress in the band.
   if (!requests.join && !requests.share) clearProgress(host)
-  return { kind: 'off', queued: stopped.pending.length + runtime.unsaved.length }
+  return { kind: 'paused', queued: stopped.pending.length + runtime.unsaved.length }
 }
 
 /** A digest of Claude's last reply in the conversation, or undefined before its first. */
@@ -174,7 +174,7 @@ async function lastReply(host: Host): Promise<string | undefined> {
  * The messages after Claude's reply that `point` names, or undefined when the conversation no longer
  * holds it, as after a compaction rewrote it. A reply is the anchor, not a position: the conversation
  * Claude reads keeps only its newest messages, and merges a prompt into the user message before it,
- * but leaves a reply as it was. What followed the reply before Delta was turned off, such as a
+ * but leaves a reply as it was. What followed the reply before Delta was paused, such as a
  * cancelled turn's note, comes again with the prompt merged into it.
  */
 async function messagesSince(host: Host, point: StopPoint): Promise<ApiMessage[] | undefined> {
@@ -235,7 +235,7 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   const joined = await joinedBindingAt(host, root)
   if (joined) throw new ShareRefusalError(joinedCheckoutRefusal(root, joined))
   await assertShareSession(host, request)
-  // A session turned off with /delta off already holds its thread and everything it recorded before:
+  // A session paused with /delta pause already holds its thread and everything it recorded before:
   // sharing resumes it there, once its checkout mounts, rather than exporting the conversation again.
   const stoppedAt = binding.stopped
   if (!binding.snapshot && !stoppedAt) {
@@ -327,8 +327,8 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   })
   try { await mountCheckout(host, { session, checkout: root, checkoutReference: reference }, check) }
   catch (error) { throw managedCheckoutRefusal(error, root) }
-  // Only a share that got this far turns Delta back on. One that fails before leaves it off, and so
-  // stops the mount it just started rather than syncing a session that is off.
+  // Only a share that got this far syncs a paused session again. One that fails before leaves it paused,
+  // and so stops the mount it just started rather than syncing a paused session.
   if (stoppedAt) {
     try { await resumeAfterOff(host, request, root, stoppedAt) }
     catch (error) {
@@ -420,7 +420,7 @@ function forgetStagedTools(session: string) {
 }
 
 /**
- * Bring a session turned off with /delta off back into its thread: add what was said since, as a first
+ * Bring a session paused with /delta pause back into its thread: add what was said since, as a first
  * share exports the conversation, and record again from here, subagents included. A conversation
  * compacted since then no longer holds those messages as they were said, so they are left out, and the
  * transcript says so at once, whatever the rest of the share does.
@@ -431,9 +431,9 @@ async function resumeAfterOff(host: Host, request: ShareRequest, root: string, s
   const since = await messagesSince(host, stoppedAt)
   await assertShareSession(host, request)
   try {
-    // Named by the sequence the thread had reached, so a later time off never reuses an ID.
+    // Named by the sequence the thread had reached, so a later pause never reuses an ID.
     await stageMessages(host, request, root, snapshotMessages(since ?? []),
-      (index) => `off:${stoppedAt.sequence}:${index}`, (state) => {
+      (index) => `paused:${stoppedAt.sequence}:${index}`, (state) => {
         const resumed: Binding = { ...state, snapshot: true }
         delete resumed.stopped
         return resumed
@@ -443,10 +443,10 @@ async function resumeAfterOff(host: Host, request: ShareRequest, root: string, s
   }
   const resumed = await serial(() => load(host, session))
   stateFor(session).binding = resumed
-  // Turning off forgot this session's subagents; they record again as an activation would restore them.
+  // Pausing forgot this session's subagents; they record again as an activation would restore them.
   void restoreChildren(host, session, resumed).catch((error) => report(host, error))
   if (!since) {
-    await host.ui.log("Claude compacted this conversation while Delta was off, so what was said then isn't in the Delta thread.",
+    await host.ui.log("Claude compacted this conversation while Delta was paused, so what was said then isn't in the Delta thread.",
       { to: 'transcript' })
   }
 }
