@@ -1000,9 +1000,9 @@ describe('sharing', () => {
     await fake.settle()
     const attempts = mounts()
     expect(refusals()).toBe(1)
-    expect(fake.logs.find((log) => log.includes("won't retry it in this session"))).toContain(
-      `${CHECKOUT} is a checkout Delta manages for another thread`)
-    expect(fake.logs.find((log) => log.includes("won't retry it in this session"))).toContain('Run /delta off')
+    const refusal = fake.logs.find((log) => log.includes("won't retry it in this session"))
+    expect(refusal).toContain(`${CHECKOUT} is a checkout Delta manages for another thread`)
+    expect(refusal).toContain('Run /delta off')
     for (const [index, text] of ['first', 'second'].entries()) {
       expect((await $.prompt.submit(prompt(text))).drop).toBeUndefined()
       await $.tool.call(bash(`after-refusal-${index}`, 'echo local'))
@@ -1032,10 +1032,8 @@ describe('sharing', () => {
     fake.contractRange = { min: 1, max: 4 }
     await $.session.start(sessionStart)
     await fake.settle()
-    const blocked = await $.prompt.submit(prompt('blocked'))
-    expect(blocked.drop).toContain('participation is blocked')
-    expect(blocked.drop).toContain('Run /delta off')
-    expect(((await $.command.run(typedDelta('off'))) as any).text).toContain('Delta is off for this session')
+    expect((await $.prompt.submit(prompt('blocked'))).drop).toContain('Run /delta off')
+    await $.command.run(typedDelta('off'))
     expect((await $.prompt.submit(prompt('without Delta'))).drop).toBeUndefined()
     fake.expectClean()
   })

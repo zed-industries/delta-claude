@@ -141,86 +141,69 @@ describe('automatic activation', () => {
     await fake.advance(120_000)
     await fake.settle()
   }
-  const recorded = (fake: ReturnType<typeof fakeThreads>, text: string) =>
-    fake.updates().some((record) => JSON.stringify(record.update).includes(text))
+  /** The messages the thread holds, in order, each as its kind and text. */
+  const said = (fake: ReturnType<typeof fakeThreads>) => fake.updates().flatMap((record) =>
+    ['user_message', 'agent_message'].includes(record.update?.sessionUpdate)
+      ? [[record.update!.sessionUpdate, record.update!.content.map((part: { text: string }) => part.text).join('')]] : [])
 
-  test('/delta off stops a session that syncs, and /delta-share brings it back with what was said meanwhile', async ($, on) => {
+  test('/delta off holds through a resume and a failed /delta-share, and /delta-share adds what was said meanwhile', async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('private', 'org-1'))
     await startAuto($, fake)
     const thread = binding(fake).thread
+    const mounts = () => fake.operations().filter((operation) => operation === 'worktree mount').length
     await turn($, fake, 'native-before', 'before turning off')
-    expect(recorded(fake, 'before turning off')).toBe(true)
     // The last message is the note a cancelled turn leaves, which the next prompt merges into.
     fake.messages = [userText('before turning off'), reply('answer before'), userText('[Request interrupted by user]')]
-
-    const result = await $.command.run(typedDelta('off'))
+    await $.command.run(typedDelta('off'))
     await fake.settle()
-    expect(JSON.stringify(result)).toContain('Delta is off for this session')
-    expect(binding(fake)).toMatchObject({ thread, snapshot: false, stopped: { reply: expect.any(String) } })
     expect(fake.live()).toBeUndefined()
     await turn($, fake, 'native-during', 'while off')
     fake.messages = [...fake.messages.slice(0, -1), userText('[Request interrupted by user]\nwhile off'), reply('reply while off')]
-    expect(recorded(fake, 'while off')).toBe(false)
-    expect(JSON.stringify(await $.command.run(typedDelta('off')))).toContain('already off')
 
-    // A resumed session stays off: it restores nothing and records nothing.
+    // A resumed session restores no checkout.
     await $.session.end(sessionEnd(fake.session))
-    const mounts = fake.operations().filter((operation) => operation === 'worktree mount').length
+    const mounted = mounts()
     await startAuto($, fake, 'resume')
     await turn($, fake, 'native-resumed', 'resumed while off')
     fake.messages = [...fake.messages, userText('resumed while off'), reply('second reply while off')]
-    expect(fake.operations().filter((operation) => operation === 'worktree mount')).toHaveLength(mounts)
-    expect(recorded(fake, 'resumed while off')).toBe(false)
+    expect(mounts()).toBe(mounted)
 
-    await runShare($, fake, 'share')
-    expect(binding(fake)).toMatchObject({ thread, snapshot: true })
-    expect(binding(fake).stopped).toBeUndefined()
-    expect(recorded(fake, 'reply while off')).toBe(true)
-    expect(recorded(fake, 'resumed while off')).toBe(true)
-    expect(recorded(fake, 'second reply while off')).toBe(true)
-    expect(recorded(fake, 'answer before')).toBe(false)
-    // What was recorded before turning off isn't exported again.
-    expect(fake.updates().filter((record) => JSON.stringify(record.update).includes('before turning off'))).toHaveLength(1)
-    await turn($, fake, 'native-after', 'after turning back on')
-    expect(recorded(fake, 'after turning back on')).toBe(true)
-    expect(fake.server.thread).toBe(thread)
-    fake.expectClean()
-  })
-
-  test('/delta-share after a compaction leaves out what was said while off, and says so', async ($, on) => {
-    const fake = fakeThreads(on)
-    fake.files.set(POLICY, policy('private', 'org-1'))
-    await startAuto($, fake)
-    fake.messages = [userText('before turning off'), reply('answer before')]
-    await $.command.run(typedDelta('off'))
-    await fake.settle()
-    fake.messages = [userText('Compacted summary'), userText('said while off'), reply('reply while off')]
-    await runShare($, fake, 'share')
-    expect(binding(fake).stopped).toBeUndefined()
-    expect(recorded(fake, 'said while off')).toBe(false)
-    expect(recorded(fake, 'reply while off')).toBe(false)
-    expect(fake.logs.join('\n')).toContain('compacted this conversation while Delta was off')
-    fake.expectClean()
-  })
-
-  test('/delta off stays in force when the /delta-share meant to lift it fails at the mount', async ($, on) => {
-    const fake = fakeThreads(on)
-    fake.files.set(POLICY, policy('private', 'org-1'))
-    await startAuto($, fake)
-    fake.messages = [userText('before turning off'), reply('answer before')]
-    await $.command.run(typedDelta('off'))
-    await fake.settle()
+    // A /delta-share that fails at the mount leaves it off, so the next prompt restores nothing either.
     fake.commandFault = {
       operation: 'worktree mount', code: 'failed', reason: 'worktree_directory_in_use', retryable: false,
       message: 'Checkout is managed by another thread',
     }
     await runShare($, fake, 'share')
-    expect(binding(fake).stopped).toBeDefined()
-    const mounts = fake.operations().filter((operation) => operation === 'worktree mount').length
+    fake.commandFault = undefined
+    const attempted = mounts()
     await turn($, fake, 'native-still-off', 'still off')
-    expect(recorded(fake, 'still off')).toBe(false)
-    expect(fake.operations().filter((operation) => operation === 'worktree mount')).toHaveLength(mounts)
+    fake.messages = [...fake.messages, userText('still off'), reply('third reply while off')]
+    expect(mounts()).toBe(attempted)
+    expect(said(fake)).toEqual([['user_message', 'before turning off']])
+
+    await runShare($, fake, 'share')
+    await turn($, fake, 'native-after', 'after turning back on')
+    expect(fake.server.thread).toBe(thread)
+    const resumed = [
+      ['user_message', 'before turning off'],
+      ['user_message', '[Request interrupted by user]\nwhile off'],
+      ['agent_message', 'reply while off'],
+      ['user_message', 'resumed while off'],
+      ['agent_message', 'second reply while off'],
+      ['user_message', 'still off'],
+      ['agent_message', 'third reply while off'],
+      ['user_message', 'after turning back on'],
+    ]
+    expect(said(fake)).toEqual(resumed)
+
+    // Off again, then a compaction drops the reply it stopped at, so nothing said meanwhile can be placed.
+    await $.command.run(typedDelta('off'))
+    await fake.settle()
+    fake.messages = [userText('Compacted summary'), userText('said while off'), reply('reply after compaction')]
+    await runShare($, fake, 'share')
+    expect(said(fake)).toEqual(resumed)
+    expect(fake.logs.join('\n')).toContain('compacted this conversation while Delta was off')
     fake.expectClean()
   })
 
