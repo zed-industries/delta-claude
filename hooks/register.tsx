@@ -110,9 +110,6 @@ function hostOf($: EngineInterface): Host {
     prompt: {
       submit: (input) => $.prompt.submit(input),
     },
-    settings: {
-      policy: () => $.settings.read({ source: 'policy' }),
-    },
     session: {
       agentApiMessages: (agentId) => $.session.messages({ agentId, as: 'api' }),
       agentMessages: (args) => $.session.messages(args),

@@ -180,26 +180,6 @@ describe('subagents', () => {
     fake.expectClean()
   })
 
-  test('a subagent in a worktree of its own records that checkout until its run ends', async ($, on) => {
-    const fake = await sharedSession($, on)
-    await mainTurn($, 'main')
-    const agentId = await spawn($)
-    // A git worktree Claude did not make for this subagent's isolation, which Delta leaves as it is.
-    const worktree = `${CHECKOUT}/.claude/worktrees/own-${agentId}`
-    fake.cwd = worktree
-    await childRun($, agentId, 'isolated-turn', 'Edited in the worktree')
-    fake.cwd = CHECKOUT
-    // Claude may remove the checkout once the run ends; its thread keeps the worktree attachment.
-    const child = fake.server.subagents.get(agentId)!
-    expect(child.sharedWorktrees).toBe(false)
-    expect(child.checkout?.directory).toBe(worktree)
-    expect(fake.activeCheckouts.has(worktree)).toBe(false)
-    await fake.settle()
-    // The session's own checkout stays attached to the session's thread.
-    expect(fake.server.mount?.directory).toBe(CHECKOUT)
-    fake.expectClean()
-  })
-
   test("a subagent's run ends only once Delta stops syncing the worktree Claude may then remove", async ($, on) => {
     const fake = await sharedSession($, on)
     await mainTurn($, 'main')
@@ -423,12 +403,9 @@ describe('subagents', () => {
 })
 
 describe('isolated subagents', () => {
-  // An isolated subagent is forked from its first turn's directory, so isolation its own definition asks for
-  // takes the same path as isolation its Agent call asks for.
-  test('an isolated subagent works in a fork under the path Claude gave it, until the session ends', async ($, on) => {
+  test("an isolated subagent records Claude's worktree as its own checkout while each run goes on", async ($, on) => {
     const fake = await sharedSession($, on)
     await mainTurn($, 'main')
-    // Claude makes the subagent's git worktree itself and starts it there; its call reaches Claude as it was made.
     let agentId = ''
     fake.spawnForAgentCall = async () => {
       agentId = await spawn($, { description: 'Fix the lexer' })
@@ -443,37 +420,73 @@ describe('isolated subagents', () => {
     expect(fake.agentCalls.at(-1)?.isolation).toBe('worktree')
     await fake.settle()
     const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
-    // Its thread is a fork of the parent's worktrees, and Claude's worktree waits beside a link to it.
     const child = fake.server.subagents.get(agentId)!
-    expect(child).toMatchObject({ isolatedWorktrees: true, sharedWorktrees: false, name: 'Fix the lexer' })
-    const fork = `${CHECKOUT}/.delta/worktrees/${child.mountedFor}/repo`
-    expect(fake.linkCommands).toEqual([`mv -- ${worktree} ${worktree}.claude-worktree`, `ln -s -- ${fork} ${worktree}`])
-    expect(child.checkout).toBeUndefined()
-    expect(fake.childRecords(agentId).map((record) => record.update?.state ?? record.update?.content?.[0]?.text))
-      .toEqual(['running', 'Inspect the parser', 'Fixed the lexer', 'idle'])
+    expect(child).toMatchObject({ sharedWorktrees: false, name: 'Fix the lexer' })
+    expect(child.checkout?.directory).toBe(worktree)
+    // Claude's worktree stays where Claude made it, and Delta stops syncing it once the run ends.
+    expect(fake.linkCommands).toEqual([])
+    expect(fake.activeCheckouts.has(worktree)).toBe(false)
+    const reference = child.checkout?.reference
 
-    // Claude resumes it only in the worktree it made, which takes the link's place before the message
-    // goes; the resumed turn starts at the same path, linked to its fork again.
+    // A resumed run syncs the same worktree again, under the identity its first run created, and its
+    // tools wait for the mount, which brings in what Delta changed since.
     fake.server.threads.set(child.reference, { thread: child.thread, name: child.name, worktrees: [], items: [] })
     expect(await $.session.send({ to: agentId, text: 'Again' } as never)).toEqual({ isDelivered: true })
-    expect(fake.linkCommands.slice(2)).toEqual([`rm -- ${worktree}`, `mv -- ${worktree}.claude-worktree ${worktree}`])
     fake.cwd = worktree
-    await childRun($, agentId, 'resumed-turn', 'Fixed it again')
+    const mounts = () => fake.commands.filter((argv) => argv.includes('mount') && argv.includes(worktree)).length
+    const earlier = mounts()
+    let release!: () => void
+    fake.holdCheckoutMount = new Promise<void>((resolve) => { release = resolve })
+    await $.session.append(childPrompt(agentId))
+    await $.turn.start({ ...turnStart('resumed-turn', 'Inspect the parser'), agentId } as never)
+    let ran = false
+    const call = Promise.resolve($.tool.call({ ...bash('look', 'git log'), agentId } as never)).then(() => { ran = true })
+    await fake.settleUntil(() => mounts() > earlier)
+    await fake.settle()
+    expect(ran).toBe(false)
+    fake.holdCheckoutMount = undefined
+    release()
+    await call
+    await $.session.append({ agentId, door: 'response', uuid: 'resumed-turn-answer', message: {
+      type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Fixed it again' }] } } as never)
+    await $.turn.complete({ ...turnComplete('resumed-turn'), agentId } as never)
     fake.cwd = CHECKOUT
     await fake.settle()
-    expect(fake.linkCommands.slice(4)).toEqual([`mv -- ${worktree} ${worktree}.claude-worktree`, `ln -s -- ${fork} ${worktree}`])
+    expect(fake.server.subagents.get(agentId)?.checkout).toEqual({ directory: worktree, reference })
+    expect(fake.commands.filter((argv) => argv.at(-1) === worktree && argv.includes('create'))).toHaveLength(1)
     await $.turn.complete(turnComplete('main'))
-    await fake.settle()
-    expect(notes(fake).at(-1)).toContain(`thread merge ${child.reference} --into ${fake.threadId}`)
-
-    // The session's end puts Claude's worktree back before the fork's mount goes.
     await $.session.end(sessionEnd(fake.session))
-    expect(fake.links.has(worktree)).toBe(false)
-    expect(fake.linkCommands.slice(6)).toEqual([`rm -- ${worktree}`, `mv -- ${worktree}.claude-worktree ${worktree}`])
+    await fake.settle()
+    expect(fake.linkCommands).toEqual([])
+    expect(fake.commands.some((argv) => argv[0] === 'git' && argv[1] === 'worktree')).toBe(false)
     expect(fake.worktreeDirectories.has(worktree)).toBe(true)
-    expect(child.mountedFor).toBeUndefined()
-    // Claude's worktree goes with the branch git lists for it, whatever Claude named it.
-    expect(fake.commands).toContainEqual(['git', 'branch', '-d', '--', `claude/agent-${agentId}`])
+    fake.expectClean()
+  })
+
+  test("a subagent's run that ends before its checkout mounts waits for the mount, so Delta adopts what it did", async ($, on) => {
+    const fake = await sharedSession($, on)
+    await mainTurn($, 'main')
+    const agentId = await spawn($)
+    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
+    fake.worktreeDirectories.add(worktree)
+    fake.cwd = worktree
+    let release!: () => void
+    fake.holdCheckoutMount = new Promise<void>((resolve) => { release = resolve })
+    await $.session.append(childPrompt(agentId))
+    await $.turn.start({ ...turnStart('quick-turn', 'Inspect the parser'), agentId } as never)
+    await fake.settleUntil(() => fake.commands.some((argv) => argv.includes('mount') && argv.includes(worktree)))
+    let ended = false
+    const end = Promise.resolve($.turn.complete({ ...turnComplete('quick-turn'), agentId } as never)).then(() => { ended = true })
+    // Past the run end's delivery budget, but within the mount's.
+    await fake.advance(5_000)
+    expect(ended).toBe(false)
+    fake.holdCheckoutMount = undefined
+    release()
+    await end
+    // The mount became ready, so Delta adopted the worktree, before the run's end stopped it.
+    expect(fake.mountStreams.some((watch) => watch.argv.includes(worktree))).toBe(true)
+    expect(fake.activeCheckouts.has(worktree)).toBe(false)
+    fake.cwd = CHECKOUT
     fake.expectClean()
   })
 
@@ -494,59 +507,6 @@ describe('isolated subagents', () => {
     expect(fake.links.get(`${folder}/agent-live`)).toBe(`${CHECKOUT}/.delta/worktrees/other/repo`)
   })
 
-  const kept: { name: string; type: string; arrange: (fake: ReturnType<typeof fakeThreads>) => void }[] = [
-    { name: "of the organization's own plugin", type: 'acme-tools:reviewer',
-      arrange: (fake) => { fake.policy = { enabledPlugins: { 'acme-tools@acme': true } } } },
-    { name: 'the managed settings directory defines, which takes the place of the built-in', type: 'general-purpose',
-      arrange: (fake) => { fake.files.set('/etc/claude-code/.claude/agents/review/general.md', '---\nname: general-purpose\n---\nOrg prompt') } },
-  ]
-  for (const { name, type, arrange } of kept) test(`an isolated subagent of a type ${name} records Claude's worktree as its own`, async ($, on) => {
-    const fake = await sharedSession($, on)
-    arrange(fake)
-    await mainTurn($, 'main')
-    const agentId = await spawn($, { subagentType: type })
-    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
-    fake.worktreeDirectories.add(worktree)
-    fake.cwd = worktree
-    await childRun($, agentId, 'isolated-turn', 'Reviewed')
-    fake.cwd = CHECKOUT
-    await fake.settle()
-    const child = fake.server.subagents.get(agentId)!
-    expect(child.isolatedWorktrees).toBeFalsy()
-    expect(child.checkout?.directory).toBe(worktree)
-    expect(fake.linkCommands).toEqual([])
-    fake.expectClean()
-  })
-
-  const failures: { name: string; arrange: (fake: ReturnType<typeof fakeThreads>) => void }[] = [
-    { name: 'cannot be linked to its fork', arrange: (fake) => { fake.failLink = true } },
-    { name: 'cannot get a fork from Delta', arrange: (fake) => {
-      let failed = false
-      fake.holdRun = (operation) => {
-        if (operation !== 'create' || failed) return undefined
-        failed = true
-        return Promise.reject(new Error('Delta is unavailable'))
-      }
-    } },
-  ]
-  for (const { name, arrange } of failures) test(`an isolated subagent whose worktree ${name} records Claude's worktree as its own`, async ($, on) => {
-    const fake = await sharedSession($, on)
-    await mainTurn($, 'main')
-    arrange(fake)
-    const agentId = await spawn($)
-    const worktree = `${CHECKOUT}/.claude/worktrees/agent-${agentId}`
-    fake.worktreeDirectories.add(worktree)
-    fake.cwd = worktree
-    await childRun($, agentId, 'isolated-turn', 'Edited in the worktree')
-    fake.cwd = CHECKOUT
-    await fake.settle()
-    const child = fake.server.subagents.get(agentId)!
-    // No fork stays mounted, and Claude's worktree is where the work is recorded.
-    expect(child.mountedFor).toBeUndefined()
-    expect(child.checkout?.directory).toBe(worktree)
-    expect(fake.links.size).toBe(0)
-    fake.expectClean()
-  })
 })
 
 describe('Delta threads as subagents', () => {

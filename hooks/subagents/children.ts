@@ -58,14 +58,13 @@ export type ChildBinding = {
    */
   adopted?: true
   /**
-   * The owner Delta mounted the child's own worktrees under, an adopted thread's or an isolated child's
-   * fork, released when the session ends.
+   * The owner Delta mounted the child's own worktrees under, an adopted thread's or the fork an earlier
+   * version made for an isolated child, released when the session ends.
    */
   mountOwner?: string
   /**
-   * The git worktree Claude made for an isolated child, which a link to the child's fork stands in for
-   * while the session runs, so the child works in the fork under the path Claude gave it. Claude's
-   * worktree itself waits beside it, `.claude-worktree` appended, until the session ends.
+   * The git worktree Claude made for an isolated child an earlier version forked, moved aside for a link
+   * to the fork. It is put back before the child resumes and when the session ends.
    */
   claudeWorktree?: string
   /**

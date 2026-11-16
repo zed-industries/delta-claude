@@ -224,13 +224,13 @@ export async function authStatus(host: Host): Promise<{ login: string | undefine
 
 /**
  * Create, or find, the thread `externalId` records into. `organization` creates it under that
- * organization with that visibility; `parent` makes it a subagent's thread, named and with its
- * parent's worktrees or forks of them. `check` runs once the CLI is found, before the command.
+ * organization with that visibility; `parent` makes it a subagent's thread, named and, when it shares
+ * them, with its parent's worktrees. `check` runs once the CLI is found, before the command.
  */
 export async function threadCreate(host: Host, creation: {
   externalId: string
   organization?: { id: string; visibility: 'private' | 'organization' }
-  parent?: { reference: string; name: string; worktrees?: 'shared' | 'isolated' }
+  parent?: { reference: string; name: string; worktrees?: 'shared' }
   check?: () => Promise<void>
 }): Promise<JsonObject & CreationReceipt> {
   const { externalId, organization, parent, check } = creation
@@ -470,16 +470,6 @@ export async function* watchEvents(
       if (event) yield event
     }
   }
-}
-
-/** The shell command line that merges the forked thread `reference` into the thread `into`. */
-export async function threadMergeCommandLine(host: Host, reference: string, into: string): Promise<string> {
-  return `${shellQuote(await resolveCli(host))} thread merge ${shellQuote(reference)} --into ${shellQuote(into)}`
-}
-
-/** A word for a POSIX shell, quoted unless it is plainly safe as it is. */
-function shellQuote(word: string): string {
-  return /^[\w@%+=:,./#-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`
 }
 
 /** The references of the local worktrees checked out at `directory`, from `worktree list`. */

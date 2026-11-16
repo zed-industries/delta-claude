@@ -64,10 +64,6 @@ export type FakeChild = {
   turn?: { sequence: number; status: 'running' | 'finished' | 'superseded' }
   /** Created with `--shared-worktrees`: the child uses its parent's worktrees. */
   sharedWorktrees: boolean
-  /** Created with `--isolated-worktrees`: the child has forks of its parent's worktrees. */
-  isolatedWorktrees?: boolean
-  /** The owner whose mount of the child's forks is live, until it is released. */
-  mountedFor?: string
   next: number
   records: Map<number, Accepted>
   /** The subagent's own checkout while attached. */
@@ -494,16 +490,12 @@ export function fakeThreads(hostOn: On, options: {
     danglingLinks: new Set<string>(),
     /** The `mv`, `ln`, and link `rm` commands the plugin ran, in order. */
     linkCommands: [] as string[],
-    /** Makes `ln` fail, as on a file system that refuses links. */
-    failLink: false,
     /** Directories that exist besides the files, such as a git worktree Claude made for a subagent. */
     worktreeDirectories: new Set<string>(),
     /** Every Agent tool call as it reached Claude, after the plugin's hooks. */
     agentCalls: [] as Record<string, unknown>[],
     /** Stands in for Claude running an Agent call's subagent, which it starts and, in the foreground, waits for inside the call. */
     spawnForAgentCall: undefined as ((call: { tool_use_id: string; description?: string; name?: string }) => Promise<{ agentId?: string }>) | undefined,
-    /** The organization's managed settings, as `$.settings.read({ source: 'policy' })` reads them. */
-    policy: {} as Record<string, unknown>,
     /** The main conversation's rows with their tool uses, as `session.messages()` summarizes them. */
     summaries: [] as { role: string; text: string; toolUses: { tool_use_id: string; tool: string; input: Record<string, unknown>; result?: unknown }[] }[],
     /** Each subagent's transcript, which `session.messages({ agentId })` reads. */
@@ -1050,8 +1042,6 @@ export function fakeThreads(hostOn: On, options: {
     if (fake.holdTool) await fake.holdTool
     return { result: fake.toolResult } as any
   })
-  // Managed settings, which a test sets as the organization's policy; none by default.
-  on('settings.read', ($, e) => ({ value: e.source === 'policy' ? fake.policy : {} }) as never)
   on('fs.write', ($, e) => {
     if (fake.failWrite) throw new Error('disk full')
     fake.files.set(e.path, e.text)
@@ -1066,7 +1056,8 @@ export function fakeThreads(hostOn: On, options: {
     return { value }
   })
   on('fs.stat', ($, e) => {
-    if (fake.danglingLinks.has(e.path)) throw new Error(`ENOENT: ${e.path}`)
+    // Claude's `fs.stat` answers for a link that leads nowhere rather than rejecting.
+    if (fake.danglingLinks.has(e.path)) return { value: { kind: 'other' as const, size: 0, mtimeMs: 0, isLink: true } }
     if (fake.links.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: true } }
     if (fake.worktreeDirectories.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } }
     const text = fake.files.get(e.path)
@@ -1267,7 +1258,6 @@ export function fakeThreads(hostOn: On, options: {
     // Moving Claude's worktree aside and linking its path to a fork, as a subagent's own definition isolates it.
     if (argv[0] === 'mv' || argv[0] === 'ln' || (argv[0] === 'rm' && fake.links.has(argv[2]!))) {
       fake.linkCommands.push(argv.join(' '))
-      if (fake.failLink && argv[0] === 'ln') return output('', 1, 'ln: Operation not permitted')
       if (argv[0] === 'ln') fake.links.set(argv[4]!, argv[3]!)
       if (argv[0] === 'mv' && fake.worktreeDirectories.delete(argv[2]!)) fake.worktreeDirectories.add(argv[3]!)
       if (argv[0] === 'rm') {
@@ -1551,7 +1541,13 @@ export function fakeThreads(hostOn: On, options: {
       const local = fake.server.localWorktrees.get(reference.split('#')[0]!)
       if (local && !samePath(local.directory, directory))
         fake.violations.push(`mounted checkout at a different root: ${e.argv.join(' ')}`)
-      if (fake.holdCheckoutMount) await fake.holdCheckoutMount
+      if (fake.holdCheckoutMount) {
+        await Promise.race([fake.holdCheckoutMount, new Promise<void>((resolve) => {
+          next.signal.addEventListener('abort', () => resolve(), { once: true })
+        })])
+        // Like Delta, ending the command while the mount prepares cancels it before it is ready.
+        if (next.signal.aborted) return { value: { code: null, signal: 'SIGTERM' } }
+      }
       if (local) local.mounted = true
       const watch = createWatch(e)
       fake.mountStreams.push(watch)
@@ -1569,35 +1565,6 @@ export function fakeThreads(hostOn: On, options: {
             fake.releasingCheckouts.add(directory)
             void release.then(() => fake.releasingCheckouts.delete(directory))
           }
-        }
-      }
-    }
-    const forked = operation === 'mount'
-      ? [...fake.server.subagents.values()].find((child) => child.reference === parsed?.positionals[2]) : undefined
-    if (forked) {
-      fake.commands.push([...e.argv])
-      const owner = String(parsed?.options['--owner'])
-      if (!forked.isolatedWorktrees || !matchesCommand(e.argv, ['thread', 'mount', forked.reference], { '--owner': owner }))
-        fake.violations.push(`unexpected child mount: ${e.argv.join(' ')}`)
-      forked.mountedFor = owner
-      // Delta checks a fork's worktree out inside the checkout it was forked from.
-      const checkout = `${CHECKOUT}/.delta/worktrees/${owner}/repo`
-      const directory = `${FOLDERS}/${owner}`
-      const mounted = cliFixture('mount', {
-        thread_id: forked.thread, owner, directory,
-        worktrees: [{ reference: `fork-of-${forked.thread}#t=1`, name: 'repo', directory: checkout, state: 'mounted' }],
-      })
-      const group = { directory, mounts: new Map([[mounted.worktrees[0].reference, { name: 'repo', directory: checkout, active: true }]]) }
-      fake.server.groups.set(owner, group)
-      const watch = createWatch(e)
-      fake.mountStreams.push(watch)
-      watch.frame(mounted)
-      try { return yield* relayWatch(watch, next.signal) }
-      finally {
-        if (fake.server.groups.get(owner) === group) {
-          fake.server.groups.delete(owner)
-          forked.mountedFor = undefined
-          fake.unmounts.push({ thread: forked.thread, owner })
         }
       }
     }
@@ -1743,7 +1710,7 @@ export function fakeThreads(hostOn: On, options: {
       const parent = String(parsed.options['--parent'])
       if (!matchesCommand(argv, ['thread', 'create'], {
         '--source': 'claude-code', '--external-id': agentId, '--parent': parent, '--name': parsed.options['--name'],
-      }, ['--shared-worktrees', '--isolated-worktrees']) || typeof parsed.options['--name'] !== 'string') fake.violations.push(`unexpected child create: ${argv.join(' ')}`)
+      }, ['--shared-worktrees']) || typeof parsed.options['--name'] !== 'string') fake.violations.push(`unexpected child create: ${argv.join(' ')}`)
       if (![fake.server.thread, fake.shareId, urlOf()].includes(parent) && !byReference(parent)) {
         fake.violations.push(`a child created under an unknown parent: ${parent}`)
         return output(JSON.stringify(cliFixture('error', faultEnvelope({ code: 'invalid_reference', message: 'unknown parent' }))), 2)
@@ -1755,7 +1722,6 @@ export function fakeThreads(hostOn: On, options: {
         thread: `child-${agentId}`, reference: `${fake.server.thread}#s=${agentId}`, parent,
         name: String(parsed.options['--name']), next: 1, records: new Map(),
         sharedWorktrees: parsed.options['--shared-worktrees'] === true,
-        isolatedWorktrees: parsed.options['--isolated-worktrees'] === true,
       }
       fake.server.subagents.set(agentId, child)
       return output(JSON.stringify(cliFixture('childCreate', { thread_id: child.thread, created: !existing, reference: child.reference })))
@@ -1970,7 +1936,7 @@ function cliArguments(argv: readonly string[]) {
     if (argument === '--') { positionals.push(...argv.slice(index + 1)); break }
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
-    if (argument === '--json' || argument === '--force' || argument === '--join' || argument === '--existing-checkout' || argument === '--shared-worktrees' || argument === '--isolated-worktrees') { options[argument] = true; continue }
+    if (argument === '--json' || argument === '--force' || argument === '--join' || argument === '--existing-checkout' || argument === '--shared-worktrees') { options[argument] = true; continue }
     if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge', '--participate', '--producer-name', '--parent', '--name', '--tool-call-id', '--started-at', '--ended-at'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined

@@ -14,14 +14,11 @@ import {
 } from '../recording/delivery'
 import { deliveryRetryDelay } from '../recording/delivery-policy'
 import {
-  checkoutSyncing, hasWorktreeMount, stopWorktreeMount, threadCreate, threadMergeCommandLine, threadWatch,
+  checkoutSyncing, hasWorktreeMount, stopWorktreeMount, threadCreate, threadWatch,
   verifiedContract, watchEvents,
 } from '../cli/delta-cli'
 import { attachWorktree, mountCheckout } from '../sharing/checkout'
-import { mountThread, unmountThread } from '../sharing/join'
-import { providedByOrganization } from './org-agents'
-import { KEPT_SUFFIX, listedBranch } from './git-worktrees'
-import { isWithin, samePath } from '../core/paths'
+import { samePath } from '../core/paths'
 import { deliverNote } from '../watch/rows'
 import {
   boundDirectory, type HeldRow, type HookEvent, type HookNext, load, save, serial, stateFor,
@@ -68,6 +65,11 @@ export type ChildRuntime = {
   waitingForParent?: boolean
   /** The release of its checkout mount in flight, which every caller shares. */
   finishingCheckout?: Promise<void>
+  /**
+   * Settles once this run's checkout is mounted. A resumed run's tools wait for it while `holdsTools`,
+   * and the run's end waits for it before it stops the mount.
+   */
+  checkoutMounted?: { promise: Promise<void>; resolve: () => void; holdsTools: boolean }
   /**
    * What the next prompt Claude runs it with is recorded as: the message that was sent, without the
    * thread history Claude was handed with it.
@@ -238,8 +240,15 @@ async function beginChildTurn(host: Host, child: ChildRuntime, turnId: string, c
     if (toolId && !child.tools.toolTurns.has(toolId)) child.tools.toolTurns.set(toolId, sequence)
     binding = await stageChildRecord(host, binding, { update, turnSequence: sequence })
   }
+  const resumed = !!binding.thread
   binding = await placeChild(host, binding, cwd)
   await saveChild(host, binding)
+  if (binding.checkout) {
+    let resolve!: () => void
+    const promise = new Promise<void>((settle) => { resolve = settle })
+    // Delta may hold edits made since the last run, such as a takeover's, that the mount brings in.
+    child.checkoutMounted = { promise, resolve, holdsTools: resumed }
+  }
   void deliverChild(host, child)
 }
 
@@ -256,7 +265,8 @@ async function placeChild(host: Host, binding: ChildBinding, cwd: string): Promi
     binding.sharesParentCheckout = parent.some((candidate) => samePath(candidate, directory))
     binding.directories = binding.sharesParentCheckout ? parent : [directory]
   }
-  // An adopted or forked thread runs where Delta already keeps its worktrees, so nothing is attached for it.
+  // An adopted thread, or a child an earlier version forked, runs where Delta already keeps its worktrees,
+  // so nothing is attached for it.
   if (!binding.sharesParentCheckout && !binding.adopted && !binding.mountOwner && root && !binding.checkout) binding.checkout = root
   return binding
 }
@@ -461,8 +471,10 @@ async function deliverChildOnce(host: Host, child: ChildRuntime) {
     })
     binding = await loadChild(host, child)
   }
-  if (binding.checkout && binding.checkoutReference)
+  if (binding.checkout && binding.checkoutReference) {
     await mountCheckout(host, { session: child.session, checkout: binding.checkout, checkoutReference: binding.checkoutReference })
+    child.checkoutMounted?.resolve()
+  }
   if (children.get(child.agentId) === child) {
     for (const capture of child.pendingCaptures) capture.submit(reference)
     child.pendingCaptures.clear()
@@ -497,9 +509,9 @@ async function deliverChildOnce(host: Host, child: ChildRuntime) {
   if (!binding.execution && binding.checkoutReference) await finishChildCheckout(host, child)
 }
 
-/** Create or reuse the subagent `agentId`'s child thread under `parent`, with its parent's worktrees or forks of them. */
+/** Create or reuse the subagent `agentId`'s child thread under `parent`, sharing its parent's worktrees when it works in them. */
 async function createChildThread(host: Host, agentId: string, parent: string, name: string,
-    worktrees: 'shared' | 'isolated' | undefined): Promise<{ thread_id: string; reference: string }> {
+    worktrees: 'shared' | undefined): Promise<{ thread_id: string; reference: string }> {
   const created = await threadCreate(host, { externalId: agentId, parent: { reference: parent, name, worktrees } })
   if (typeof created.reference !== 'string' || !created.reference)
     throw new Error("thread create: Delta returned no reference for the subagent's thread")
@@ -590,30 +602,6 @@ async function finishChildRun(host: Host, child: ChildRuntime) {
   ])
   expiry.abort()
   await finishChildCheckout(host, child)
-  await noteForkMerge(host, child)
-}
-
-/**
- * A subagent that worked in a Delta fork has no branch in this repository for Claude to merge, so
- * its parent is told how to bring the fork's changes into its own checkout.
- */
-async function noteForkMerge(host: Host, child: ChildRuntime) {
-  try {
-    const binding = await loadChild(host, child)
-    if (!binding.mountOwner || binding.adopted || !binding.reference) return
-    const parent = await parentReference(host, child.session, binding.parent)
-    if (!parent) return
-    await deliverNote(host, child.session, `[Delta] The subagent "${binding.name}" worked in its own copy of this checkout ` +
-      'in Delta, not in a git branch of this repository. To bring its changes into the checkout it was forked from, run: ' +
-      await threadMergeCommandLine(host, binding.reference, parent))
-  } catch (error) { await reportChild(host, child, error) }
-}
-
-/** The reference of the thread `parent`, the session or a recorded subagent, records into, once that thread exists. */
-async function parentReference(host: Host, session: string, parent: string): Promise<string | undefined> {
-  if (parent !== session) return (await loadChild(host, { session, agentId: parent }).catch(() => undefined))?.reference
-  const binding = await serial(() => load(host, session))
-  return binding.locator ?? binding.thread
 }
 
 /** End a child's mount once no run of it is going on, retaining its worktree in the thread for later review. */
@@ -625,7 +613,12 @@ function finishChildCheckout(host: Host, child: ChildRuntime): Promise<void> {
 async function finishChildCheckoutOnce(host: Host, child: ChildRuntime) {
   const binding = await loadChild(host, child).catch(() => undefined)
   if (!binding || binding.execution || !binding.thread || !binding.checkout || !binding.checkoutReference) return
-  // A mount still preparing is stopped too, so it cannot become ready over a removed worktree.
+  // Stopping a mount still preparing cancels its adoption of the worktree, so Delta would miss what
+  // the run did; Claude removes or keeps the worktree only after this hook returns. A mount that is
+  // still preparing after the wait is stopped anyway, and the next run's mount imports the worktree.
+  if (!await awaitChildCheckout(host, child))
+    await host.ui.log(`Delta was still preparing the worktree of the subagent ${child.agentId} when its run ended; Delta records what the run changed there the next time the subagent runs`, { to: 'debug' })
+  child.checkoutMounted = undefined
   let stopped: boolean
   try {
     stopped = await stopWorktreeMount(child.session, binding.checkout)
@@ -732,136 +725,79 @@ export function forgetSubagents(session: string) {
   }
 }
 
-/** A fork of a parent's worktrees made for a child, and the folder Delta mounted it in, when there were any to fork. */
-type Fork = { thread: string; reference: string; owner: string; directory?: string }
-
-/**
- * Create the thread of the child `agentId` as a fork of its parent's worktrees, and mount the fork for
- * it to work in. Undefined when the parent's thread does not exist yet.
- *
- * The child works in the fork of the worktree its parent works in, which Delta checks out inside the
- * parent's checkout: Claude lets a subagent edit inside the session's directories without asking, as in
- * a worktree of its own, but asks for a directory it was merely sent to elsewhere. Only a parent that
- * works in a thread folder itself, as a joined Claude Code Desktop session does, gets the fork's.
- */
-async function forkWorktrees(host: Host, binding: ChildBinding): Promise<Fork | undefined> {
-  const { session, agentId, parent, name } = binding
-  const reference = await parentReference(host, session, parent)
-  if (!reference) return
-  const created = await createChildThread(host, agentId, reference, name, 'isolated')
-  const owner = `${session}-${agentId.slice(-12)}`
-  const fork: Fork = { thread: created.thread_id, reference: created.reference, owner }
-  const mounted = await mountThread(host, { session, thread: created.thread_id, locator: created.reference, owner })
-  if (mounted.thread_id !== created.thread_id) {
-    await unmountThread(host, created.reference, owner)
-    throw new Error('Delta mounted a different thread for the subagent')
-  }
-  if (!mounted.worktrees.length) {
-    await unmountThread(host, created.reference, owner)
-    return fork
-  }
-  const roots = await parentDirectories(host, { session, parent })
-  const own = mounted.worktrees.find((worktree) => roots.some((root) => isWithin(worktree.directory, root)))
-  return { ...fork, directory: own?.directory ?? mounted.directory }
-}
-
 /** A subagent's turn started in its own loop; a recorded one's turn is its own thread's. */
 export async function startChildTurn(host: Host, e: HookEvent<'turn.start'>, agentId: string, next: HookNext<'turn.start'>) {
   const child = await childFor(host, agentId)
   if (child) {
     // The child's own hook is the only place its working directory can be read.
     const cwd = await host.session.cwd()
-    // The turn waits for the child's fork, so nothing the child does lands in Claude's worktree first.
-    if (isClaudeWorktree(cwd, agentId)) await childStep(host, child, () => forkIntoClaudeWorktree(host, child, cwd))
     await childStep(host, child, () => beginChildTurn(host, child, e.turnId, cwd))
   }
   return next(e)
 }
 
 /**
- * Whether `cwd` is the git worktree Claude made for the isolated subagent `agentId`:
- * `<root>/.claude/worktrees/agent-<agentId>`. Only POSIX paths: a Windows directory link is a
- * junction, which this plugin does not make.
+ * Hold a resumed child's tool until its checkout is mounted, so it sees what Delta brings in, such as
+ * a takeover's edits. Claude runs a resumed subagent without waiting for its turn start, so its tools
+ * are what can be held; the turn start a tool may race is let finish first. A mount still preparing
+ * after `CHILD_MOUNT_BUDGET_MS` stops holding the run's tools.
  */
-function isClaudeWorktree(cwd: string, agentId: string): boolean {
-  return cwd.startsWith('/') && cwd.replace(/\/+$/, '').endsWith(`/.claude/worktrees/agent-${agentId}`)
+async function awaitChildToolCheckout(host: Host, child: ChildRuntime) {
+  await childStep(host, child, async () => {})
+  const mounted = child.checkoutMounted
+  if (!mounted?.holdsTools) return
+  const ready = await awaitChildCheckout(host, child)
+  mounted.holdsTools = false
+  if (!ready)
+    await host.ui.log(`Delta was still preparing the worktree of the subagent ${child.agentId} after ${CHILD_MOUNT_BUDGET_MS / 1000} seconds; its tools run without waiting, and may first see files from before Delta's latest changes`, { to: 'debug' })
+}
+
+/** How long a child's hook waits for its checkout's mount to become ready. */
+const CHILD_MOUNT_BUDGET_MS = 10_000
+
+/**
+ * Wait until this run's checkout is mounted, within `CHILD_MOUNT_BUDGET_MS`; false once that passes,
+ * as it may for a mount waiting for a connection. A delivery that ends without mounting ends the wait.
+ */
+async function awaitChildCheckout(host: Host, child: ChildRuntime): Promise<boolean> {
+  const mounted = child.checkoutMounted
+  if (!mounted) return true
+  const expiry = new AbortController()
+  const settled = await Promise.race([
+    mounted.promise.then(() => true),
+    (child.delivering ?? Promise.resolve()).then(() => true),
+    host.clock.sleep(CHILD_MOUNT_BUDGET_MS, { signal: expiry.signal }).then(() => false, () => true),
+  ])
+  expiry.abort()
+  return settled
 }
 
 /**
- * An isolated subagent, whether its Agent call or its own definition asks for isolation, works in a git
- * worktree Claude makes for it, and no hook the organization's guard lets through can send it elsewhere.
- * Its work belongs in a fork of its parent's worktrees, which merges back into the parent's thread, so
- * the fork is made at the child's first turn and Claude's worktree is moved aside for a link to it: the
- * child works in the fork under the path Claude gave it. Claude sees the fork's changes there when the
- * run ends, so it keeps the path and reports it, and the path shows the work. A later turn links it
- * again if a resume needed Claude's own worktree back. An agent the organization provides, and anything
- * that fails, leaves Claude's worktree in place, recorded as any subagent's own checkout is.
+ * What an earlier version of this plugin named the folder it moved Claude's worktree to, while a link to
+ * a subagent's Delta fork took its place. A checkout can keep that layout for as long as nobody opens
+ * Claude in it again, so what reads this stays.
  */
-async function forkIntoClaudeWorktree(host: Host, child: ChildRuntime, worktree: string) {
-  const binding = await loadChild(host, child)
-  try {
-    if (binding.claudeWorktree && binding.directories?.[0]) {
-      await linkWorktree(host, binding.claudeWorktree, binding.directories[0])
-      return
-    }
-    // A child already placed, as one found running when recording started, keeps its place.
-    if (binding.thread || binding.sharesParentCheckout !== undefined || !recordsChildren(child.session)) return
-    // An agent the organization provides keeps the worktree Claude made; see `org-agents.ts`.
-    const type = (await host.agent.list()).find((agent) => agent.id === child.agentId)?.type
-    if (type === undefined || await providedByOrganization(host, type)) return
-    const fork = await forkWorktrees(host, binding)
-    if (!fork) return
-    const current = { ...await loadChild(host, child), thread: fork.thread, reference: fork.reference }
-    // Nothing to fork: the thread is the child's, and it records Claude's worktree as its own checkout.
-    if (!fork.directory) {
-      await saveChild(host, current)
-      return
-    }
-    try { await linkWorktree(host, worktree, fork.directory) }
-    catch (error) {
-      await unmountThread(host, fork.reference, fork.owner)
-      throw error
-    }
-    await saveChild(host, {
-      ...current, sharesParentCheckout: false, directories: [fork.directory], mountOwner: fork.owner, claudeWorktree: worktree,
-    })
-  } catch (error) {
-    await host.ui.log(`Delta could not fork the worktrees of the subagent ${child.agentId}; it works in Claude's own: ${String(error)}`, { to: 'debug' })
-  }
-}
+const KEPT_SUFFIX = '.claude-worktree'
 
 /**
- * Put a link to `target` where Claude's worktree `worktree` was, keeping the worktree beside it. The
- * worktree is put back if the link cannot be made, so the child never finds its directory gone.
- */
-async function linkWorktree(host: Host, worktree: string, target: string) {
-  const stat = await host.fs.stat(worktree).catch(() => undefined)
-  if (stat?.isLink) return
-  const kept = `${worktree}${KEPT_SUFFIX}`
-  if (stat) await runLocal(host, worktree, ['mv', '--', worktree, kept])
-  try { await runLocal(host, worktree, ['ln', '-s', '--', target, worktree]) }
-  catch (error) {
-    if (stat) await runLocal(host, worktree, ['mv', '--', kept, worktree])
-    throw error
-  }
-}
-
-/**
- * Put back Claude's worktree for a child about to resume, which Claude verifies first: the resume fails
- * without it. The resumed turn links the child to its fork again.
+ * Put back Claude's worktree for a child an earlier version forked, before Claude resumes it: Claude
+ * verifies the worktree first, and the resume fails without it.
  */
 export async function unlinkForResume(host: Host, child: ChildRuntime) {
   try {
     const binding = await loadChild(host, child)
-    if (binding.claudeWorktree) await unlinkWorktree(host, binding.claudeWorktree)
+    if (binding.claudeWorktree) await restoreClaudeWorktree(host, binding.claudeWorktree)
   } catch (error) {
     // The resume still goes; Claude then says why it cannot verify the child's worktree.
     await host.ui.log(`Delta could not put back the worktree Claude made for the subagent ${child.agentId}: ${String(error)}`, { to: 'debug' })
   }
 }
 
-/** Put Claude's worktree back where the link to the child's fork is, which a resume and git expect. */
-async function unlinkWorktree(host: Host, worktree: string) {
+/**
+ * Put Claude's worktree `worktree` back where an earlier version's link to a subagent's fork is. Claude
+ * removes or keeps it afterwards, as it does any isolated subagent's.
+ */
+export async function restoreClaudeWorktree(host: Host, worktree: string) {
   const kept = `${worktree}${KEPT_SUFFIX}`
   if (!await host.fs.exists(kept)) return
   if ((await host.fs.stat(worktree).catch(() => undefined))?.isLink) await runLocal(host, worktree, ['rm', '--', worktree])
@@ -869,25 +805,10 @@ async function unlinkWorktree(host: Host, worktree: string) {
 }
 
 /**
- * The session ended, and with it the child's fork's mount: Claude's worktree takes the link's place
- * again, and goes with its branch as Claude would remove it, unless it holds anything of its own.
- * `git` refuses either removal for a worktree with changes or a branch with unmerged commits.
- */
-export async function restoreClaudeWorktree(host: Host, worktree: string) {
-  if (!await host.fs.exists(`${worktree}${KEPT_SUFFIX}`)) return
-  await unlinkWorktree(host, worktree)
-  const root = worktree.slice(0, worktree.lastIndexOf('/.claude/worktrees/'))
-  // The branch is read before the worktree goes, which takes it off git's list.
-  const listed = await host.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: root })
-  const branch = listed.exitCode === 0 ? listedBranch(listed.stdout, worktree) : undefined
-  if ((await host.process.run(['git', 'worktree', 'remove', '--', worktree], { cwd: root })).exitCode === 0 && branch)
-    await host.process.run(['git', 'branch', '-d', '--', branch], { cwd: root })
-}
-
-/**
- * Put back each git worktree Claude made for an isolated subagent that a session which did not end
- * cleanly left moved aside, so Claude finds it where it made it. A link that still leads to a fork may
- * be another running session's, so only a missing link or one that leads nowhere is replaced.
+ * Put back each git worktree Claude made for an isolated subagent that an earlier version moved aside
+ * and a session which did not end cleanly left so, so Claude finds it where it made it. A link that still
+ * leads to a fork may be another running session's, so only a missing link or one that leads nowhere is
+ * replaced.
  */
 export async function restoreAbandonedWorktrees(host: Host) {
   const cwd = await host.session.cwd()
@@ -906,8 +827,8 @@ export async function restoreAbandonedWorktrees(host: Host) {
     const worktree = `${folder}/${name}`
     const link = entries.find((entry) => entry.name === name)
     if (link && !link.isLink) continue
-    // `stat` follows a link and rejects for one that leads nowhere.
-    if (link && await host.fs.stat(worktree).then(() => true, () => false)) continue
+    // `stat` follows a link; one that leads nowhere is neither a file nor a directory.
+    if (link && (await host.fs.stat(worktree).catch(() => undefined))?.kind === 'dir') continue
     if (link) await runLocal(host, worktree, ['rm', '--', worktree])
     await runLocal(host, worktree, ['mv', '--', `${worktree}${KEPT_SUFFIX}`, worktree])
   }
@@ -959,7 +880,9 @@ export async function recordChildRow(host: Host, e: HookEvent<'session.append'>,
 
 /** A recorded subagent's tool call finished; its result is recorded on its thread. */
 export async function recordChildToolCall(host: Host, e: HookEvent<'tool.call'>, agentId: string, next: HookNext<'tool.call'>) {
-  const editing = e.tool_use_id && capturesEdits(e.tool) ? await childFor(host, agentId) : undefined
+  const running = await childFor(host, agentId)
+  if (running) await awaitChildToolCheckout(host, running)
+  const editing = e.tool_use_id && capturesEdits(e.tool) ? running : undefined
   const binding = editing && await loadChild(host, editing)
   const capture = editing && e.tool_use_id
     ? await startCapture(host, editing.session, { externalId: editing.agentId, toolUseId: e.tool_use_id })

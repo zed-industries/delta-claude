@@ -48,10 +48,6 @@ export type Host = {
     /** A subagent's conversation as API messages. */
     agentApiMessages(agentId: string): Promise<SessionMessagesApiResult>
   }
-  settings: {
-    /** The organization's managed settings. */
-    policy(): Promise<Readonly<Record<string, unknown>>>
-  }
   store: Pick<EngineInterface['store'], 'delete' | 'get' | 'keys' | 'set'>
   tool: {
     /** Stop a background subagent, as the `TaskStop` tool does. */
