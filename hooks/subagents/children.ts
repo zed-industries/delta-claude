@@ -59,7 +59,8 @@ export type ChildBinding = {
   adopted?: true
   /**
    * The owner Delta mounted the child's own worktrees under, an adopted thread's or the fork an earlier
-   * version made for an isolated child, released when the session ends.
+   * version made for an isolated child. An adopted thread's mount is released once its run has been idle
+   * for a while, and mounted again under the same owner when it resumes; any left go when the session ends.
    */
   mountOwner?: string
   /**

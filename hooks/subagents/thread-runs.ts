@@ -6,23 +6,25 @@ import type { Timer } from 'claude-code'
 import { type ChildBinding, childName, isAgentTool, recordsSubagent } from './children'
 import { conversationText } from '../watch/conversation'
 import { runningUpdate } from '../recording/delivery'
-import { threadStatus, threadWatch, watchEvents } from '../cli/delta-cli'
+import { hasThreadMount, threadStatus, threadWatch, watchEvents } from '../cli/delta-cli'
 import {
   adoptionPrompt, deltaTurnReport, finishedReport, HISTORY_BUDGET, historyText, isOwnItem, itemsSince,
   looksLikeThreadLink, namedThread, resumePrompt, threadsNote, type ThreadTarget,
 } from './delta-threads'
 import { claudeInteraction } from '../setup/interaction'
 import { mountThread, requireMounted, unmountThread } from '../sharing/join'
-import { hasInteractiveSurface, sessionSurfaces } from '../sharing/lifecycle'
+import { hasInteractiveSurface, sessionDirectories, sessionSurfaces } from '../sharing/lifecycle'
 import { deliverNote } from '../watch/rows'
 import { type Binding, boundDirectory, report, stateFor } from '../core/session-state'
 import type { Host } from '../core/host'
+import { samePath } from '../core/paths'
+import { errorText } from '../core/text'
 import {
   addChild, children, type ChildRuntime, childStep, deliverChild, endChildTurn, loadChild, parentDirectories,
   recordChildMessage, rememberChild, reportChild, restoreClaudeWorktree, saveChild, snapshotChild, stageChildRecord,
   unlinkForResume,
 } from './subagents'
-import type { WatchChild, WatchItem } from '../cli/thread-commands'
+import type { MountedThread, WatchChild, WatchItem } from '../cli/thread-commands'
 import { feed, watchedSession } from '../watch/watch'
 
 /*
@@ -187,6 +189,8 @@ export async function sendToThread(host: Host, session: string, sender: string, 
  */
 async function resumeThread(host: Host, child: ChildRuntime, sender: string, text: string,
     next: (to: string, text: string) => Promise<{ isDelivered: true } | { isDelivered: false; reason: string }>) {
+  // Before any await, so an idle release that already fired sees the resume and keeps the mount.
+  cancelMountRelease(child.agentId)
   const binding = await loadChild(host, child)
   if (binding.execution) {
     const result = await next(child.agentId, text)
@@ -207,6 +211,15 @@ async function resumeThread(host: Host, child: ChildRuntime, sender: string, tex
       const last = read.items.at(-1)
       if (last) await childStep(host, child, async () => saveChild(host, { ...await loadChild(host, child), reportedItem: last.id }))
     } catch (error) { await reportChild(host, child, error) }
+  }
+  if (binding.adopted && binding.mountOwner) {
+    let moved: readonly string[] | undefined
+    try { moved = await remountThread(host, child, binding) }
+    catch (error) {
+      return { isDelivered: false as const, reason: `Delta couldn't mount the worktrees of the thread "${binding.name}" again: ${errorText(error)}` }
+    }
+    const directories = moved ?? binding.directories ?? []
+    if (directories.length) prompt = `${checkoutNote(directories, moved !== undefined)}\n\n${prompt}`
   }
   // The resumed run is prompted by the loop that sent the message, and runs in the background.
   child.sender = sender
@@ -247,11 +260,12 @@ async function runThread(host: Host, session: string, sender: string, target: Th
     mountOwner = `${session}-${read.thread_id.slice(-12)}`
     const mounted = await mountThread(host, { session, thread: read.thread_id, locator: target.reference, owner: mountOwner })
     requireMounted(mounted, read.thread_id)
-    cwd = mounted.directory
-    directories = [mounted.directory]
+    directories = checkoutDirectories(mounted)
+    cwd = directories[0]
   }
   if (!cwd) return { isDelivered: false as const, reason: 'This session has no checkout for the thread to work in.' }
-  const prompt = adoptionPrompt(name, historyText(read.items.filter((item) => !item.open), target.reference, HISTORY_BUDGET), text)
+  const continuation = adoptionPrompt(name, historyText(read.items.filter((item) => !item.open), target.reference, HISTORY_BUDGET), text)
+  const prompt = mountOwner ? `${checkoutNote(directories, false)}\n\n${continuation}` : continuation
   const binding: Omit<ChildBinding, 'agentId'> = {
     session, parent: sender, name, thread: read.thread_id, reference: target.reference, next: 1, pending: [],
     sharesParentCheckout: shares, directories, adopted: true, awaited: 'claude',
@@ -394,9 +408,74 @@ async function reportDeltaTurn(host: Host, session: string, thread: WatchChild) 
   else await deliverNote(host, session, text)
 }
 
+/** How long a thread run's mount outlives the run, as long as Desktop keeps a settled subthread's checkout. */
+const THREAD_MOUNT_IDLE_MS = 5 * 60_000
+/** Per subagent, the release of its thread's mount, waiting for the run to stay idle long enough. */
+const mountReleases = new Map<string, Timer>()
+
+function cancelMountRelease(agentId: string) {
+  mountReleases.get(agentId)?.cancel()
+  mountReleases.delete(agentId)
+}
+
+/**
+ * A run of a thread Claude runs in its own mount ended: release the mount once the run has been idle
+ * for `THREAD_MOUNT_IDLE_MS`. A resume cancels the release, and one that comes later mounts it again.
+ */
+export async function releaseThreadMountWhenIdle(host: Host, child: ChildRuntime) {
+  const binding = await loadChild(host, child).catch(() => undefined)
+  if (!binding?.adopted || !binding.mountOwner || !binding.reference) return
+  const { reference, mountOwner } = binding
+  cancelMountRelease(child.agentId)
+  const release = host.clock.after(THREAD_MOUNT_IDLE_MS, () => void (async () => {
+    // A run that began before this release was scheduled is still going, and releases at its own end.
+    if ((await loadChild(host, child)).execution || mountReleases.get(child.agentId) !== release) return
+    mountReleases.delete(child.agentId)
+    await unmountThread(host, reference, mountOwner)
+  })().catch((error) => report(host, error)))
+  mountReleases.set(child.agentId, release)
+}
+
+/**
+ * Mount a resumed thread run's thread again when this process no longer holds its mount, because it
+ * was released while idle or a restart ended it. Delta returns a checkout to its earlier path, but
+ * not always: the directories it moved to are returned, and saved as the child's.
+ */
+async function remountThread(host: Host, child: ChildRuntime, binding: ChildBinding): Promise<readonly string[] | undefined> {
+  const { thread, reference, mountOwner } = binding
+  if (!mountOwner || !thread || !reference || hasThreadMount(thread, mountOwner)) return
+  const mounted = await mountThread(host, { session: child.session, thread, locator: reference, owner: mountOwner })
+  requireMounted(mounted, thread)
+  const directories = checkoutDirectories(mounted)
+  const before = binding.directories ?? []
+  if (directories.length === before.length && directories.every((directory, index) => samePath(directory, before[index]!))) return
+  await childStep(host, child, async () => saveChild(host, { ...await loadChild(host, child), directories }))
+  return directories
+}
+
+/** A thread run's checkouts, the one it works in first, chosen as a joined session's is. */
+function checkoutDirectories(mounted: MountedThread): string[] {
+  const { workingDirectory, additionalDirectories } = sessionDirectories(mounted)
+  return [workingDirectory, ...additionalDirectories]
+}
+
+/**
+ * Tells a thread run where its checkouts are. Claude Code 2.1.321 ignores the `cwd` a plugin's spawn
+ * names and starts the subagent in the session's directory, so the subagent has to go there itself.
+ */
+function checkoutNote(directories: readonly string[], moved: boolean): string {
+  const [first, ...others] = directories
+  return [
+    `[Delta] ${moved ? 'This thread\'s checkout moved; the directory you worked in before is gone. ' : ''}`
+      + `This thread's worktree is checked out at ${first}. Run \`cd ${JSON.stringify(first)}\` before anything else, and give file tools absolute paths under it.`,
+    ...others.length ? [`Its other worktrees are checked out at ${others.join(', ')}.`] : [],
+  ].join(' ')
+}
+
 /** Release the mounts this session made for threads it ran, when it ends. */
 export async function releaseThreadMounts(host: Host, session: string, agentIds: readonly string[]) {
   for (const agentId of agentIds) {
+    cancelMountRelease(agentId)
     const binding = await loadChild(host, { session, agentId }).catch(() => undefined)
     // Claude's worktree takes back its place before the fork its link leads to goes.
     if (binding?.claudeWorktree) await restoreClaudeWorktree(host, binding.claudeWorktree).catch((error) => report(host, error))

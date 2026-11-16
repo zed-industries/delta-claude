@@ -520,6 +520,11 @@ export async function worktreeMount(host: Host, mount: {
   return mounted
 }
 
+/** Whether this plugin process holds a ready `thread mount` of `thread` for `owner`. */
+export function hasThreadMount(thread: string, owner: string): boolean {
+  return mountProcesses.has(`thread:${thread}:${owner}`)
+}
+
 /** Whether `session` has a ready `worktree mount` for the checkout `directory`. */
 export function hasWorktreeMount(session: string, directory: string): boolean {
   return mountProcesses.has(`worktree:${session}:${directory}`)

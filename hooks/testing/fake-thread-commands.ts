@@ -1805,12 +1805,13 @@ export function fakeThreads(hostOn: On, options: {
   }
 
   /** The session owns its mounts; a Desktop hand-off mounts under an owner of its own. */
+  /** A hand-off's owner, a thread run's (the session's, suffixed per thread), or the session itself. */
   function ownerOf(owner: string) {
-    return owner.startsWith('desktop-') ? owner : fake.session
+    return owner.startsWith('desktop-') || owner.startsWith(`${fake.session}-`) ? owner : fake.session
   }
 
   function threadLocator(value: string | undefined) {
-    return [fake.server.thread, fake.shareId, urlOf()].includes(value!) ? value : fake.server.thread
+    return [fake.server.thread, fake.shareId, urlOf()].includes(value!) || fake.server.threads.has(value!) ? value : fake.server.thread
   }
 
   function statusReply() {

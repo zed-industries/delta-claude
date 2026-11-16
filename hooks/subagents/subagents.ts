@@ -32,7 +32,7 @@ import { CHILD_CONTRACT_VERSION, classifyCommandFailure, DeltaCommandError } fro
 import { capturesEdits, type EditCapture, startCapture } from '../recording/edit-capture'
 import { ToolRecords } from '../recording/tool-records'
 import { recordThreadSummary } from '../recording/thread-summary'
-import { adoptThread, isAdoptionSpawn, reportClaudeRun } from './thread-runs'
+import { adoptThread, isAdoptionSpawn, releaseThreadMountWhenIdle, reportClaudeRun } from './thread-runs'
 
 /**
  * A recorded subagent in this process. Claude stays its executor; Delta records it as an ordinary
@@ -859,6 +859,7 @@ export async function completeChildTurn(host: Host, e: HookEvent<'turn.complete'
     await childStep(host, child, () => endChildTurn(host, child, e.turnId, stopReasonOf(e), cwd))
     if (sequence !== undefined && prose) void recordThreadSummary(host, child.session, sequence, prose, agentId)
     await finishChildRun(host, child)
+    await releaseThreadMountWhenIdle(host, child)
     await reportClaudeRun(host, child)
   }
   return result

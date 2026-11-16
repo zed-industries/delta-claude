@@ -4,6 +4,7 @@ import {
   agentInfo, bash, CHECKOUT, childActor, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
   turnComplete, turnStart, userText,
 } from '../testing/fake-thread-commands'
+import { cliFixture } from '../testing/cli-fixtures'
 
 tier('user')
 
@@ -550,6 +551,50 @@ describe('Delta threads as subagents', () => {
       .toEqual([['state_update', 'running'], ['user_message', 'Write RELEASE.md'], ['agent_message', 'Wrote RELEASE.md'], ['state_update', 'idle']])
     expect(records[1]!.update?._meta?.delta?.sender).toEqual({ external_id: fake.session })
     expect(fake.entered.at(-1)?.text).toBe('The Delta thread "Release notes" finished its turn. Its reply:\n\nWrote RELEASE.md')
+    fake.expectClean()
+  })
+
+  test("a thread run's own mount is released after 5 idle minutes and mounted again when it resumes", async ($, on) => {
+    const fake = await sharedSession($, on)
+    fake.server.worktrees = [{ reference: 'worktree-1#t=1', name: 'repo' }]
+    const tree = { reference: 'notes-tree#t=1', name: 'notes' }
+    fake.server.threads.set('root#s=notes', { thread: 'notes-thread', name: 'Release notes', worktrees: [tree], items: [] })
+    fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
+    let directory = '/mounts/notes'
+    fake.mountReply = (owner) => cliFixture('mount', { thread_id: 'notes-thread', owner, directory,
+      worktrees: [{ ...tree, directory: `${directory}/notes`, state: 'mounted' }] })
+    await fake.settle()
+    const sending = $.session.send({ to: 'Release notes', text: 'Write RELEASE.md' } as never)
+    await fake.settle()
+    const agentId = threadAgent(fake)
+    await $.turn.start({ ...turnStart('first'), agentId } as never)
+    expect(await sending).toEqual({ isDelivered: true })
+    await $.turn.complete({ ...turnComplete('first'), agentId } as never)
+    await fake.settle()
+    const owner = fake.mountRequests.at(-1)!.owner
+    const run = async (turnId: string, text: string) => {
+      expect(await $.session.send({ to: 'Release notes', text } as never)).toEqual({ isDelivered: true })
+      await $.turn.start({ ...turnStart(turnId), agentId } as never)
+      await $.turn.complete({ ...turnComplete(turnId), agentId } as never)
+      await fake.settle()
+    }
+
+    // A resume within the idle time keeps the mount, and its end starts the idle time again.
+    await fake.advance(4 * 60_000)
+    await run('second', 'Add a summary')
+    expect(fake.mountRequests).toHaveLength(1)
+    // Claude Code ignores a plugin spawn's `cwd`, so each run is told to work in the worktree's checkout.
+    expect(fake.sends.at(-1)!.text).toStartWith('[Delta] This thread\'s worktree is checked out at /mounts/notes/notes.')
+    await fake.advance(4 * 60_000)
+    expect(fake.unmounts).toEqual([])
+    await fake.advance(2 * 60_000)
+    expect(fake.unmounts.map((unmount) => unmount.owner)).toEqual([owner])
+
+    // A later resume mounts it again under the same owner, and hears where its worktrees moved.
+    directory = '/mounts/notes-2'
+    await run('third', 'Fix a typo')
+    expect(fake.mountRequests.map((request) => request.owner)).toEqual([owner, owner])
+    expect(fake.sends.at(-1)!.text).toStartWith("[Delta] This thread's checkout moved; the directory you worked in before is gone. This thread's worktree is checked out at /mounts/notes-2/notes.")
     fake.expectClean()
   })
 
