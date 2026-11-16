@@ -5,7 +5,7 @@
 import type { ApiMessage } from 'claude-code'
 import { AccessRequiredError, requireAuthentication } from '../cli/auth'
 import { clearProgress, finishProgress, setProgress, threadOrganization } from '../band/band'
-import { messageUpdates, resultUpdate } from '../recording/content'
+import { messageUpdates, recordedToolResults } from '../recording/content'
 import {
   drain, flushUnsaved, recordsOffline, recordsPlans, rememberToolResults, stageRecord, verifyCheckout,
 } from '../recording/delivery'
@@ -392,18 +392,14 @@ async function stageMessages(
   const runtime = stateFor(session)
   const summaries = await host.session.messages()
   await assertShareSession(host, request)
-  for (const tool of summaries.flatMap((row) => row.toolUses)) {
-    if (tool.result === undefined) continue
-    runtime.tools.structuredResults.set(tool.tool_use_id,
-      resultUpdate(tool.tool_use_id, tool.tool, tool.result, !!tool.isError, root))
-  }
+  const results = recordedToolResults(summaries, root)
   await serial(async () => {
     let state = await load(host, session)
     await assertShareSession(host, request)
     const plans = recordsPlans(session)
     for (const [index, message] of messages.entries()) {
       rememberToolResults(runtime.tools, message, plans)
-      const updates = messageUpdates(message, id(index), runtime.tools.structuredResults,
+      const updates = messageUpdates(message, id(index), results,
         { root, omitted: runtime.tools.omitted, plans })
       for (const update of updates) state = await stageRecord(host, state, { update })
     }

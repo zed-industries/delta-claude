@@ -1,6 +1,6 @@
 /** CLI boundary fixture and Claude host; watching never creates, mounts, or publishes. */
 import { type Engine, expect, mock, type MockClock, type Plugin, type TestRest } from 'claude-code/testing'
-import type { AgentInfo, ApiMessage, ConfigRow, On, ProcessRunResult } from 'claude-code'
+import type { AgentInfo, ApiMessage, ConfigRow, On, ProcessRunResult, ToolCallResult } from 'claude-code'
 import type { ThreadState, ThreadUser, WatchChild, WatchComment, WatchItem } from '../cli/thread-commands'
 import { cliErrorCodes, cliFixture } from './cli-fixtures'
 import { MINIMUM_CLAUDE_VERSION } from '../core/compatibility'
@@ -525,7 +525,7 @@ export function fakeThreads(hostOn: On, options: {
     ignoreReadCancellation: false,
     /** API export used by the initial share. */
     messages: options.messages ?? [] as ApiMessage[],
-    toolResult: { stdout: 'tool output', stderr: '', interrupted: false } as unknown,
+    toolResult: { result: { stdout: 'tool output', stderr: '', interrupted: false } } as ToolCallResult,
     exports: 0,
     appendFaults: [] as AppendFault[],
     /** Every append fails before accepting anything until cleared. */
@@ -1040,7 +1040,7 @@ export function fakeThreads(hostOn: On, options: {
       return { result: { status: background ? 'async_launched' : 'completed', agentId: spawned?.agentId } } as any
     }
     if (fake.holdTool) await fake.holdTool
-    return { result: fake.toolResult } as any
+    return fake.toolResult
   })
   on('fs.write', ($, e) => {
     if (fake.failWrite) throw new Error('disk full')

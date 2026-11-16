@@ -1,5 +1,5 @@
 import { describe, expect, test, tier } from 'claude-code/testing'
-import { capturedMessage, messageUpdates, resultDiff, resultUpdate, type Update } from './content'
+import { capturedMessage, messageUpdates, recordedToolResults, resultDiff, resultUpdate, type Update } from './content'
 
 tier('user')
 
@@ -39,6 +39,20 @@ describe('content', () => {
       content: [{ type: 'text', text: 'internal framing' }, result] }
     expect(capturedMessage(row, 'tool-result')).toEqual({ role: 'user', content: [result] })
     expect(capturedMessage({ ...row, content: [{ type: 'text', text: 'framing only' }] }, 'tool-message')).toBeUndefined()
+  })
+
+  test('snapshot errors use recorded tool results instead of model-facing error context', () => {
+    const message = { role: 'user' as const, content: [
+      { type: 'tool_result', tool_use_id: 't1', is_error: true,
+        content: [{ type: 'text', text: 'Private instructions for the model about what to do next.' }] },
+    ] }
+    const recorded = recordedToolResults([{ role: 'assistant', text: '', toolUses: [
+      { tool_use_id: 't1', tool: 'Bash', input: {}, result: 'User rejected tool use', isError: true },
+    ] }])
+    expect(messageUpdates(message, 'snapshot', recorded)).toEqual([{
+      sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'failed', rawOutput: 'User rejected tool use',
+      content: [{ type: 'content', content: { type: 'text', text: 'User rejected tool use' } }],
+    }])
   })
 
   test("titles and kinds tool calls as Claude's ACP adapter does, with paths relative to the root", () => {
@@ -169,11 +183,6 @@ describe('content', () => {
           _meta: { origin: 'mcp' } } },
       ],
     }])
-    expect(messageUpdates({ role: 'user', content: [
-      { type: 'tool_result', tool_use_id: 't1', content: 'failed', is_error: true },
-    ] }, 'm3')[0]).toEqual({ sessionUpdate: 'tool_call_update', toolCallId: 't1',
-      status: 'failed', rawOutput: 'failed',
-      content: [{ type: 'content', content: { type: 'text', text: 'failed' } }] })
   })
 
   test('keeps input-only rows open and closes with source result content and a recorded diff', () => {

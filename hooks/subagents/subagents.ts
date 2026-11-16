@@ -6,7 +6,9 @@ import type { ApiMessage, FsEntry, Timer } from 'claude-code'
 import { outbox } from '../setup/activation'
 import { restoreBinding } from '../core/binding'
 import { type ChildBinding, childKey, childName, childOutbox, recordsSubagent, sentBy } from './children'
-import { capturedMessage, isOmittedTool, messageUpdates, resultUpdate, toolInfo } from '../recording/content'
+import {
+  capturedMessage, isOmittedTool, messageUpdates, recordedToolResults, resultUpdate, toolInfo,
+} from '../recording/content'
 import { isJsonObject } from '../core/json'
 import {
   appendPending, collectAcknowledgedOutbox, liveActivity, type RecordBody, recordsOffline, recordsPlans,
@@ -395,12 +397,15 @@ export async function snapshotChild(host: Host, child: ChildRuntime, binding: Ch
   const messages = await host.session.agentApiMessages(child.agentId)
   if (!Array.isArray(messages)) throw new Error(`the transcript of subagent ${child.agentId} is unavailable`)
   const root = childRoot(binding)
+  const summaries = await host.session.agentMessages({ agentId: child.agentId })
+  if (!Array.isArray(summaries)) throw new Error(`the transcript of subagent ${child.agentId} is unavailable`)
+  const results = recordedToolResults(summaries, root)
   const tools = new ToolRecords()
   const turnSequence = binding.execution?.sequence
   const plans = recordsPlans(child.session)
   for (const [index, message] of snapshotMessages(messages).entries()) {
     rememberToolResults(tools, message, plans)
-    const updates = messageUpdates(message, `snapshot:${index}`, undefined, { root, omitted: tools.omitted, plans })
+    const updates = messageUpdates(message, `snapshot:${index}`, results, { root, omitted: tools.omitted, plans })
     for (const update of updates)
       binding = await stageChildRecord(host, binding, { update: sentBy(update, child.sender), ...turnSequence ? { turnSequence } : {} })
   }

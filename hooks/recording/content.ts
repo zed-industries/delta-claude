@@ -1,4 +1,4 @@
-import type { ApiMessage } from 'claude-code'
+import type { ApiMessage, SessionMessage } from 'claude-code'
 import { bashMarkdown } from './bash'
 import { isJsonObject, type JsonObject, jsonText } from '../core/json'
 
@@ -342,8 +342,10 @@ export function messageUpdates(
     } else if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
       if (omitted?.has(block.tool_use_id)) continue
       flush()
-      const output = block.content ?? block
       const structured = structuredResults?.get(block.tool_use_id)
+      // Error context is for the model, not a tool's display result. An unpaired error keeps
+      // its status without publishing that context; the call hook can supply its result later.
+      const output = block.is_error ? structured?.rawOutput ?? 'Tool failed.' : block.content ?? block
       updates.push({
         sessionUpdate: 'tool_call_update',
         toolCallId: block.tool_use_id,
@@ -379,4 +381,14 @@ export function resultUpdate(toolCallId: string, name: string, result: unknown, 
     rawOutput: diff.length ? null : result,
     ...(diff.length ? { content: diff } : {}),
   }
+}
+
+/** Tool results stored in the transcript, without the model-facing error context. */
+export function recordedToolResults(messages: readonly SessionMessage[], root?: string): Map<string, Update> {
+  const results = new Map<string, Update>()
+  for (const tool of messages.flatMap((row) => row.toolUses)) {
+    if (tool.result === undefined) continue
+    results.set(tool.tool_use_id, resultUpdate(tool.tool_use_id, tool.tool, tool.result, !!tool.isError, root))
+  }
+  return results
 }

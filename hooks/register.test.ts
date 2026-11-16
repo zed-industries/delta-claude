@@ -1148,9 +1148,11 @@ describe('recording', () => {
       ] },
     } as never)
     fake.toolResult = {
-      filePath: '/repo/a', structuredPatch: [
-        { oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-old', '+new'] },
-      ],
+      result: {
+        filePath: '/repo/a', structuredPatch: [
+          { oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-old', '+new'] },
+        ],
+      },
     }
     await $.tool.call({ tool: 'Edit', tool_use_id: 'edit-live', file_path: '/repo/a' } as never)
     // The edit record lands after the transcript records drain, which one settle does not always reach.
@@ -1688,6 +1690,62 @@ describe('native turns', () => {
       fake.expectClean()
     })
   }
+
+  test('stopped tools never publish model-only instructions, regardless of result arrival order', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    const output = 'Error: Exit code 137\n[Request interrupted by user for tool use]\nready'
+    fake.toolResult = { result: output, isError: true }
+    const context = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed. Correction to the text above: this call was stopped while running, not refused before it ran. It may have run in part or in full, and its changes may have been written. No permission prompt was involved. Work it started elsewhere (a remote command, a background process) may still be running, so check before starting the same work again. The instruction to stop and wait still stands."
+    const _meta = { delta: {
+      work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+    } }
+    for (const callFirst of [true, false]) {
+      const id = callFirst ? 'call-first' : 'row-first'
+      const command = 'run until stopped'
+      await $.prompt.submit(prompt(command))
+      await $.turn.start(turnStart(id, command))
+      await fake.settleUntil(() => fake.starts().length === (callFirst ? 1 : 2))
+      await $.session.append({ door: 'response', uuid: `assistant-${id}`,
+        message: { type: 'assistant', role: 'assistant', content: [
+          { type: 'tool_use', id, name: 'Bash', input: { command } },
+        ] } } as never)
+      await fake.settle()
+      if (callFirst) await $.tool.call(bash(id, command))
+      const message = { type: 'user', role: 'user', content: [
+        { type: 'tool_result', tool_use_id: id, is_error: true, content: context },
+      ] }
+      const stored = await $.session.append({
+        door: 'tool-result', uuid: `result-${id}`, message,
+      } as never)
+      expect(stored.message).toEqual(message)
+      await fake.settle()
+      if (!callFirst) await $.tool.call(bash(id, command))
+      await $.turn.complete(turnComplete(id, 'aborted'))
+      await fake.settle()
+      const result = {
+        sessionUpdate: 'tool_call_update', toolCallId: id, status: 'failed',
+        rawOutput: output, content: [{ type: 'content', content: { type: 'text', text: output } }], _meta,
+      }
+      expect(fake.updates().filter((record) => record.update?.toolCallId === id)
+        .map((record) => record.update)).toEqual([
+        {
+          sessionUpdate: 'tool_call_update', toolCallId: id, name: 'Bash', title: command,
+          kind: 'execute', status: 'in_progress', rawInput: { command }, _meta,
+        },
+        callFirst ? {
+          sessionUpdate: 'tool_call_update', toolCallId: id, status: 'in_progress',
+          rawOutput: output, name: 'Bash', title: command, kind: 'execute', _meta,
+        } : {
+          sessionUpdate: 'tool_call_update', toolCallId: id, status: 'failed', rawOutput: 'Tool failed.',
+          content: [{ type: 'content', content: { type: 'text', text: 'Tool failed.' } }], _meta,
+        },
+        result,
+      ])
+    }
+    fake.expectClean()
+  })
 
   test('a queued own finish does not block a new prompt', async ($, on) => {
     const fake = fakeThreads(on)
