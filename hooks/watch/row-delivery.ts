@@ -1,14 +1,6 @@
-import { isThoughtItem } from './conversation'
-import type { WatchItem } from '../cli/thread-commands'
-
 type DrawResult = { deny?: string }
 type DrawTimer = { cancel(): void }
 export type PendingDraw = { session: string; id: string; settle(result: DrawResult): void }
-
-/** Thinking is announced once on live completion and never becomes a model row. */
-export function announceThought(before: WatchItem | undefined, item: WatchItem, snapshotDone: boolean): boolean {
-  return isThoughtItem(item) && !item.open && snapshotDone && (!before || before.open)
-}
 
 /** A successful person-visible draw is remembered even if its model row must retry. */
 export class DrawnRows {

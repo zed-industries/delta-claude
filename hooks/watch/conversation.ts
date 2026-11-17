@@ -5,7 +5,10 @@ import type { WatchComment, WatchCommentTarget, WatchItem } from '../cli/thread-
 /** Kinds shown in the pane and announced as transcript rows. */
 const MESSAGE_KINDS = new Set(['user_message', 'agent_message', 'cross_agent_message'])
 const EVENT_KINDS = new Set(['land_result', 'local_changes_forked', 'subthread_event'])
-/** Remote agents' thinking is for the person: shown in the pane and announced, never given to Claude. */
+/**
+ * Remote agents' thinking is announced to the person as one line naming who thought, as its text
+ * would flood the transcript; the Delta thread keeps the text. It is never given to Claude.
+ */
 export const THOUGHT_KIND = 'agent_thought'
 /** Each large section of a rendered item, such as tool output or one patch, keeps at most this much. */
 const SECTION_LIMIT = 8_000
@@ -77,17 +80,17 @@ export function isThoughtItem(item: WatchItem): boolean {
 
 /**
  * A completed remote item as the person reads it in a `$.ui.log` line, or undefined for kinds the
- * transcript does not show. A message or thought is one entry per paragraph under its author, with
- * markdown markers stripped and no empty entries, because each entry is a single drawn line; a tool
- * call is one line naming what ran; a thought is labelled and stays out of Claude's context. Text
- * past what one line can carry ends at a marker naming the command that reads the item back.
+ * transcript does not show. A message is one entry per paragraph under its author, with markdown
+ * markers stripped and no empty entries, because each entry is a single drawn line; a tool call is
+ * one line naming what ran; a thought is one line naming its author, without its text. Text past
+ * what one line can carry ends at a marker naming the command that reads the item back.
  */
 export function itemDisplay(item: WatchItem, thread: string): string | undefined {
   if (item.kind === 'tool_call') return toolCallDisplay(item)
   if (isEventItem(item)) return personLines('Delta activity:', personParagraphs(eventText(item)), thread)
+  if (isThoughtItem(item)) return `${itemAuthor(item)} thought`
   const paragraphs = personParagraphs(itemText(item) ?? '')
   if (!paragraphs.length) return
-  if (isThoughtItem(item)) return personLines(`${itemAuthor(item)} (thinking)`, paragraphs, thread)
   if (isMessageItem(item)) return personLines(`${itemAuthor(item)}:`, paragraphs, thread)
 }
 
@@ -472,12 +475,14 @@ function escapeMarkup(text: string): string {
 }
 
 /**
- * Remote items already added to Claude's transcript, each with the fingerprint of what was added, or
- * `OMITTED` for a snapshot item left out of Claude's context, which is never added or corrected.
+ * Remote items already added to Claude's transcript, each with the fingerprint of what was added,
+ * `OMITTED` for a snapshot item left out of Claude's context, or `THOUGHT` for a thought settled for
+ * the person alone. Neither of the last two is ever added or corrected.
  */
 export type Ledger = { thread: string; items: Record<string, string> }
 
 export const OMITTED = 'omitted'
+export const THOUGHT = 'thought'
 
 /** The id of the row standing in for a snapshot's omitted items; no item or comment has it. */
 const OMITTED_ROW = 'delta:omitted'
@@ -502,6 +507,8 @@ export type PendingRow = {
   quiet: boolean
   /** The snapshot items this row stands in for, recorded as omitted once it is added. */
   omits?: string[]
+  /** A thought, drawn for the person when `commandItem` names it; `text` is empty and Claude gets no row. */
+  personOnly?: boolean
 }
 
 /** A change to reconcile with the ledger. A removed item or comment keeps its last known state. */
@@ -612,7 +619,7 @@ export class RemoteView {
    */
   endSnapshot() {
     this.snapshotDone = true
-    const unseen = [...this.unsettled].flatMap(([id, change]) => {
+    const unseen = [...this.unsettled].flatMap(([id, change]): { id: string; text: string; drawn: boolean; thought?: boolean }[] => {
       if (!change.quiet || this.ledger.items[id] !== undefined) return []
       const commentId = keyedComment(id)
       if (commentId !== undefined) {
@@ -621,6 +628,7 @@ export class RemoteView {
         return text === undefined ? [] : [{ id, text, drawn: true }]
       }
       const item = this.items.get(id)
+      if (item && !item.open && isThoughtItem(item)) return [{ id, text: '', drawn: true, thought: true }]
       const text = item && !item.open ? renderItem(item, this.thread) : undefined
       return text === undefined ? [] : [{ id, text, drawn: isDrawnItem(item!) }]
     })
@@ -633,8 +641,10 @@ export class RemoteView {
     this.omitted = new Set(this.omitting)
     const drawn = unseen.filter((entry) => entry.drawn).map(({ id }) => id)
     this.tail = new Set(drawn.filter((id) => !this.omitted.has(id)).slice(-SNAPSHOT_TAIL))
-    this.hidden = drawn.length - this.tail.size
-    this.hiddenOmitted = drawn.filter((id) => this.omitted.has(id)).length
+    // Thoughts left undrawn go uncounted: the notice says where the person can read items Claude has.
+    const hidden = unseen.filter((entry) => entry.drawn && !entry.thought && !this.tail.has(entry.id))
+    this.hidden = hidden.length
+    this.hiddenOmitted = hidden.filter(({ id }) => this.omitted.has(id)).length
     for (const id of Object.keys(this.ledger.items)) {
       const commentId = keyedComment(id)
       if (commentId === undefined ? !this.items.has(id) : !this.comments.has(commentId))
@@ -663,9 +673,9 @@ export class RemoteView {
       const [id, change] = this.unsettled.entries().next().value!
       this.unsettled.delete(id)
       const known = this.ledger.items[id]
-      // Claude never read an omitted item, so it gets no row and no correction; a removal forgets it.
-      if (known === OMITTED || this.omitted.has(id)) {
-        if (known === OMITTED && change.removed) delete this.ledger.items[id]
+      // Claude never read an omitted item or a thought, so it gets no row and no correction; a removal forgets it.
+      if (known === OMITTED || known === THOUGHT || this.omitted.has(id)) {
+        if (known !== undefined && change.removed) delete this.ledger.items[id]
         continue
       }
       const commentId = keyedComment(id)
@@ -681,6 +691,17 @@ export class RemoteView {
         continue
       }
       if (item.open) continue
+      if (isThoughtItem(item)) {
+        // A thought is drawn once, as its author's line, where a message would be; Claude never reads it.
+        const quiet = change.quiet
+        const commandItem = !quiet || this.tail.has(id) ? id : undefined
+        let announcement: string | undefined
+        if (quiet && commandItem && this.hidden) {
+          announcement = earlierItemsNotice(this.hidden, this.thread, this.hiddenOmitted)
+          this.hidden = 0
+        }
+        return { id, text: '', fingerprint: THOUGHT, commandItem, quiet, announcement, personOnly: true }
+      }
       const fingerprint = await itemFingerprint(item)
       if (fingerprint === known) continue
       // Kinds Claude is never shown, such as thinking, get no row and no correction.
@@ -740,7 +761,10 @@ export class RemoteView {
 
 /** Where `addRows` adds rows, and how it reports; the plugin supplies Claude's host. */
 export type RowSink = {
-  /** Add one model-visible row to Claude's transcript; throws, or resolves with `deny`, when it is not added. */
+  /**
+   * Add one model-visible row to Claude's transcript, or for a `personOnly` row only draw it; throws,
+   * or resolves with `deny`, when it is not added.
+   */
   append(row: PendingRow): Promise<{ deny?: string }>
   /** Persist the ledger. */
   save(ledger: Ledger): Promise<void>
@@ -776,7 +800,7 @@ export async function addRows(view: RemoteView, sink: RowSink): Promise<void> {
       const row = await view.nextRow()
       if (!row || !sink.current()) continue
       if (row.announcement) sink.announce(row.announcement)
-      sink.debug(`Adding a row to Claude's context: ${row.text.split('\n', 1)[0]}`)
+      if (!row.personOnly) sink.debug(`Adding a row to Claude's context: ${row.text.split('\n', 1)[0]}`)
       let result: { deny?: string }
       try { result = await sink.append(row) }
       catch (error) {
@@ -788,7 +812,7 @@ export async function addRows(view: RemoteView, sink: RowSink): Promise<void> {
         continue
       }
       view.commit(row)
-      if (row.quiet) view.quietlyAdded++
+      if (row.quiet && !row.personOnly) view.quietlyAdded++
       if (++unsaved >= LEDGER_SAVE_INTERVAL) await save()
     }
   } finally {

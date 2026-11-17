@@ -6,7 +6,7 @@
 import { authorColor } from '../band/band'
 import {
   addRows, commentAction, commentAuthor, commentDisplay, commentMarkdown, commentQuote, isDrawnItem, isEventItem,
-  itemAuthor, itemDisplay, itemMarkdown, keyedComment, type PendingRow,
+  isThoughtItem, itemAuthor, itemDisplay, itemMarkdown, keyedComment, type PendingRow,
 } from './conversation'
 import { DrawQueue, EMPTY_ROW_TEXT, shownItemId } from './row-delivery'
 import { drawnRowKey, type HookEvent, type HookNext, ledgerKey, stateFor } from '../core/session-state'
@@ -117,10 +117,11 @@ export async function drainMessages(host: Host) {
 }
 
 /**
- * Add one model-visible row, and draw a message's copy for the person beside it.
+ * Add one model-visible row, and draw a message's copy for the person beside it; a thought is drawn
+ * alone, with no row for the model.
  *
- * The model reads the plugin's own `session.append` row for every kind, so a message is drawn for
- * the person in addition to it, never instead of it. Neither the drawn row nor the model's row is
+ * The model reads the plugin's own `session.append` row for every other kind, so a message is drawn
+ * for the person in addition to it, never instead of it. Neither the drawn row nor the model's row is
  * written twice: an item this session already drew is not drawn again, so a retried row repeats
  * neither. A host that will not draw the command output row leaves the model's row alone and shows
  * the person the plain notice.
@@ -137,6 +138,7 @@ async function appendRow(host: Host, session: string, row: PendingRow): Promise<
       else fallbackNotice(host, row, refusal.deny)
     }
   }
+  if (row.personOnly) return {}
   return host.session.append({ message: { type: 'user', content: [{ type: 'text', text: row.text }] } })
 }
 
@@ -299,6 +301,10 @@ export async function drawRow(
   }
   // After a restart, the stored row can draw before the watch supplies its content.
   if (!view || !item) return <Text dimColor>A Delta item that is not in this session.</Text>
+  if (isThoughtItem(item)) return <Text wrap="truncate-end">
+    <Text bold color={authorColor(item)}>{itemAuthor(item)}</Text>
+    <Text dimColor>{' thought'}</Text>
+  </Text>
   // An item with nothing left to draw, such as an agent message that only held a comment reply.
   if (!isDrawnItem(item)) return <Box />
   if (isEventItem(item)) return <Box flexDirection="column">

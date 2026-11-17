@@ -7,12 +7,11 @@ import {
   clearDoneNotice, finishProgress, reportedProgress, stopBandTimers, syncSpinner
 } from '../band/band'
 import { reconnectDelay } from '../cli/command-outcomes'
-import { conversationText, itemDisplay, type Ledger, RemoteView } from './conversation'
+import { conversationText, type Ledger, RemoteView } from './conversation'
 import { drain, loseExecution, observeTurn, recordsOffline } from '../recording/delivery'
 import { threadStatus, threadWatch, watchEvents } from '../cli/delta-cli'
 import { refreshMounts } from '../sharing/join'
 import { PresenceTracker } from './presence'
-import { announceThought } from './row-delivery'
 import {
   activation, type Binding, boundDirectory, ledgerKey, load, pauseCheckout, producerOf, recoveryAdvice, report,
   requests, resumeCheckout, save, serial, sessions, stateFor,
@@ -26,7 +25,7 @@ import {
 } from '../cli/thread-commands'
 import { errorText } from '../core/text'
 import { observeThreads } from '../subagents/thread-runs'
-import { settleRemote, showToPerson, stopRows } from './rows'
+import { settleRemote, stopRows } from './rows'
 
 type ReadyGate = { promise: Promise<ThreadReady>; resolve: (ready: ThreadReady) => void; reject: (error: unknown) => void }
 /**
@@ -509,14 +508,8 @@ function observeRemote(host: Host, session: string, event: WatchEvent) {
     const id = event.type === 'item' ? event.item.id : event.id
     if (event.type === 'remove') view.remove(event.id)
     else {
-      const before = view.items.get(id)
-      const item = event.type === 'item' ? event.item : view.appendText(event.id, event.text)
-      // Thinking never becomes a row for Claude, so it is shown to the person here, once, when it completes live.
-      if (announceThought(before, item, view.snapshotDone)) {
-        const display = itemDisplay(item, view.thread)
-        if (display) showToPerson(host, display)
-      }
-      if (event.type === 'item') view.upsert(item)
+      if (event.type === 'item') view.upsert(event.item)
+      else view.appendText(event.id, event.text)
     }
     if (!view.items.get(id)?.open) feed.openSince.delete(id)
     else if (!feed.openSince.has(id)) void host.clock.now().then((now) => {

@@ -275,12 +275,14 @@ export function testsWithHeldClockWait(test: (name: string, ...rest: TestRest) =
 
 /** Keep redrawing, as a live host does, until the plugin has drawn every row it had ready. */
 export async function drawReady($: Engine, fake: ReturnType<typeof fakeThreads>) {
+  // A drawn thought adds no row, so its draw is progress too.
+  const progress = () => fake.rows.length + fake.debugLogs.filter((log) => log.startsWith('Drew the Delta item')).length
   for (let attempt = 0; attempt < 10; attempt++) {
-    const before = fake.rows.length
+    const before = progress()
     await drawBandText($)
     // A row's draw is awaited by the row loop, so let its continuation queue the next one.
     await fake.settle()
-    if (fake.rows.length === before) return
+    if (progress() === before) return
   }
 }
 

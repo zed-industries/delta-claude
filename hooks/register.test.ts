@@ -2837,6 +2837,7 @@ describe('remote activity', () => {
     const claude = { user_id: null, name: 'Claude' }
     for (const item of [
       remoteItem('Earlier question', { id: 'a' }),
+      remoteItem('Weighing the answer', { id: 't', kind: 'agent_thought', author: claude }),
       remoteItem('Earlier answer', { id: 'b', kind: 'agent_message', author: claude }),
       remoteItem('Still typing', { id: 'c', kind: 'agent_message', author: claude, open: true }),
       remoteItem('mystery', { id: 'd', kind: 'unknown' }),
@@ -2846,6 +2847,11 @@ describe('remote activity', () => {
     await fake.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['a', 'b'])
+    // The thought in the history is drawn as its author's line, as a live one is, and Claude gets no row for it.
+    expect(fake.debugLogs).toContain('Drew the Delta item t as a command output row.')
+    const thought = JSON.stringify(await $.ui.render(commandOutput('show t', '.')))
+    expect(thought).toContain('"Claude"')
+    expect(thought).not.toContain('Weighing')
     // A message reaches the person and Claude through its command output row, not as a notice.
     expect(fake.logs.some((log) => log.startsWith('Ada:') || log.startsWith('Claude:'))).toBe(false)
     expect(fake.entered).toEqual([])
@@ -2904,7 +2910,7 @@ describe('remote activity', () => {
     fake.expectClean()
   })
 
-  test("a remote agent's thinking is announced when it completes, but never reaches Claude", async ($, on) => {
+  test("a remote agent's thinking is drawn as one line when it completes, but never reaches Claude", async ($, on) => {
     const fake = fakeThreads(on)
     await $.session.start(sessionStart)
     await fake.share($)
@@ -2913,12 +2919,34 @@ describe('remote activity', () => {
     fake.stream('thought', ' two approaches\nso far')
     await fake.settle()
     fake.upsert({ ...fake.server.items.get('thought')!, open: false })
-    // A later re-send of the completed thought is not announced again.
+    // A later re-send of the completed thought is not drawn again.
     fake.upsert({ ...fake.server.items.get('thought')!, after_id: 'moved' })
     await fake.settle()
-    // The person sees the whole thought, labelled, one entry per paragraph, and never Claude.
-    expect(fake.logs.filter((log) => log === 'Claude (thinking)')).toHaveLength(1)
-    expect(fake.logs.slice(-2)).toEqual(['Claude (thinking)', 'Weighing two approaches so far'])
+    await drawReady($, fake)
+    // The row was drawn once, so the plain line never follows; Claude got no row.
+    expect(fake.debugLogs.filter((log) => log === 'Drew the Delta item thought as a command output row.')).toHaveLength(1)
+    expect(fake.rows).toEqual([])
+    expect(fake.logs).toEqual([])
+    // The output row names who thought, in the author's color as a message header has it, without the text.
+    const tree = JSON.stringify(await $.ui.render(commandOutput('show thought', '.')))
+    expect(tree).toContain('"Claude"')
+    expect(tree).toContain(' thought')
+    expect(tree).toContain(`"color":"${personColor(personKey(claude))}"`)
+    expect(tree).not.toContain('Weighing')
+    fake.expectClean()
+  })
+
+  test("a host that never draws a thought's row shows the person the plain line instead", async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    fake.upsert(remoteItem('Weighing', { id: 'thought', kind: 'agent_thought', author: { user_id: null, name: 'Claude' }, open: true }))
+    await fake.settle()
+    fake.upsert({ ...fake.server.items.get('thought')!, open: false })
+    await fake.settle()
+    await fake.advance(2_001)
+    await fake.settle()
+    expect(fake.logs).toEqual(['Claude thought'])
     expect(fake.rows).toEqual([])
     fake.expectClean()
   })

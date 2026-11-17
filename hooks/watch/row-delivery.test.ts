@@ -1,7 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { announceThought, DrawnRows, DrawQueue, shownCommandRewrite } from './row-delivery'
-import { cliFixture } from '../testing/cli-fixtures'
-import type { WatchItem } from '../cli/thread-commands'
+import { DrawnRows, DrawQueue, shownCommandRewrite } from './row-delivery'
 
 test('unrelated commands and other plugins retain their rows', () => {
   const echo = '<command-name>/delta</command-name><command-args>show a</command-args>'
@@ -57,14 +55,6 @@ test('an item is drawn once across repeated or corrected model-row offers', asyn
   await rows.drawOnce('a', draw)
   await rows.drawOnce('a', draw)
   expect(drawn).toEqual(['a'])
-})
-
-test('a live thought is announced on completion, not while streaming or on re-send', () => {
-  const open = { ...cliFixture('item').item, kind: 'agent_thought', open: true } as WatchItem
-  const complete = { ...open, open: false }
-  expect(announceThought(undefined, open, true)).toBe(false)
-  expect(announceThought(open, complete, true)).toBe(true)
-  expect(announceThought(complete, complete, true)).toBe(false)
 })
 
 test('queued draws wait out a local turn, keep order, and settle once', async () => {

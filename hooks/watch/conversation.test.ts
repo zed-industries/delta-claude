@@ -4,7 +4,7 @@ import {
   conversationWebLink, DISPLAY_LIMIT, earlierItemsNotice, isDrawnItem, isMessageItem, itemAuthor, itemDisplay,
   itemFingerprint, itemMarkdown, type Ledger, LEDGER_SAVE_INTERVAL, MARKDOWN_LIMIT, middleTruncate, OMITTED,
   omittedItemsRow, type PendingRow, personParagraphs, type QuotedLine, RemoteView, removedItemRow, renderComment,
-  renderItem, type RowSink, SNAPSHOT_TAIL,
+  renderItem, type RowSink, SNAPSHOT_TAIL, THOUGHT,
 } from './conversation'
 import type { WatchComment, WatchCommentTarget, WatchItem } from '../cli/thread-commands'
 
@@ -202,11 +202,8 @@ describe('conversation', () => {
     expect(long).toContain('more characters; read with')
   })
 
-  test('a person-visible thought is labelled, and other or empty kinds show nothing', () => {
-    const thought = itemDisplay(item('Weighing options\nmore', { kind: 'agent_thought' }), 'thread')!
-    expect(thought).toContain('Ada')
-    expect(thought).toContain('Weighing options more')
-    expect(thought.split('\n')).toHaveLength(2)
+  test("a thought shows only who thought, not its text, and other or empty kinds show nothing", () => {
+    expect(itemDisplay(item('Weighing options\n\nmore', { kind: 'agent_thought' }), 'thread')).toBe('Ada thought')
     expect(itemDisplay(item('mystery', { kind: 'unknown' }), 'thread')).toBeUndefined()
     expect(itemDisplay(item('', { kind: 'user_message' }), 'thread')).toBeUndefined()
   })
@@ -257,10 +254,27 @@ describe('remote view', () => {
     view.upsert(item('reasoning', { id: 'd', kind: 'agent_thought' }))
     view.endSnapshot()
     const offered = await rows(view)
-    expect(offered).toHaveLength(1)
+    expect(offered).toHaveLength(2)
     expect(offered[0]).toMatchObject({ id: 'a', commandItem: 'a', quiet: true })
     expect(offered[0]?.text).toContain('Question')
-    expect(Object.keys(view.ledger.items)).toEqual(['a'])
+    // A thought is drawn for the person alone, with nothing for Claude.
+    expect(offered[1]).toEqual({ id: 'd', text: '', commandItem: 'd', quiet: true, personOnly: true })
+    expect(view.ledger.items.d).toBe(THOUGHT)
+  })
+
+  test('a live thought is drawn once when it completes, and never corrected', async () => {
+    const view = live()
+    view.upsert(item('Weighing', { id: 't', kind: 'agent_thought', open: true }))
+    expect(await rows(view)).toEqual([])
+    view.upsert(item('Weighing it', { id: 't', kind: 'agent_thought' }))
+    expect(await rows(view)).toEqual([{ id: 't', text: '', commandItem: 't', quiet: false, personOnly: true }])
+    // A re-send, an edit and a removal give Claude nothing it never read; the removal forgets the thought.
+    view.upsert(item('Weighing it', { id: 't', kind: 'agent_thought', after_id: 'moved' }))
+    view.upsert(item('Weighed it', { id: 't', kind: 'agent_thought' }))
+    expect(await rows(view)).toEqual([])
+    view.remove('t')
+    expect(await rows(view)).toEqual([])
+    expect(view.ledger.items).toEqual({})
   })
 
   test('a live item gets no row while open, then one command row when complete', async () => {
@@ -501,8 +515,11 @@ describe('adding rows', () => {
   test('a long snapshot reaches Claude whole, but only its newest items are drawn, after a notice', async () => {
     const view = new RemoteView('thread', { thread: 'thread', items: {} })
     const count = SNAPSHOT_TAIL + 7
+    const early = item('early reasoning', { id: 'early', kind: 'agent_thought' })
+    const thought = item('reasoning', { id: 'thought', kind: 'agent_thought' })
+    view.upsert(early)
     for (let index = 0; index < count; index++) view.upsert(item(`item ${index}`, { id: `i${index}` }))
-    view.upsert(item('reasoning', { id: 'thought', kind: 'agent_thought' }))
+    view.upsert(thought)
     // Nothing is added while the snapshot arrives, since its newest items are not known yet.
     const sink = fakeSink()
     await addRows(view, sink)
@@ -511,15 +528,19 @@ describe('adding rows', () => {
     await addRows(view, sink)
     expect(sink.appended).toHaveLength(count)
     const ids = Array.from({ length: count }, (_, index) => `i${index}`)
-    expect(sink.drawn).toEqual(ids.slice(-SNAPSHOT_TAIL))
-    expect(sink.announced).toEqual([earlierItemsNotice(7, 'thread')])
+    // A thought takes its place among the newest drawn items; an older one is settled undrawn and uncounted.
+    expect(sink.drawn).toEqual([...ids.slice(-(SNAPSHOT_TAIL - 1)), 'thought'])
+    expect(sink.announced).toEqual([earlierItemsNotice(count - (SNAPSHOT_TAIL - 1), 'thread')])
     expect(sink.announced[0]).toContain('delta thread show thread')
+    expect([view.ledger.items.early, view.ledger.items.thought]).toEqual([THOUGHT, THOUGHT])
     // Live items are drawn as ever, and a reconnect snapshot draws nothing Claude already has.
     view.upsert(item('live', { id: 'live' }))
     await addRows(view, sink)
     expect(sink.drawn.at(-1)).toBe('live')
     view.reset()
+    view.upsert(early)
     for (const id of [...ids, 'live']) view.upsert(view.ledger.items[id] ? item(id === 'live' ? 'live' : `item ${id.slice(1)}`, { id }) : item(id, { id }))
+    view.upsert(thought)
     view.endSnapshot()
     const drawn = sink.drawn.length
     await addRows(view, sink)
@@ -646,7 +667,7 @@ function fakeSink(overrides: Partial<RowSink> = {}) {
   const sink = {
     appended: [] as string[], drawn: [] as string[], saved: [] as Ledger[], announced: [] as string[], failures: [] as string[],
     async append(row: PendingRow) {
-      sink.appended.push(row.text)
+      if (!row.personOnly) sink.appended.push(row.text)
       if (row.commandItem !== undefined) sink.drawn.push(row.commandItem)
       return {} as { deny?: string }
     },
