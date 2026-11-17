@@ -325,6 +325,20 @@ export function expectOfferedItems(fake: ReturnType<typeof fakeThreads>, ids: st
  * Tests change behavior through the returned object's mutable fields rather
  * than registering competing hooks for the same events.
  */
+/**
+ * An agent as `agent.list` reports it, from the fields a test cares about.
+ *
+ * Claude Code 2.1.326 requires fields earlier versions do not declare, so the defaults are spread
+ * from a value: in an object literal they would be unknown properties under the older types.
+ */
+export function agentInfo(fields: Pick<AgentInfo, 'id' | 'description' | 'type' | 'status'> & Partial<AgentInfo>): AgentInfo {
+  return { ...AGENT_DEFAULTS, ...fields } as AgentInfo
+}
+
+const AGENT_DEFAULTS = {
+  kind: 'local_agent', taskStatus: 'running', label: '', startTime: 0, cwd: '/', tokenCount: 0, tokenSamples: [], hasRow: false,
+}
+
 export function fakeThreads(hostOn: On, options: {
   session?: string
   thread?: string
@@ -888,11 +902,11 @@ export function fakeThreads(hostOn: On, options: {
   on('agent.list', () => ({ value: fake.agents }))
   on('agent.spawn', async ($, e) => {
     const agentId = e.resume?.agentId ?? `agent${++fake.spawns}`
-    if (!e.resume && !e.workflow) fake.agents.push({
+    if (!e.resume && !e.workflow) fake.agents.push(agentInfo({
       id: agentId, description: e.description, type: e.fork ? 'fork' : e.subagentType, status: 'running',
       ...e.parentAgentId ? { parentId: e.parentAgentId } : {}, ...e.name ? { name: e.name } : {},
       ...e.isTeammate ? { teammateId: `${e.name ?? agentId}@team` } : {},
-    })
+    }))
     if (fake.holdSpawn) await fake.holdSpawn
     return { model: 'test-model', agentId }
   })

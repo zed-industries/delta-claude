@@ -1,6 +1,6 @@
 import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import {
-  abovePrompt, bash, CHECKOUT, CONFIG, drawBandText, fakeThreads, FOLDERS, LIVE, MOUNTS, prompt, remoteItem, sessionEnd,
+  abovePrompt, agentInfo, bash, CHECKOUT, CONFIG, drawBandText, fakeThreads, FOLDERS, LIVE, MOUNTS, prompt, remoteItem, sessionEnd,
   sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart,
 } from '../testing/fake-thread-commands'
 import { itemFingerprint } from '../watch/conversation'
@@ -737,7 +737,7 @@ describe('joining', () => {
   test('background agents refuse join before any native side effect', async ($, on) => {
     const fake = sharedThread(on, $)
     await $.session.start(sessionStart)
-    fake.agents = [{ id: 'bg', type: 'teammate', description: 'writing', status: 'running' }]
+    fake.agents = [agentInfo({ id: 'bg', type: 'teammate', description: 'writing', status: 'running' })]
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
     await finishJoin(fake)
     expect(fake.delta()).toEqual([])

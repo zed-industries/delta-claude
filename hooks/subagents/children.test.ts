@@ -1,7 +1,7 @@
 import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import {
-  bash, CHECKOUT, childActor, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
+  agentInfo, bash, CHECKOUT, childActor, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
   turnComplete, turnStart, userText,
 } from '../testing/fake-thread-commands'
 
@@ -276,8 +276,8 @@ describe('subagents', () => {
     const fake = fakeThreads(on, { messages: [userText('delegate')] })
     await $.session.start(sessionStart)
     fake.agents = [
-      { id: 'earlier', description: 'Read the docs', type: 'general-purpose', status: 'completed' },
-      { id: 'running', description: 'Run the tests', type: 'general-purpose', status: 'running' },
+      agentInfo({ id: 'earlier', description: 'Read the docs', type: 'general-purpose', status: 'completed' }),
+      agentInfo({ id: 'running', description: 'Run the tests', type: 'general-purpose', status: 'running' }),
       { id: 'mate', description: 'Teammate', type: 'teammate', status: 'idle', teammateId: 'mate@team' } as never,
     ]
     // A finished foreground agent is no longer listed; only its call's result names it.
@@ -331,8 +331,8 @@ describe('subagents', () => {
     const fake = fakeThreads(on, { messages: [userText('delegate')] })
     await $.session.start(sessionStart)
     fake.agents = [
-      { id: 'outer', description: 'Plan the fix', type: 'general-purpose', status: 'completed' },
-      { id: 'nested', description: 'Check the parser', type: 'general-purpose', status: 'completed', parentId: 'outer' },
+      agentInfo({ id: 'outer', description: 'Plan the fix', type: 'general-purpose', status: 'completed' }),
+      agentInfo({ id: 'nested', description: 'Check the parser', type: 'general-purpose', status: 'completed', parentId: 'outer' }),
     ]
     fake.unreadableAgents.add('outer')
     await fake.share($)
@@ -344,7 +344,7 @@ describe('subagents', () => {
   test('a subagent running when sharing starts stops when Delta takes it over, and its own checkout reaches Delta', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('delegate')] })
     await $.session.start(sessionStart)
-    fake.agents = [{ id: 'apart', description: 'Fix the lexer', type: 'general-purpose', status: 'running' }]
+    fake.agents = [agentInfo({ id: 'apart', description: 'Fix the lexer', type: 'general-purpose', status: 'running' })]
     fake.summaries = [{ role: 'assistant', text: '', toolUses: [{
       tool_use_id: 'apart-call', tool: 'Agent',
       input: { description: 'Fix the lexer', subagent_type: 'general-purpose', isolation: 'worktree', run_in_background: true },
@@ -775,7 +775,7 @@ function agentCall(fields: Record<string, unknown> = {}) {
 /** The subagent Claude starts for the plugin's own spawn, as `$.agent.list()` names it: by the thread's name. */
 function threadAgent(fake: ReturnType<typeof fakeThreads>): string {
   const agentId = `thread-agent${fake.agents.length + 1}`
-  fake.agents.push({ id: agentId, description: 'Release notes', type: 'general-purpose', status: 'running' })
+  fake.agents.push(agentInfo({ id: agentId, description: 'Release notes', type: 'general-purpose', status: 'running' }))
   return agentId
 }
 
