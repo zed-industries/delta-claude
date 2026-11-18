@@ -33,7 +33,7 @@ export async function authenticationHost(host: Host): Promise<AuthenticationHost
     waiting: (waitingFor) => {
       if (waitingFor) {
         browserWait = { on: waitingFor, stop }
-        setProgress(host, waitingFor === 'terms' ? "Waiting for Delta's beta terms…" : 'Waiting for Delta sign-in…', 'active')
+        setProgress(host, waitingFor === 'terms' ? "Waiting for you to accept Delta's terms…" : 'Waiting for Delta sign-in…', 'active')
         progress = reportedProgress()
         return
       }
@@ -54,7 +54,7 @@ export async function offerToStopWaiting(host: Host): Promise<boolean> {
   if (!wait) return false
   const stop = 'Stop waiting'
   const answer = await claudeInteraction(host).ask(wait.on === 'terms'
-    ? 'Delta is waiting for you to accept its beta terms in your browser. Stop waiting?'
+    ? 'Delta is waiting for you to accept its terms in your browser. Stop waiting?'
     : 'Delta is waiting for you to finish signing in with your browser. Stop waiting?',
   { options: [stop, 'Keep waiting'], header: 'Delta' }).catch(() => undefined)
   if (answer === stop) wait.stop.abort()

@@ -4,7 +4,7 @@ import { commandErrorFromEnvelope } from './thread-commands'
 import { isJsonObject, type JsonObject } from '../core/json'
 
 /**
- * Delta needs something from the person first, such as signing in or accepting its beta terms on
+ * Delta needs something from the person first, such as signing in or accepting its terms on
  * the web, and they did not do it when offered. The message is complete, ready to
  * show as is, never wrapped in a failure.
  */
@@ -28,7 +28,7 @@ export type AuthenticationHost = {
 /** What sign-in can wait on the person to finish in their browser. */
 export type BrowserWait = 'sign-in' | 'terms'
 
-/** How often, and for how long, sign-in waits for the person to accept the beta terms on the web. */
+/** How often, and for how long, sign-in waits for the person to accept the terms on the web. */
 const TERMS_POLL_MS = 2_000
 const TERMS_WAIT_MS = 15 * 60_000
 
@@ -87,18 +87,18 @@ export async function requireAuthentication(
       throw new Error('Delta returned no authentication status; update Delta and retry')
     return value
   }
-  // Unaccepted beta terms need the person on the web, so opening them is offered rather than logged.
+  // Unaccepted terms need the person on the web, so opening them is offered rather than logged.
   // Here and for sign-in, a dismissed dialog, or a surface that cannot ask, declines like "Not now".
   const resolveAccess = async (value: JsonObject) => {
     if (value.reason !== 'terms_not_accepted') throw authFailure(value, recovery, retry)
     const url = typeof value.url === 'string' ? value.url : 'https://dashboard.zed.dev/delta-beta'
-    const accept = 'Open the beta terms'
-    const answer = await host.ask('Delta needs you to accept its beta terms before it can sync. Open them in your browser?',
+    const accept = 'Open the terms'
+    const answer = await host.ask('Delta needs you to accept its terms before it can sync. Open them in your browser?',
       [accept, 'Not now']).catch(() => undefined)
     await check()
     if (answer !== accept)
-      throw new AccessRequiredError(`Delta's beta terms aren't accepted. Accept them at ${url}, then run ${retry} again.`)
-    if (!await host.open(url)) await notice(`Accept Delta's beta terms in your browser to continue: ${url}`)
+      throw new AccessRequiredError(`Delta's terms aren't accepted. Accept them at ${url}, then run ${retry} again.`)
+    if (!await host.open(url)) await notice(`Accept Delta's terms in your browser to continue: ${url}`)
     wait('terms')
     // The app keeps the denied sign-in and hears when the terms are accepted, so its status turns
     // signed in on its own: continue then, with no retry for the person to run.
@@ -109,7 +109,7 @@ export async function requireAuthentication(
       if (status.status === 'signing_in' || (status.status === 'access_denied' && status.reason === 'terms_not_accepted')) continue
       throw authFailure(status, recovery, retry)
     }
-    throw new AccessRequiredError(`Delta's beta terms still aren't accepted. Accept them at ${url}, then run ${retry} again.`)
+    throw new AccessRequiredError(`Delta's terms still aren't accepted. Accept them at ${url}, then run ${retry} again.`)
   }
   try {
     const status = await request(['status'])
@@ -141,7 +141,7 @@ export async function requireAuthentication(
   } catch (error) {
     // Stopping is the person's choice, so it is reported as one, not as a failure.
     if (host.stop.aborted && waitingOn) throw new AccessRequiredError(waitingOn === 'terms'
-      ? `Stopped waiting for Delta's beta terms. Run ${retry} again to accept them.`
+      ? `Stopped waiting for you to accept Delta's terms. Run ${retry} again to accept them.`
       : `Stopped waiting for Delta sign-in. Run ${retry} again to sign in.`)
     throw error
   } finally {
@@ -154,7 +154,7 @@ export async function requireAuthentication(
 /** The error for an authentication answer sign-in cannot continue from; its fields are as the CLI reported them. */
 function authFailure(value: JsonObject, recovery: string, retry: string): Error {
   switch (value.status) {
-    // `requireAuthentication` offers to open the beta terms before reaching here.
+    // `requireAuthentication` offers to open the terms before reaching here.
     case 'access_denied': return new Error(`Delta access denied: ${value.message ?? 'account access is required'}.${value.url ? ` ${value.url}` : ''} ${recovery}`)
     case 'signed_out': return new Error(`Delta signed out before sign-in finished. Retry ${retry}.`)
     case 'wrong_account': return new Error('Delta is using another account’s data directory. Resolve the account in Delta and retry; the plugin will not switch accounts.')

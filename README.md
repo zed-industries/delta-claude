@@ -101,7 +101,7 @@ The plugin offers setup once per repository: right after you install it, or the
 first time you start a session in a repository that isn't set up yet.
 
 If automatic sync needs you to sign in, an interactive session asks before opening
-your browser. If Delta's beta terms still need accepting, it offers to open them too.
+your browser. If Delta's terms still need accepting, it offers to open them too.
 You can keep working while you finish; that same session then syncs, including
 messages recorded while it waited. To stop waiting, run `/delta-share` again.
 Headless sessions never open a browser.
