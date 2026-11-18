@@ -15,6 +15,9 @@ import {
 } from '../cli/delta-cli'
 import { worktreeHistory } from '../cli/command-outcomes'
 import { attachWorktree, managedCheckoutRefusal, mountCheckout } from './checkout'
+import {
+  finishSubthread, managedCheckoutOf, shareInManagedCheckout, stopUnfinishedSubthread, withoutUnsentRecords,
+} from './managed-checkout'
 import { followTranscript } from '../setup/activation'
 import { activeBackgroundAgents } from './lifecycle'
 import { authenticationHost, claudeInteraction } from '../setup/interaction'
@@ -115,6 +118,14 @@ export async function pauseSession(host: Host, session: string): Promise<Session
   const runtime = stateFor(session)
   const binding = runtime.binding
   if (binding?.stopped) return { kind: 'already paused' }
+  // Read from storage: a session that started moving into its subthread never activated a binding.
+  const stored = await serial(() => load(host, session))
+  if (stored.managedCheckout?.choice === 'subthread' && !stored.joined && !stored.joinTransition) {
+    const refusal = await stopUnfinishedSubthread(host, session, stored)
+    if (refusal) return { kind: 'refused', reason: refusal }
+    if (!requests.join && !requests.share) clearProgress(host)
+    return { kind: 'paused', queued: 0 }
+  }
   if (!binding?.snapshot) return { kind: 'none' }
   if (binding.joined || binding.joinTransition)
     return { kind: 'refused', reason: "it joined a shared thread and works in that thread's folder, which it leaves when the session ends" }
@@ -200,7 +211,15 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   await assertShareSession(host, request)
   const runtime = stateFor(session)
   if (runtime.currentTurnId) throw new Error('Wait for the current Claude turn to finish before sharing or reattaching')
+  if (runtime.enteringSubthread)
+    throw new ShareRefusalError('this session is still moving into its subthread; wait for the band to say it is recording')
   let binding = await serial(() => load(host, session))
+  if (binding.managedCheckout?.choice === 'subthread') {
+    if (binding.joined)
+      throw new ShareRefusalError(`this session already records in its subthread; run ${recoveryCommand(binding)} if it stopped syncing`)
+    // A move into the subthread that stopped partway finishes from where it stopped.
+    return await finishSubthread(host, session, binding.managedCheckout.thread)
+  }
   if (binding.joined || binding.joinTransition)
     throw new Error(`This session joined an already shared thread. Retry ${recoveryCommand(binding)} to reconnect; joining never attaches or republishes a checkout.`)
   if (runtime.unsaved.length) await flushUnsaved(host, session)
@@ -215,6 +234,22 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   await assertShareSession(host, request)
   await requireContract(host, session)
   await assertShareSession(host, request)
+  // A checkout Delta manages for a thread belongs to it, so the session continues as its subthread.
+  // A paused session keeps the thread it was recording to; one paused before it had a thread sent
+  // nothing, and starts its subthread with the whole conversation.
+  if (!binding.thread) {
+    const root = await checkoutRoot(host)
+    const managed = await managedCheckoutOf(host, root)
+    await assertShareSession(host, request)
+    if (managed) return await shareInManagedCheckout(host, session, managed, {
+      emails: request.choose?.emails ?? [], check,
+      // Claude moves out of `root` once the history is staged, so later checks ignore the folder.
+      stage: async () => {
+        if (binding.stopped) await serial(async () => save(host, withoutUnsentRecords(await load(host, session))))
+        if (!binding.snapshot || binding.stopped) await exportHistory(host, request, root)
+      },
+    })
+  }
   // Asked before anything is staged, so declining leaves the session exactly as it was.
   const chosen: AudienceAnswer = request.choose
     ? await chooseAudience(host, session, request.choose.emails) : request.audience ?? { kind: 'organization' }
@@ -238,33 +273,7 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
   // A session paused with /delta pause already holds its thread and everything it recorded before:
   // sharing resumes it there, once its checkout mounts, rather than exporting the conversation again.
   const stoppedAt = binding.stopped
-  if (!binding.snapshot && !stoppedAt) {
-    let release!: () => void
-    snapshotBarrier.gate = new Promise<void>((resolve) => { release = resolve })
-    try {
-      if (snapshotBarrier.inFlight) await new Promise<void>((resolve) => { snapshotBarrier.quiet = resolve })
-      await assertShareSession(host, request)
-      // Appends begun after the gate cannot reach the transcript until the snapshot is read.
-      setProgress(host, 'Exporting earlier messages…', 'active', [2, 5])
-      const snapshot = snapshotMessages(await host.session.apiMessages())
-      await assertShareSession(host, request)
-      setProgress(host, `Exporting ${snapshot.length} earlier messages…`, 'active', [2, 5])
-      // Snapshot only the normalized, post-compaction main conversation.
-      await stageMessages(host, request, root, snapshot, (index) => `snapshot:${index}`,
-        (state) => ({ ...state, snapshot: true }))
-      runtime.binding = await serial(() => load(host, session))
-      // The agents that already ran become child threads too. A failure leaves them unrecorded
-      // and never fails the share.
-      if (recordsChildren(session)) {
-        try { await adoptExistingChildren(host, session) }
-        catch (error) { await host.ui.log(`Delta could not record this session's earlier subagents: ${errorText(error)}`, { to: 'transcript' }) }
-      }
-    } finally {
-      forgetStagedTools(session)
-      release()
-      snapshotBarrier.gate = undefined
-    }
-  }
+  if (!binding.snapshot && !stoppedAt) await exportHistory(host, request, root)
   // Reattachment is the explicit recovery: it lifts every pause but the watcher's, which going live lifts.
   runtime.pauses.clear()
   runtime.checkoutRefusal = undefined
@@ -460,6 +469,39 @@ export async function joinedBindingAt(host: Host, directory: string): Promise<Bi
     const binding = await storedBinding(host, storeKey)
     if (!binding?.joined || !binding.thread) continue
     if (binding.mounts?.some((mount) => samePath(mount.directory, directory))) return binding
+  }
+}
+
+/**
+ * Stage the conversation so far as the session's first records, holding back rows appended meanwhile
+ * until the snapshot is read, and record the subagents that already ran as child threads.
+ */
+async function exportHistory(host: Host, request: ShareRequest, root: string) {
+  const { session } = request
+  let release!: () => void
+  snapshotBarrier.gate = new Promise<void>((resolve) => { release = resolve })
+  try {
+    if (snapshotBarrier.inFlight) await new Promise<void>((resolve) => { snapshotBarrier.quiet = resolve })
+    await assertShareSession(host, request)
+    // Appends begun after the gate cannot reach the transcript until the snapshot is read.
+    setProgress(host, 'Exporting earlier messages…', 'active', [2, 5])
+    const snapshot = snapshotMessages(await host.session.apiMessages())
+    await assertShareSession(host, request)
+    setProgress(host, `Exporting ${snapshot.length} earlier messages…`, 'active', [2, 5])
+    // Snapshot only the normalized, post-compaction main conversation.
+    await stageMessages(host, request, root, snapshot, (index) => `snapshot:${index}`,
+      (state) => ({ ...state, snapshot: true }))
+    stateFor(session).binding = await serial(() => load(host, session))
+    // The agents that already ran become child threads too. A failure leaves them unrecorded
+    // and never fails the share.
+    if (recordsChildren(session)) {
+      try { await adoptExistingChildren(host, session) }
+      catch (error) { await host.ui.log(`Delta could not record this session's earlier subagents: ${errorText(error)}`, { to: 'transcript' }) }
+    }
+  } finally {
+    forgetStagedTools(session)
+    release()
+    snapshotBarrier.gate = undefined
   }
 }
 

@@ -23,6 +23,7 @@ import {
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import { offerOnboarding, type OnboardingStore, releaseOnboarding } from './setup'
+import { offerManagedCheckout } from '../sharing/managed-checkout'
 import { checkoutRoot, joinedBindingAt } from '../sharing/share'
 import { restoreAbandonedWorktrees, storedChildBinding } from '../subagents/subagents'
 import {
@@ -552,6 +553,9 @@ export async function startSession(host: Host, session: string, loadedMidSession
     try { root = await checkoutRoot(host) }
     // Outside a checkout there is nothing to record or offer.
     catch { return }
+    // A checkout Delta manages for a thread belongs to it: the session continues there or not at all.
+    // Delta records a session it runs over ACP itself, so only other sessions are asked.
+    if (!await host.env.deltaAcpSession() && await offerManagedCheckout(host, session, root, newSession)) return
     const path = policyPath(root)
     try { policy = readProjectPolicy(await env.readFile(path)).policy }
     catch (error) {
@@ -575,6 +579,8 @@ export async function startSession(host: Host, session: string, loadedMidSession
     // Nothing below records, so the session's activity never waits on the setup offer's dialog.
     decideCapture(session)
   }
+  // A session that ended while it started is offered nothing.
+  if (activation.session !== session) return
   // Headless sessions get no reminder and are never offered setup; only an interactive surface shows them.
   if (!hasInteractiveSurface(await sessionSurfaces(host))) return
   stateFor(session).reminder = syncReminder(policy)

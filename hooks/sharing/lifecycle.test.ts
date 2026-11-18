@@ -1,10 +1,21 @@
 import { expect, test } from 'claude-code/testing'
 import {
-  activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, promptGate,
+  activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, promptGate, separateGitDirectory,
   releasesMounts, sessionDirectories, worktreeChanges,
 } from './lifecycle'
 import { cliFixture } from '../testing/cli-fixtures'
 import type { MountedThread, ThreadMount, ThreadState } from '../cli/thread-commands'
+
+test("only a checkout with a Git directory of its own, as Delta's are, could be one Delta made", () => {
+  for (const text of [
+    'gitdir: /repo/.delta/clones/abc/repo.git\n', String.raw`gitdir: C:\repo\.delta\clones\abc\repo.git`,
+    'gitdir: /Users/a/Library/Application Support/Delta/worktrees/abc/repo.git',
+  ]) expect(separateGitDirectory(text)).toBeDefined()
+  for (const text of [
+    'gitdir: /repo/.git/worktrees/feature\n', 'gitdir: ../.git/modules/vendor', String.raw`gitdir: C:\repo\.git\worktrees\x`,
+    '', 'not a git file',
+  ]) expect(separateGitDirectory(text)).toBeUndefined()
+})
 
 test('only exit reasons release session mounts', () => {
   for (const reason of ['prompt_input_exit', 'logout', 'other']) expect(releasesMounts(reason)).toBe(true)

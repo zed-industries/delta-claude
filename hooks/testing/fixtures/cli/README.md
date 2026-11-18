@@ -14,7 +14,7 @@ only generated identities and absolute caller paths.
 | `thread-mount.json` | External owner and mounted paths; `thread_mounts_name_their_owner_and_report_mounted_paths`. |
 | `worktree-{attach,detach}.json` | Membership-only receipts naming the worktree reference and thread; `worktree_membership_commands_require_a_thread_and_round_trip_references`. |
 | `worktree-{create,mount}.json` | Ordinary receipts; `worktree_results_have_scriptable_output_and_typed_failures`. |
-| `worktree-list.json` | Local references, waiting state, and owners; `local_handles_and_waiting_messages_survive_cli_ipc_and_rendering`. |
+| `worktree-list.json` | Local references, waiting state, and owners, and a managed checkout with its owning thread; `local_handles_and_waiting_messages_survive_cli_ipc_and_rendering`. |
 | `error-codes.json` | The failure codes recording commands publish, each with `retryable` where every cause agrees; an empty object means retryability varies by cause. `every_error_envelope_says_whether_the_same_request_may_succeed_later` iterates the thread, worktree and authentication failure enums, plus general CLI failures, renders real envelopes in both the published and the specific form, and requires every published code to have a cause. The specific codes, which recording commands carry as a diagnostic `reason`, and messages are intentionally not pinned by this table. |
 
 Recording host integration tests also compare status, readiness and turn/presence

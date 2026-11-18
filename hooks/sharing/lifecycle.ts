@@ -2,6 +2,16 @@ import type { MountedThread, ThreadMount, ThreadState } from '../cli/thread-comm
 import { samePath } from '../core/paths'
 import type { Host } from '../core/host'
 
+/**
+ * The Git directory a checkout's `.git` file (`text`) names, unless it lies inside a repository's
+ * `.git` directory, where Git keeps a linked worktree's and a submodule's. Every checkout Delta makes
+ * names one of its own elsewhere.
+ */
+export function separateGitDirectory(text: string): string | undefined {
+  const target = /^gitdir:\s*(.+?)\s*$/m.exec(text)?.[1]?.replaceAll('\\', '/')
+  return target && !/(^|\/)\.git\//.test(`${target}/`) ? target : undefined
+}
+
 /** Clearing and resuming switch sessions; only exiting releases their mounts. */
 export function releasesMounts(reason: string): boolean {
   return ['prompt_input_exit', 'logout', 'other'].includes(reason)

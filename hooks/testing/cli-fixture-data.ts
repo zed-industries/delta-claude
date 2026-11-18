@@ -18,6 +18,6 @@ export const cliFixtureData: Record<string, any> = {
   "worktree-attach": {"operation":"attached","reference":"8a0bcf06-6776-4a54-853c-d3f8c2f8a91e#t=timeline","thread_id":"THREAD"},
   "worktree-create": {"operation":"created","worktree_id":"worktree_example","reference":"worktree_example"},
   "worktree-detach": {"operation":"detached","reference":"8a0bcf06-6776-4a54-853c-d3f8c2f8a91e#t=timeline","thread_id":"THREAD"},
-  "worktree-list": {"operation":"listed","worktrees":[{"worktree_id":null,"reference":"8a0bcf06-6776-4a54-853c-d3f8c2f8a91e#t=timeline","repository":"project","timeline":"timeline","directories":[{"directory":"/checkout","state":"waiting","error":"waiting for a connection to Delta","owners":["thread_example"]}]}]},
+  "worktree-list": {"operation":"listed","worktrees":[{"worktree_id":null,"reference":"8a0bcf06-6776-4a54-853c-d3f8c2f8a91e#t=timeline","repository":"project","timeline":"timeline","directories":[{"directory":"/checkout","state":"waiting","error":"waiting for a connection to Delta","owners":["thread_example"]}]}],"managed_checkouts":[{"directory":"/managed","reference":"4b1fcd1a-3c36-4c48-9f1c-7c1f0d2f6a01#t=timeline","thread_id":"thread_owner"}]},
   "worktree-mount": {"operation":"mounted","reference":"8a0bcf06-6776-4a54-853c-d3f8c2f8a91e#t=timeline","directory":"/mount"},
 }

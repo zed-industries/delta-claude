@@ -120,6 +120,18 @@ stays paused if you resume the session. Who can see the thread doesn't change.
 unless Claude compacted the conversation in between. A session that joined a thread
 with `/delta-join` can't be paused, since it works in the thread's folder.
 
+A session you start in a Delta thread's own checkout, such as a terminal opened
+in a desktop thread's folder, asks at its start how to work there:
+
+- **Continue as a subthread** records the conversation as a subthread of that
+  thread, visible to whoever can see it. Claude moves to its own checkout of the
+  same files, which stay in sync with the thread's.
+- **Don't sync this session** records nothing. Files changed in that folder still
+  sync to the thread, as any change there does.
+
+`/delta-share` in such a session offers the subthread instead of a thread of its
+own, bringing the conversation so far with it.
+
 ### Commands
 
 Each command also works as `/delta <command>`, such as `/delta share`. `/delta` on

@@ -1,11 +1,12 @@
 import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import {
-  abovePrompt, agentInfo, bash, CHECKOUT, CONFIG, drawBandText, fakeThreads, FOLDERS, LIVE, MOUNTS, prompt, remoteItem, sessionEnd,
-  sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart,
+  abovePrompt, agentInfo, bash, CHECKOUT, CONFIG, drawBandText, fakeThreads, FOLDERS, LIVE, MOUNTS, prompt, remoteItem,
+  sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart, typedDelta, userText,
 } from '../testing/fake-thread-commands'
 import { itemFingerprint } from '../watch/conversation'
 import { cliFixture } from '../testing/cli-fixtures'
 import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink } from './handoff'
+import { CONTINUE_AS_SUBTHREAD, DONT_SYNC } from './managed-checkout'
 import { transcriptCandidate } from '../core/transcript'
 
 tier('user')
@@ -1101,7 +1102,145 @@ describe('joining', () => {
 
 })
 
+describe("a session in a Delta thread's checkout", () => {
+  test('continues as a subthread of that thread, in a checkout of its own, recording from its first prompt', async ($, on) => {
+    const fake = managedCheckout(on, $)
+    fake.answerQuestion = (question) => answer(question, CONTINUE_AS_SUBTHREAD)
+    await $.session.start(sessionStart)
+    await fake.settleUntil(() => (fake.store.get(`session:${fake.session}`) as any)?.joined === true)
+    await fake.settle()
+    expect(fake.questions).toHaveLength(1)
+    expect(JSON.stringify(fake.questions[0])).toContain('“Review the SDK”, which everyone on your Delta team can see')
+    expect(fake.subthreadParent).toBe(PARENT)
+    // The session's own mount, not a join of someone's thread, and Claude moved into it.
+    expect(fake.mountRequests).toEqual([{ owner: fake.session, folder: true, join: false }])
+    expect(fake.cwd).toBe(`${MOUNTS}/${fake.session}/delta`)
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({
+      joined: true, thread: fake.threadId, managedCheckout: { thread: PARENT, choice: 'subthread' },
+    })
+    expect((await $.prompt.submit(prompt('in the subthread'))).drop).toBeUndefined()
+    await $.tool.call(bash('in-subthread', 'echo recorded'))
+    await fake.settleUntil(() => fake.updates().some((record) => record.update?.toolCallId === 'in-subthread'))
+    // Nothing gave the session a thread of its own or adopted the desktop's checkout.
+    for (const operation of ['worktree create', 'attach', 'worktree mount', 'share'])
+      expect(fake.operations()).not.toContain(operation)
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test("that chose not to sync records nothing and isn't asked again when it resumes", async ($, on) => {
+    const fake = managedCheckout(on, $)
+    fake.answerQuestion = (question) => answer(question, DONT_SYNC)
+    await $.session.start(sessionStart)
+    await fake.settle()
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ snapshot: false, managedCheckout: { thread: PARENT, choice: 'off' } })
+    expect((await $.prompt.submit(prompt('unsynced'))).drop).toBeUndefined()
+    await $.tool.call(bash('unsynced', 'echo local'))
+    await $.session.end(sessionEnd(fake.session))
+    fake.turns = 1
+    await $.session.start(sessionStart)
+    await fake.settle()
+    expect(fake.questions).toHaveLength(1)
+    expect(fake.records()).toEqual([])
+    expect(fake.operations()).not.toContain('create')
+    fake.expectClean()
+  })
+
+  test("in a bare repository's Git worktree asks Delta nothing at its start", async ($, on) => {
+    const fake = managedCheckout(on, $)
+    fake.files.set(`${CHECKOUT}/.git`, 'gitdir: /repository.git/worktrees/feature\n')
+    fake.files.set('/repository.git/worktrees/feature/commondir', '../..\n')
+    await $.session.start(sessionStart)
+    await fake.settle()
+    expect(fake.operations()).not.toContain('worktree list')
+    fake.expectClean()
+  })
+
+  test('whose move into the subthread fails holds its prompts until /delta-share finishes the move', async ($, on) => {
+    const fake = managedCheckout(on, $)
+    fake.answerQuestion = (question) => answer(question, CONTINUE_AS_SUBTHREAD)
+    fake.commandFault = { operation: 'mount', code: 'app_unavailable', message: 'Delta is unreachable', retryable: true }
+    await $.session.start(sessionStart)
+    await fake.settle()
+    expect((await $.prompt.submit(prompt('while broken'))).drop).toContain('Run /delta-share to retry')
+    fake.commandFault = undefined
+    await $.command.run(shareCommand)
+    await fake.settleUntil(() => (fake.store.get(`session:${fake.session}`) as any)?.joined === true)
+    await fake.settle()
+    // The move resumes with the same subthread rather than asking or creating another.
+    expect(fake.questions).toHaveLength(1)
+    expect(fake.operations().filter((operation) => operation === 'create')).toHaveLength(2)
+    expect((await $.prompt.submit(prompt('after the retry'))).drop).toBeUndefined()
+    await $.tool.call(bash('after-retry', 'echo recorded'))
+    await fake.settleUntil(() => fake.updates().some((record) => record.update?.toolCallId === 'after-retry'))
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('whose move into the subthread fails can be paused, and keeps working without Delta', async ($, on) => {
+    const fake = managedCheckout(on, $)
+    fake.answerQuestion = (question) => answer(question, CONTINUE_AS_SUBTHREAD)
+    fake.commandFault = { operation: 'mount', code: 'app_unavailable', message: 'Delta is unreachable', retryable: true }
+    await $.session.start(sessionStart)
+    await fake.settle()
+    expect((await $.prompt.submit(prompt('while broken'))).drop).toContain('/delta pause')
+    await $.command.run(typedDelta('pause'))
+    await fake.settle()
+    expect((await $.prompt.submit(prompt('paused'))).drop).toBeUndefined()
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ snapshot: false, managedCheckout: { thread: PARENT, choice: 'off' } })
+    expect(fake.records()).toEqual([])
+    fake.commandFault = undefined
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('shared later moves its conversation so far into the subthread, ahead of what it records next', async ($, on) => {
+    const fake = managedCheckout(on, $, { messages: [userText('earlier')] })
+    // Dismissing the question at the start leaves the session unsynced until it is shared.
+    await $.session.start(sessionStart)
+    await fake.settle()
+    expect(fake.store.get(`session:${fake.session}`)).toBeUndefined()
+    fake.answerQuestion = (question) => answer(question, CONTINUE_AS_SUBTHREAD)
+    await $.command.run(shareCommand)
+    await fake.settleUntil(() => (fake.store.get(`session:${fake.session}`) as any)?.joined === true)
+    await fake.settleUntil(() => (fake.store.get(`session:${fake.session}`) as any)?.pending.length === 0)
+    const exported = fake.records().length
+    expect(exported).toBeGreaterThan(0)
+    expect(fake.cwd).toBe(`${MOUNTS}/${fake.session}/delta`)
+    await $.prompt.submit(prompt('after sharing'))
+    await $.tool.call(bash('after-share', 'echo recorded'))
+    await fake.settleUntil(() => fake.updates().some((record) => record.update?.toolCallId === 'after-share'))
+    const sequences = fake.records().map((record) => record.sequence)
+    expect(sequences).toEqual(sequences.map((_, index) => index + 1))
+    expect(fake.updates().findIndex((record) => record.update?.toolCallId === 'after-share')).toBeGreaterThanOrEqual(exported)
+    expect(fake.subthreadParent).toBe(PARENT)
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+})
+
 const REFERENCE = '00000000-0000-4000-8000-000000000001#t=0'
+
+const PARENT = 'thread_parent'
+
+/**
+ * A new session started in the checkout Delta manages for the desktop thread "Review the SDK", which
+ * is shared with the team.
+ */
+function managedCheckout(on: Parameters<typeof fakeThreads>[0], engine: Engine, options: Parameters<typeof fakeThreads>[1] = {}) {
+  const fake = sharedThread(on, engine, options)
+  fake.turns = 0
+  fake.files.set(`${CHECKOUT}/.git`, 'gitdir: /repository/.delta/git/checkout\n')
+  fake.managedParent = { thread: PARENT, title: 'Review the SDK', visibility: 'organization' }
+  fake.managedCheckouts = [{ directory: CHECKOUT, reference: REFERENCE, thread_id: PARENT }]
+  return fake
+}
+
+/** Answer the plugin's one question with `label`. */
+function answer(question: any, label: string) {
+  const asked = question.input?.questions?.[0] ?? question.questions?.[0]
+  return { result: { answers: { [asked.question]: label } } }
+}
 
 function sharedThread(on: Parameters<typeof fakeThreads>[0], engine: Engine, options: Parameters<typeof fakeThreads>[1] = {}) {
   const fake = fakeThreads(on, options)

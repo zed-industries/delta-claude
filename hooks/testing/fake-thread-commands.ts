@@ -567,6 +567,12 @@ export function fakeThreads(hostOn: On, options: {
     /** Replaces the default watch readiness and snapshot. */
     onWatch: undefined as ((watch: Watch, index: number) => void) | undefined,
     commandFault: undefined as { operation: string; message: string; code?: string; reason?: string; retryable?: boolean; after?: boolean; exitCode?: number } | undefined,
+    /** The thread whose managed checkout the session's folder is, answering its own status. */
+    managedParent: undefined as { thread: string; title?: string; visibility?: string; registered?: boolean } | undefined,
+    /** `worktree list`'s managed checkouts; undefined answers as a Delta from before it listed them. */
+    managedCheckouts: undefined as { directory: string; reference: string; thread_id: string | null }[] | undefined,
+    /** The thread the session's own subthread was created under, once it was. */
+    subthreadParent: undefined as string | undefined,
     /** The recording-contract range `thread contract` reports; overrides the fixture's range. */
     contractRange: undefined as { min?: number; max?: number } | undefined,
     /** Answers `thread contract` like a CLI that predates it: clap error on stderr, exit 2, no JSON. */
@@ -1311,7 +1317,7 @@ export function fakeThreads(hostOn: On, options: {
           directory: entry.directory, error: null, owners: [],
           state: fake.activeCheckouts.has(entry.directory) || fake.releasingCheckouts.has(entry.directory) ? 'mounted' : 'inactive',
         }] : [],
-      })) }))
+      })), ...fake.managedCheckouts ? { managed_checkouts: fake.managedCheckouts } : {} }))
     }
     if (parsed?.positionals[0] === 'worktree' && operation === 'create') {
       if (!matchesCommand(argv, ['worktree', 'create', parsed.positionals[2]!], {}))
@@ -1626,6 +1632,18 @@ export function fakeThreads(hostOn: On, options: {
         }
       }
     }
+    const parent = fake.managedParent
+    if (operation === 'status' && parent && cliArguments(e.argv)?.positionals[2] === parent.thread) {
+      fake.commands.push([...e.argv])
+      if (!matchesCommand(e.argv, ['thread', 'status', parent.thread], { '--source': 'claude-code', '--external-id': fake.session }))
+        fake.violations.push(`unexpected parent status: ${e.argv.join(' ')}`)
+      yield { stream: 'stdout', text: JSON.stringify({
+        ...cliFixture('status'), thread_id: parent.thread, title: parent.title ?? null, visibility: parent.visibility ?? 'private',
+        url: parent.registered === false ? null : `https://delta.dev/join/${parent.thread}`, upload: null, producer: null,
+        access: { state: parent.registered === false ? 'local_only' : 'granted', is_owner: true },
+      }) }
+      return { value: { code: 0, signal: null } }
+    }
     const statusChild = operation === 'status'
       ? fake.server.subagents.get(String(cliArguments(e.argv)?.options['--external-id'])) : undefined
     if (statusChild) {
@@ -1721,6 +1739,20 @@ export function fakeThreads(hostOn: On, options: {
     if (!parsed) return
     const children = [...fake.server.subagents.values()]
     const byReference = (reference: unknown) => children.find((child) => child.reference === reference)
+    // A session in a managed checkout records in its own subthread of the checkout's thread, which
+    // the fake keeps as the session's thread, so joining and recording run as for any joined thread.
+    if (operation === 'create' && fake.managedParent && parsed.options['--parent'] === fake.managedParent.thread) {
+      if (!matchesCommand(argv, ['thread', 'create'], {
+        '--source': 'claude-code', '--external-id': fake.session, '--parent': fake.managedParent.thread,
+        '--name': parsed.options['--name'], '--shared-worktrees': true,
+      }) || typeof parsed.options['--name'] !== 'string') fake.violations.push(`unexpected subthread create: ${argv.join(' ')}`)
+      const fault = fake.commandFault?.operation === 'create' ? fake.commandFault : undefined
+      if (fault) return output(JSON.stringify(cliFixture('error', faultEnvelope(fault))), fault.exitCode ?? 2)
+      const created = fake.subthreadParent === undefined
+      fake.subthreadParent = fake.managedParent.thread
+      fake.server.thread ??= fake.threadId
+      return output(JSON.stringify(cliFixture('childCreate', { thread_id: fake.server.thread, created, reference: fake.threadId })))
+    }
     if (operation === 'create' && parsed.options['--parent'] !== undefined) {
       const agentId = String(parsed.options['--external-id'])
       const parent = String(parsed.options['--parent'])

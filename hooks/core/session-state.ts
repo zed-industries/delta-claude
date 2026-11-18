@@ -97,6 +97,12 @@ export type Binding = {
   /** The agent IDs of the subagents this session records, each with a binding of its own. */
   children?: string[]
   /**
+   * The session started in a checkout Delta manages for `thread`, and chose how to work there: in a
+   * subthread of its own, joined in place in a checkout of the same worktrees mounted for it, or
+   * without syncing. Either choice is final for the session; a resume does not ask again.
+   */
+  managedCheckout?: { thread: string; choice: 'subthread' | 'off' }
+  /**
    * The Delta producer this conversation records as, and its outbox folder: the session that
    * started recording. A session that took the conversation over keeps it, so the thread sees one
    * participant whose sequence continues. Absent means this session's own ID.
@@ -197,6 +203,8 @@ export type SessionState = {
   offered?: Handoff
   /** A session that started in a hand-off's folder, joining it before its first prompt. */
   handoffClaim?: Promise<void>
+  /** The session is moving into its subthread of the managed checkout it started in; prompts wait. */
+  enteringSubthread?: true
   /** What the band reminds an interactive session Delta does not sync, decided when the session starts. */
   reminder?: SyncReminder
   /** The startup-only sync reminder stays hidden after a turn or an in-process session switch. */

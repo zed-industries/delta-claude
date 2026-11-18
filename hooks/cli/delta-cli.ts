@@ -8,8 +8,8 @@
 import type { ProcessRunResult, ProcessSpawnResult } from 'claude-code'
 import { DeltaCli } from './cli'
 import {
-  checkoutStillSyncing, checkResult, type CreationReceipt, localWorktreesAt, type MembershipReceipt, type PublicationReceipt,
-  type UnshareReceipt, validateAttachmentReceipt, validateCreationReceipt, validatePublicationReceipt,
+  checkoutStillSyncing, checkResult, type CreationReceipt, localWorktreesAt, type ManagedCheckout, managedCheckoutAt,
+  type MembershipReceipt, type PublicationReceipt, type UnshareReceipt, validateAttachmentReceipt, validateCreationReceipt, validatePublicationReceipt,
   validateUnshareReceipt, validateWorktreeCreationReceipt, validateWorktreeMembershipReceipt, type WorktreeCreationReceipt,
 } from './command-outcomes'
 import { readCommandStream, readMountReady } from './command-reader'
@@ -475,6 +475,11 @@ export async function* watchEvents(
 /** The references of the local worktrees checked out at `directory`, from `worktree list`. */
 export async function worktreeList(host: Host, directory: string, check?: () => Promise<void>): Promise<string[]> {
   return localWorktreesAt(await command(host, ['worktree', 'list'], 'worktree list', { check }), directory)
+}
+
+/** Whether `directory` is a checkout Delta manages for a mount, and for which thread. */
+export async function managedCheckout(host: Host, directory: string, timeoutMs?: number): Promise<ManagedCheckout> {
+  return managedCheckoutAt(await command(host, ['worktree', 'list'], 'worktree list', { timeoutMs }), directory)
 }
 
 /** Create a local worktree for the checkout `directory`; nothing is attached or mounted yet. */

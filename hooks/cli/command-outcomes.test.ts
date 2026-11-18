@@ -1,7 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 import { cliFixture } from '../testing/cli-fixtures'
 import {
-  checkoutStillSyncing, reconnectDelay, validateAttachmentReceipt, validatePublicationReceipt, validateUnshareReceipt,
+  checkoutStillSyncing, managedCheckoutAt, reconnectDelay, validateAttachmentReceipt, validatePublicationReceipt,
+  validateUnshareReceipt,
 } from './command-outcomes'
 
 test('a checkout is still syncing only while the list shows it mounted or restoring at that directory', () => {
@@ -17,6 +18,19 @@ test('a checkout is still syncing only while the list shows it mounted or restor
   expect(checkoutStillSyncing(listed('mounted', '/repo'), '/repo/.claude/worktrees/agent')).toBe(false)
   expect(checkoutStillSyncing({ operation: 'listed', worktrees: [] }, '/repo')).toBe(false)
   expect(() => checkoutStillSyncing({ operation: 'created' }, '/repo')).toThrow()
+})
+
+test("a managed checkout is found apart from the user's worktrees, and an older Delta is told from none", () => {
+  const listed = cliFixture('worktreeList')
+  const managed = listed.managed_checkouts[0]
+  expect(managedCheckoutAt(listed, managed.directory)).toEqual({ kind: 'managed', reference: managed.reference, thread: managed.thread_id })
+  // A checkout a user's command bound is listed in `worktrees`, never as managed.
+  expect(managedCheckoutAt(listed, listed.worktrees[0].directories[0].directory)).toEqual({ kind: 'none' })
+  expect(managedCheckoutAt({ ...listed, managed_checkouts: [{ ...managed, thread_id: null }] }, managed.directory))
+    .toEqual({ kind: 'managed', reference: managed.reference })
+  const { managed_checkouts: _, ...older } = listed
+  expect(managedCheckoutAt(older, managed.directory)).toEqual({ kind: 'unknown' })
+  expect(() => managedCheckoutAt({ operation: 'created' }, managed.directory)).toThrow()
 })
 
 test('attachment receipts require the intended directory, operation, and usable reference', () => {

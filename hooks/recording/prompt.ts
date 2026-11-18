@@ -46,9 +46,15 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
   const session = await host.session.id()
   const runtime = stateFor(session)
   if (runtime.joinFailure) return { drop: `${runtime.joinFailure} The prompt was not submitted.` }
+  if (runtime.enteringSubthread)
+    return { drop: 'Delta is moving this session into its subthread. Wait for the band to say it is recording, then try again. The prompt was not submitted.' }
   // A new session's prompt waits for its capture boundary, so a prompt typed right after `/clear` or
   // sent headlessly is recorded rather than lost before the snapshot exists.
   await captureDecided(session)
+  // The question about a managed checkout is answered before the boundary, and may have started a move.
+  if (runtime.joinFailure) return { drop: `${runtime.joinFailure} The prompt was not submitted.` }
+  if (runtime.enteringSubthread)
+    return { drop: 'Delta is moving this session into its subthread. Wait for the band to say it is recording, then try again. The prompt was not submitted.' }
   // A hot reload can install this hook without replaying session.start.
   if (activation.session !== session || !runtime.binding) {
     try { await activate(host, session) }

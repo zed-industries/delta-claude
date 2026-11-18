@@ -224,12 +224,44 @@ async function completeJoin(host: Host, session: string, plan: JoinPlan, request
   // This session runs against the same CLI build `join` already verified for this process; `/clear`
   // removed the old session's verification before this fresh one started.
   rememberContract(session, request.contractVersion!)
-  const check = () => assertJoinSession(host, session, request)
+  const directory = await joinInPlace(host, session, plan, {
+    check: () => assertJoinSession(host, session, request), isCurrent: () => !request.cancelled,
+    reportJoin: !plan.owner, form: request.form,
+  })
+  // The band reports the join through the finished notice; the way back to the previous session stays in the debug log.
+  host.ui.log(plan.owner
+    ? `Joined Delta in Claude session ${session} at ${directory}, taking over mount owner ${plan.owner}.`
+    : `Joined Delta in fresh Claude session ${session} at ${directory}. Resume the previous session with claude --resume ${plan.session} from ${plan.cwd}.`,
+    { to: 'debug' })
+  finishProgress(host, 'Joined the shared thread', 'done')
+}
+
+/**
+ * How a session joins a thread in place. `reportJoin` counts the mount as someone joining a thread
+ * for Delta's join events. A session continuing in its own subthread names the thread whose checkout
+ * it started in (`managedCheckout`), and keeps the records it staged before it had a thread
+ * (`keepStaged`), such as a late share's exported history.
+ */
+type InPlaceJoin = {
+  check: () => Promise<void>
+  isCurrent: () => boolean
+  reportJoin: boolean
+  form?: CommandForm
+  managedCheckout?: Binding['managedCheckout']
+  keepStaged?: true
+}
+
+/**
+ * Mount `plan`'s thread under this session, move Claude into its worktrees, and record there from now
+ * on, without clearing the session. Returns the directory Claude works in.
+ */
+async function joinInPlace(host: Host, session: string, plan: JoinPlan, join: InPlaceJoin): Promise<string> {
+  const { check } = join
   await check()
   setProgress(host, "Mounting the thread's worktrees…", 'active')
   const mounted = await mountThread(
     host, { session, thread: plan.thread, locator: plan.locator, owner: plan.owner },
-    { reportJoin: !plan.owner, form: request.form },
+    { reportJoin: join.reportJoin, form: join.form },
   )
   await check()
   requireMounted(mounted, plan.thread)
@@ -237,8 +269,7 @@ async function completeJoin(host: Host, session: string, plan: JoinPlan, request
   // Remember the verified destination even if Claude refuses /cd; the retry notice must name it.
   await serial(async () => {
     await check()
-    await save(host, { ...await load(host, session), directory: directories.workingDirectory },
-      () => !request.cancelled)
+    await save(host, { ...await load(host, session), directory: directories.workingDirectory }, join.isCurrent)
   })
   await enterDirectories(host, session, directories, mounted.worktrees, check)
   const binding: Binding = {
@@ -246,27 +277,44 @@ async function completeJoin(host: Host, session: string, plan: JoinPlan, request
     owner: plan.owner ?? session, directory: directories.workingDirectory, mounts: mounted.worktrees,
     // snapshot means live recording is enabled, not that old history must be exported.
     snapshot: true, next: 1, pending: [],
+    ...join.managedCheckout ? { managedCheckout: join.managedCheckout } : {},
   }
   const status = await verifyCheckout(host, binding)
   await check()
   Object.assign(binding, statusFields(status))
   await serial(async () => {
     await check()
-    await save(host, binding, () => !request.cancelled)
+    // Read at the save, so a row staged while the mount ran keeps its place.
+    const staged = join.keepStaged ? await load(host, session) : undefined
+    if (staged?.snapshot && !staged.thread)
+      Object.assign(binding, { next: staged.next, pending: staged.pending, ...staged.children ? { children: staged.children } : {} })
+    await save(host, binding, join.isCurrent)
   })
   stateFor(session).mounted = true
   await check()
   // Neither session.start nor classic.SessionStart is relied upon after clear/cd.
   setProgress(host, 'Connecting to the shared thread…', 'active')
-  await activate(host, session, () => !request.cancelled)
+  await activate(host, session, join.isCurrent)
   await check()
   await startConversation(host, session)
-  // The band reports the join through the finished notice; the way back to the previous session stays in the debug log.
-  host.ui.log(plan.owner
-    ? `Joined Delta in Claude session ${session} at ${directories.workingDirectory}, taking over mount owner ${plan.owner}.`
-    : `Joined Delta in fresh Claude session ${session} at ${directories.workingDirectory}. Resume the previous session with claude --resume ${plan.session} from ${plan.cwd}.`,
-    { to: 'debug' })
-  finishProgress(host, 'Joined the shared thread', 'done')
+  return directories.workingDirectory
+}
+
+/**
+ * Continue `session` in place as the producer of its own subthread `child`, created under the thread
+ * whose checkout it started in: Claude moves to a checkout of the same worktrees mounted for this
+ * session, and the session records in the subthread from now on.
+ */
+export async function joinSubthreadInPlace(
+  host: Host, session: string, child: { thread: string; reference: string },
+  options: { check: () => Promise<void>; isCurrent: () => boolean; parent: string },
+): Promise<string> {
+  return joinInPlace(host, session, {
+    session, cwd: await host.session.cwd(), locator: child.reference, thread: child.thread,
+  }, {
+    check: options.check, isCurrent: options.isCurrent, reportJoin: false,
+    managedCheckout: { thread: options.parent, choice: 'subthread' }, keepStaged: true,
+  })
 }
 
 /**

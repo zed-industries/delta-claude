@@ -75,6 +75,30 @@ export function localWorktreesAt(listed: JsonObject, directory: string): string[
 }
 
 /**
+ * What `worktree list` says of a checkout Delta created for a mount, not the user's own: `unknown` from
+ * a Delta that does not list them, `none` when `directory` is not one, and otherwise the worktree and,
+ * when the mount is one thread's own, that thread.
+ */
+export type ManagedCheckout =
+  | { kind: 'unknown' }
+  | { kind: 'none' }
+  | { kind: 'managed'; reference: string; thread?: string }
+
+/** Whether `directory` is a checkout Delta manages for a mount, from a `worktree list` answer. */
+export function managedCheckoutAt(listed: JsonObject, directory: string): ManagedCheckout {
+  if (listed.operation !== 'listed' || !Array.isArray(listed.worktrees))
+    throw new Error('Unexpected worktree list result; Delta could not say whose checkout this is')
+  // Delta lists them apart from `worktrees` only from the build that added the list.
+  if (!Array.isArray(listed.managed_checkouts)) return { kind: 'unknown' }
+  for (const entry of listed.managed_checkouts) {
+    if (!isJsonObject(entry) || typeof entry.directory !== 'string' || !samePath(entry.directory, directory)) continue
+    if (!isNonEmptyString(entry.reference)) throw new Error('Delta listed a managed checkout without its worktree reference')
+    return { kind: 'managed', reference: entry.reference, ...isNonEmptyString(entry.thread_id) ? { thread: entry.thread_id } : {} }
+  }
+  return { kind: 'none' }
+}
+
+/**
  * Whether a `worktree list` answer shows Delta still syncing `directory`. A checkout stays mounted, or
  * restoring, until Delta has attempted its final upload and stopped watching the directory.
  */

@@ -1,7 +1,7 @@
 import { conversationText } from '../watch/conversation'
 import { drain, stageRecord } from './delivery'
 import { isJsonObject } from '../core/json'
-import { load, report, requests, save, serial, stateFor } from '../core/session-state'
+import { type Binding, load, report, requests, save, serial, stateFor } from '../core/session-state'
 import type { Host } from '../core/host'
 import { cutsSurrogatePair } from '../core/text'
 
@@ -120,25 +120,34 @@ export function forgetTitleReader(session: string) {
 /** Whether a session's thread is recorded by it and has no title from it yet. */
 export function awaitsTitle(session: string): boolean {
   const binding = stateFor(session).binding
-  return !!binding?.snapshot && !binding.joined && binding.title === undefined
+  return !!binding?.snapshot && namesThread(binding) && binding.title === undefined
+}
+
+/**
+ * Whether the session names its thread: one it shared, or its own subthread. A joined session takes
+ * part in someone else's.
+ */
+function namesThread(binding: Binding): boolean {
+  return !binding.joined || binding.managedCheckout?.choice === 'subthread'
 }
 
 /**
  * Record the session's title for its thread when it changed since the last one recorded. Only a
- * shared session names its thread; a joined session takes part in someone else's. An automatic
+ * shared session, or one in its own subthread, names its thread; a joined session takes part in
+ * someone else's. An automatic
  * session stages its title before its thread exists, like its other records, so a turn that ends
  * during activation still names the thread. Nothing here can fail a turn or sharing: a title that
  * cannot be read or staged is skipped, and the next read tries again.
  */
 export async function recordTitle(host: Host, session: string, transcript: string) {
   const binding = stateFor(session).binding
-  if (!binding?.snapshot || binding.joined) return
+  if (!binding?.snapshot || !namesThread(binding)) return
   try {
     const title = await readTitle(host, session, transcript)
     if (title === undefined || title === stateFor(session).binding?.title) return
     const staged = await serial(async () => {
       const current = await load(host, session)
-      if (!current.snapshot || current.joined || current.title === title) return false
+      if (!current.snapshot || !namesThread(current) || current.title === title) return false
       await save(host, { ...await stageRecord(host, current, { update: { sessionUpdate: 'session_info_update', title } }), title })
       return true
     })
