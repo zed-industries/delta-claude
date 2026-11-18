@@ -200,19 +200,19 @@ test('failed and unknown authentication outcomes stop share without creating a t
 
 const TERMS_DENIAL = { status: 'access_denied', reason: 'terms_not_accepted', message: 'Accept the terms.', url: 'https://zed.dev/delta/terms' }
 
-/** Answer the plugin's offer to open the beta terms with `answer`, leaving every other question to the fake. */
+/** Answer the plugin's offer to open the terms with `answer`, leaving every other question to the fake. */
 function answerTerms(fake: ReturnType<typeof fakeThreads>, answer: string) {
   fake.answerQuestion = (question: any) => {
     const text = question.questions[0].question
-    if (text.startsWith('Delta needs you to accept its beta terms')) return { result: { answers: { [text]: answer } } }
+    if (text.startsWith('Delta needs you to accept its terms')) return { result: { answers: { [text]: answer } } }
   }
 }
 
-test('unaccepted beta terms open in the browser on request, and the share continues once they are accepted', async ($, on) => {
+test('unaccepted terms open in the browser on request, and the share continues once they are accepted', async ($, on) => {
   const fake = fakeThreads(on)
   await $.session.start(sessionStart)
   fake.authReplies = [TERMS_DENIAL, TERMS_DENIAL]
-  answerTerms(fake, 'Open the beta terms')
+  answerTerms(fake, 'Open the terms')
   await $.command.run(shareCommand)
   await fake.advance(0)
   await fake.settle()
@@ -226,7 +226,7 @@ test('unaccepted beta terms open in the browser on request, and the share contin
   await fake.settle()
   expect(fake.authCalls.map((argv) => argv[3])).toEqual(['status', 'status', 'status'])
   expect(fake.server.thread).toBeDefined()
-  expect(fake.logs.join('\n')).not.toContain('beta terms')
+  expect(fake.logs.join('\n')).not.toContain('terms')
   expect(fake.logs.every((log) => !log.includes('\n'))).toBe(true)
   fake.expectClean()
 })
@@ -265,16 +265,16 @@ test('declining sign-in for automatic sync leaves the session unsynced without o
   fake.expectClean()
 })
 
-/** Answer the beta-terms offer by opening them, and an offer to stop waiting with `stop`. */
+/** Answer the terms offer by opening them, and an offer to stop waiting with `stop`. */
 function answerWait(fake: ReturnType<typeof fakeThreads>, stop: string) {
   fake.answerQuestion = (question: any) => {
     const text = question.questions[0].question
-    if (text.startsWith('Delta needs you to accept its beta terms')) return { result: { answers: { [text]: 'Open the beta terms' } } }
+    if (text.startsWith('Delta needs you to accept its terms')) return { result: { answers: { [text]: 'Open the terms' } } }
     if (text.endsWith('Stop waiting?')) return { result: { answers: { [text]: stop } } }
   }
 }
 
-test('running /delta-share again while the beta terms are awaited offers to stop waiting', async ($, on) => {
+test('running /delta-share again while the terms are awaited offers to stop waiting', async ($, on) => {
   const fake = fakeThreads(on)
   await $.session.start(sessionStart)
   fake.authReplies = [TERMS_DENIAL, TERMS_DENIAL, TERMS_DENIAL]
@@ -282,11 +282,11 @@ test('running /delta-share again while the beta terms are awaited offers to stop
   await $.command.run(shareCommand)
   await fake.advance(0)
   await fake.settle()
-  expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain("Waiting for Delta's beta terms")
+  expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain("Waiting for you to accept Delta's terms")
   expect((await $.command.run(shareCommand)).text).toBeUndefined()
   await fake.settle()
-  expect(fake.questions.at(-1)?.questions[0].question).toBe('Delta is waiting for you to accept its beta terms in your browser. Stop waiting?')
-  expect(fake.logs).toContain("Stopped waiting for Delta's beta terms. Run /delta-share or /delta-join <link> again to accept them.")
+  expect(fake.questions.at(-1)?.questions[0].question).toBe('Delta is waiting for you to accept its terms in your browser. Stop waiting?')
+  expect(fake.logs).toContain("Stopped waiting for you to accept Delta's terms. Run /delta-share or /delta-join <link> again to accept them.")
   expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')
   // Nothing polls once stopped, and a new share can start.
   const polls = fake.authCalls.length
@@ -302,7 +302,7 @@ test('running /delta-share again while the beta terms are awaited offers to stop
   fake.expectClean()
 })
 
-test('keeping the wait leaves the share waiting for the beta terms, without a second share', async ($, on) => {
+test('keeping the wait leaves the share waiting for the terms, without a second share', async ($, on) => {
   const fake = fakeThreads(on)
   await $.session.start(sessionStart)
   fake.authReplies = [TERMS_DENIAL, TERMS_DENIAL]
@@ -312,7 +312,7 @@ test('keeping the wait leaves the share waiting for the beta terms, without a se
   await fake.settle()
   expect((await $.command.run(shareCommand)).text).toBeUndefined()
   await fake.settle()
-  expect(fake.questions.at(-1)?.questions[0].question).toBe('Delta is waiting for you to accept its beta terms in your browser. Stop waiting?')
+  expect(fake.questions.at(-1)?.questions[0].question).toBe('Delta is waiting for you to accept its terms in your browser. Stop waiting?')
   await fake.advance(2_000)
   await fake.settle()
   await fake.advance(2_000)
@@ -344,7 +344,7 @@ test('stopping automatic sync while sign-in waits closes the waiter and leaves t
   fake.expectClean()
 })
 
-test('declined beta terms leave a one-line explanation with the terms link, without a failure or a new sign-in', async ($, on) => {
+test('declined terms leave a one-line explanation with the terms link, without a failure or a new sign-in', async ($, on) => {
   const fake = fakeThreads(on)
   await $.session.start(sessionStart)
   fake.authReplies = [TERMS_DENIAL]
@@ -353,7 +353,7 @@ test('declined beta terms leave a one-line explanation with the terms link, with
   await fake.advance(0)
   await fake.settle()
   expect(fake.opened).toEqual([])
-  expect(fake.logs).toContain("Delta's beta terms aren't accepted. Accept them at https://zed.dev/delta/terms, then run /delta-share or /delta-join <link> again.")
+  expect(fake.logs).toContain("Delta's terms aren't accepted. Accept them at https://zed.dev/delta/terms, then run /delta-share or /delta-join <link> again.")
   expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')
   expect(fake.authCalls.map((argv) => argv[3])).toEqual(['status'])
   expect(fake.server.thread).toBeUndefined()
