@@ -94,7 +94,7 @@ export async function activate(host: Host, session: string, isCurrent = () => tr
     runtime.binding = binding
     runtime.captureFailure ??= binding.captureFailure
     if (binding.joinTransition) {
-      await report(host, new Error(`The join directory transition is incomplete. Run /delta-join ${binding.joinTransition.locator} to retry the saved mount${binding.directory ? ` at ${binding.directory}` : ''}; prompts remain blocked.`))
+      await report(host, new Error(`The join directory transition is incomplete, so prompts stay blocked until its saved mount${binding.directory ? ` at ${binding.directory}` : ''} is retried`))
       return
     }
     // A session paused with /delta pause keeps its thread but starts nothing until /delta share.
@@ -801,12 +801,12 @@ async function policyMisconfiguration(host: Host, organization: string): Promise
 
 /** Describe a permanent activation failure, recognizing the account problems a person can fix. */
 function activationRefusal(error: unknown, organization: string): ActivationRefusal {
-  if (error instanceof DeltaCommandError && error.reason === 'organization_not_member') return notMemberRefusal(organization)
+  if (error instanceof DeltaCommandError && error.code === 'organization_not_member') return notMemberRefusal(organization)
   if (error instanceof DeltaCommandError && error.code === 'authentication_required') return SIGNED_OUT_REFUSAL
   if (error instanceof ContractRefusalError)
     return { band: `Not syncing: ${error.message}`, transcript: `This session isn't syncing: ${error.message}.` }
   const advice = error instanceof DeltaCommandError
-    ? permanentFailureAdvice(error.code, true, error.reason) : 'Fix the cause, then start a new session'
+    ? permanentFailureAdvice(error.code, true) : 'Fix the cause, then start a new session'
   return {
     band: `Not syncing: ${advice}`,
     transcript: `Delta couldn't start syncing this session: ${errorText(error)}. This session isn't syncing. ${advice}.`,

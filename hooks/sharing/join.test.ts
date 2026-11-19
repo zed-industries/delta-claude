@@ -66,12 +66,34 @@ describe('joining', () => {
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
     await finishJoin(fake)
-    expect(await bandText($)).toContain('Waiting for Delta to connect')
+    expect(await bandText($)).toContain('Waiting for Delta')
     expect(fake.session).toBe(previousSession)
     fake.commandFault = undefined
     await fake.advance(2000)
     expect(fake.session).not.toBe(previousSession)
     expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ thread: fake.threadId, joined: true })
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test("a join waits out a slow worktree inspection once the thread's worktrees are mounted", async ($, on) => {
+    const fake = sharedThread(on, $)
+    // The inspection times out only from the mount on, after the join's access check passed.
+    fake.holdRun = (operation) => {
+      if (operation !== 'mount') return
+      fake.holdRun = undefined
+      fake.commandFault = {
+        operation: 'status', code: 'failed', reason: 'sync', retryable: true,
+        message: 'worktree status inspection did not finish within 15 seconds',
+      }
+    }
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    expect(await bandText($)).toContain('Waiting for Delta')
+    fake.commandFault = undefined
+    await fake.advance(2000)
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ thread: fake.threadId, joined: true })
+    expect(fake.logs.join('\n')).not.toContain('Delta join failed')
     await $.session.end(sessionEnd(fake.session))
   })
 
@@ -437,6 +459,35 @@ describe('joining', () => {
       expect(fake.unmounts).toEqual([{ thread: fake.threadId, owner: parent }])
     })
 
+  test('a thread mount that ends is mounted again while prompts go on, and after two minutes of failures says so once', async ($, on) => {
+    const fake = sharedThread(on, $)
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${fake.shareId}` })
+    await finishJoin(fake)
+    const mounts = () => fake.operations().filter((operation) => operation === 'mount').length
+    const threadMount = () => fake.mountStreams.findLast((watch) => watch.argv.includes('thread'))!
+    // Delta is restarting, so the first attempt to mount again fails as Delta does while it is down.
+    fake.commandFault = { operation: 'mount', code: 'app_unavailable', retryable: true, message: 'Delta is not running' }
+    threadMount().exit(1)
+    await fake.settleUntil(() => mounts() === 2)
+    expect((await $.prompt.submit(prompt('while Delta restarts'))).drop).toBeUndefined()
+    fake.commandFault = undefined
+    await fake.advance(2_000)
+    await fake.settleUntil(() => mounts() === 3)
+    expect(await bandText($)).toContain('syncing this thread')
+    // A mount Delta can't restore within the budget is reported once, and prompts still go on.
+    fake.commandFault = { operation: 'mount', code: 'app_unavailable', retryable: true, message: 'Delta is not running' }
+    threadMount().exit(1)
+    await fake.settle()
+    for (let elapsed = 0; elapsed < 130_000; elapsed += 10_000) await fake.advance(10_000)
+    expect(fake.logs.filter((log) => log.includes("couldn't mount them again"))).toHaveLength(1)
+    expect(await bandText($)).toContain("couldn't remount this thread's worktrees")
+    expect((await $.prompt.submit(prompt('after the notice'))).drop).toBeUndefined()
+    fake.commandFault = undefined
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
   test('resume mounts again, moves Claude from its launch directory, and records only new rows', async ($, on) => {
     const fake = sharedThread(on, $)
     await $.session.start(sessionStart)
@@ -536,7 +587,7 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
-  test("a thread with three worktrees is joined in the first one's checkout with the others added, and every worktree is checked before a prompt", async ($, on) => {
+  test("a thread with three worktrees is joined in the first one's checkout with the others added, and every worktree is checked before its records are sent", async ($, on) => {
     const fake = sharedThread(on, $)
     fake.addWorktree('zed')
     fake.addWorktree('web')
@@ -559,9 +610,14 @@ describe('joining', () => {
     // Claude loads the added checkouts' instructions as well as the first's.
     expect(fake.envSet).toEqual({ CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' })
     expect((await $.prompt.submit(prompt('all mounted'))).drop).toBeUndefined()
-    // One worktree that is not mounted blocks the prompt, and both the reply and the band name it.
+    // A prompt does not wait for Delta to inspect the worktrees, but delivery does. One worktree that
+    // is not mounted stops it, and the next prompt is refused, both the reply and the band naming it.
     fake.worktreeItems!.find((tree) => tree.reference === 'zed-history#t=0')!.checkouts[0]!.active = false
-    const refused = (await $.prompt.submit(prompt('zed is not mounted'))).drop
+    expect((await $.prompt.submit(prompt('zed is not mounted'))).drop).toBeUndefined()
+    await $.turn.start(turnStart('unmounted', 'zed is not mounted'))
+    await $.turn.complete(turnComplete('unmounted'))
+    await fake.settle()
+    const refused = (await $.prompt.submit(prompt('zed is still not mounted'))).drop
     expect(refused).toContain('zed')
     expect(refused).not.toContain('"delta"')
     expect(await bandText($)).toContain('zed')

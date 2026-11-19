@@ -314,12 +314,15 @@ describe('failure classification', () => {
       .toBe('transient')
     expect((failure(() => parseThreadStatus('{"error":{"code":"x","message":"y","retryable":true,"retry_after_ms":1500}}')) as DeltaCommandError).hints)
       .toEqual({ retryable: true, retryAfterMs: 1500 })
-    const unavailable = (error: { code: string; reason?: string; message: string }) => failure(() => validateThreadCheckout(
-      { ...status(), worktrees: { status: 'unavailable', error } }, { checkout: '/repo' }))
-    const storage = unavailable({ code: 'failed', reason: 'storage', message: 'cannot read checkout' }) as DeltaCommandError
+    const unavailable = (error: { code: string; reason?: string; message: string; retryable?: boolean }) =>
+      failure(() => validateThreadCheckout({ ...status(), worktrees: { status: 'unavailable', error } }, { checkout: '/repo' }))
+    const storage = unavailable({ code: 'failed', reason: 'storage', message: 'cannot read checkout', retryable: false }) as DeltaCommandError
     expect(classifyCommandFailure(storage)).toBe('permanent')
     expect(storage.reason).toBe('storage')
     expect(storage.message).toContain('failed (storage)')
+    // A slow inspection passes by itself, so it is retried rather than pausing the session.
+    const timedOut = unavailable({ code: 'failed', reason: 'sync', message: 'did not finish within 15 seconds', retryable: true })
+    expect(classifyCommandFailure(timedOut)).toBe('transient')
     const appended = appendFailure('{"operation":"appended"}\n{"error":{"code":"failed","reason":"sync","message":"not confirmed","retryable":true}}', 'ignored', 2)
     expect(appended).toMatchObject({ code: 'failed', reason: 'sync' })
     expect(appendFailure('', ' disk full \n', 1)).toMatchObject({ code: 'process_failed', message: 'disk full' })
@@ -343,7 +346,7 @@ describe('permanent failure advice', () => {
     expect(permanentFailureAdvice('checkout_inactive')).toContain('Mount')
     expect(permanentFailureAdvice('incompatible_app')).toContain('restart')
     expect(permanentFailureAdvice('invalid_invocation')).toContain('plugin')
-    expect(permanentFailureAdvice('invalid_invocation', false, 'organization_mismatch')).toContain('different Delta team')
+    expect(permanentFailureAdvice('organization_mismatch')).toContain('different Delta team')
   })
 })
 

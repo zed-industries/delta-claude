@@ -324,13 +324,14 @@ async function stopMountProcess(process: MountProcess) {
 
 /**
  * Start a mount command for `session` and wait for its readiness line, leaving it running. It replaces
- * the ready process of the same key. `check` runs once the CLI is found and again once it is ready.
+ * the ready process of the same key. `check` runs once the CLI is found and again once it is ready;
+ * `ended` runs if the ready process ends without the plugin stopping or replacing it.
  */
 async function mountCommand<T>(host: Host, mount: {
   session: string; key: string; args: string[]; name: string; env?: Record<string, string>
-  check?: () => Promise<void>
+  check?: () => Promise<void>; ended?: () => void
 }, parseReady: (line: string) => T): Promise<T> {
-  const { session, key, args, name, env, check } = mount
+  const { session, key, args, name, env, check, ended } = mount
   const executable = await resolveCli(host)
   if (check) await check()
   const stream = host.process.spawn({ argv: [executable, '--json', ...args], env: { ...env, ...INTEGRATION_ENV } })
@@ -344,6 +345,7 @@ async function mountCommand<T>(host: Host, mount: {
     if (check) await check()
     const prior = mountProcesses.get(key)
     mountProcesses.set(key, process)
+    void followMount(host, process, name, ended)
     if (prior) await stopMountProcess(prior)
     return ready
   } catch (error) {
@@ -353,15 +355,36 @@ async function mountCommand<T>(host: Host, mount: {
 }
 
 /**
+ * Read a ready mount process until it ends. Delta ends it when it quits or its account session ends,
+ * and its mounts end with it, so it stops counting as ready.
+ */
+async function followMount(host: Host, process: MountProcess, name: string, ended?: () => void) {
+  let last: Awaited<ReturnType<MountProcess['stream']['next']>> | undefined
+  try {
+    do last = await process.stream.next()
+    while (!last.done)
+  // A stream that fails to read has ended its process all the same.
+  } catch {}
+  if (process.stopping) return
+  liveMountProcesses.delete(process)
+  const current = mountProcesses.get(process.key) === process
+  if (current) mountProcesses.delete(process.key)
+  const how = last?.done ? `exit ${last.value.code ?? last.value.signal ?? 'unknown'}` : 'unreadable output'
+  await host.ui.log(`Delta ${name} ended (${how})`, { to: 'debug' })
+  if (current) ended?.()
+}
+
+/**
  * Mount every worktree of the thread `locator` names for `owner`, for as long as `session` keeps the
  * command running; `join` reports the mount as a join, run as `form`. `thread` keys the process.
  */
 export async function threadMount(host: Host, mount: {
   session: string; thread: string; locator: string; owner: string; join?: boolean; form?: CommandForm
+  ended?: () => void
 }): Promise<MountedThread> {
-  const { session, thread, locator, owner, join } = mount
+  const { session, thread, locator, owner, join, ended } = mount
   return mountCommand(host, {
-    session, key: `thread:${thread}:${owner}`, name: 'thread mount',
+    session, key: `thread:${thread}:${owner}`, name: 'thread mount', ended,
     args: ['thread', 'mount', locator, '--owner', owner, ...join ? ['--join'] : []],
     env: join ? commandFormEnv(mount.form) : {},
   }, (line) => parseThreadMount(line, owner))

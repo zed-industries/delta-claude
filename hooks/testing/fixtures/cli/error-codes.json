@@ -9,6 +9,12 @@
   "organization_required": {
     "retryable": false
   },
+  "organization_not_member": {
+    "retryable": false
+  },
+  "organization_mismatch": {
+    "retryable": false
+  },
   "not_shared": {
     "retryable": false
   },
@@ -31,6 +37,9 @@
     "retryable": false
   },
   "checkout_inactive": {
+    "retryable": false
+  },
+  "checkout_in_use": {
     "retryable": false
   },
   "session_ended": {

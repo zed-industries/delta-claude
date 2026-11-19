@@ -132,6 +132,6 @@ export function beginRestoreCheckout(host: Host, session: string) {
  * session here joined. Delta reports it from whichever step binds the folder; today that is the mount.
  */
 export function managedCheckoutRefusal(error: unknown, root: string): unknown {
-  if (!(error instanceof DeltaCommandError && error.reason === 'worktree_directory_in_use')) return error
+  if (!(error instanceof DeltaCommandError && error.code === 'checkout_in_use')) return error
   return new Error(`${root} is a checkout Delta manages for another thread, so it can't be shared as this one. Run /delta-join with that thread's link to work there (${error.message})`)
 }

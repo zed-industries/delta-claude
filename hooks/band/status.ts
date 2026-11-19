@@ -61,8 +61,9 @@ export type BandView = {
   tone: 'error' | 'live' | 'pending' | 'quiet'
   mark: StatusSegment
   /**
-   * The name beside the mark, which says `Syncing` while the session is captured, or a session's
-   * reminder and its command while it is not; it never gives way.
+   * The name beside the mark, which says `Syncing` while the session is captured, `Paused` while its
+   * sharing is paused, and nothing more beside another failure's mark; or a session's reminder and its
+   * command while it is not captured. It never gives way.
    */
   label: StatusSegment[]
   /**
@@ -347,7 +348,10 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
   } as const)[tone]
   const label: StatusSegment[] = [{ text: ' Delta', dim: true },
     ...running?.update ? [{ text: ' · ', dim: true }, { text: 'Updating' }]
-      : state.recording ? [{ text: ' · ', dim: true }, { text: 'Syncing' }]
+      // Another failure may leave records still going out, so only a pause says the session stopped.
+      : state.recording && state.deliveryPause ? [{ text: ' · ', dim: true }, { text: 'Paused' }]
+      : state.recording && !failure ? [{ text: ' · ', dim: true }, { text: 'Syncing' }]
+      : state.recording ? []
       : state.reminder ? [{ text: ' · ', dim: true }, { text: state.reminder.text }, { text: `  ${state.reminder.command}`, dim: true }]
       : []]
   const detail = failure ? [{ text: failure, color: 'red' }]

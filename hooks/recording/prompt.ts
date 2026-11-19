@@ -4,7 +4,7 @@ import {
   activate, activationIncomplete, adoptContinuation, captureDecided, continuationCandidate, continuedFrom,
   noticeSession, retryAutomaticActivation,
 } from '../setup/activation'
-import { recordsOffline, verifyCheckout } from './delivery'
+import { recordsOffline, requireBoundCheckout, verifyCheckout } from './delivery'
 import { beginRestoreCheckout, checkoutNeedsMount } from '../sharing/checkout'
 import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_PROMPT } from '../sharing/handoff'
 import { ownsSteering, promptGate } from '../sharing/lifecycle'
@@ -118,7 +118,10 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
     // and one that arrives while the checkout's mount is restored, or after Delta refused to restore
     // it, records locally: an unmounted checkout cannot pass verification.
     if (!activationIncomplete(runtime) && !runtime.restoringCheckout && !runtime.checkoutRefusal) {
-      await verifyCheckout(host, runtime.binding)
+      // Delivery asks Delta about the checkout before every send, so a prompt doesn't wait for that.
+      // A session a failed check paused asks again here, which is how it recovers.
+      if (runtime.pauses.has('verification')) await verifyCheckout(host, runtime.binding)
+      else await requireBoundCheckout(host, runtime.binding)
       if (isPaused(runtime)) throw new Error(pauseNotice(runtime))
     }
   } catch (error) {

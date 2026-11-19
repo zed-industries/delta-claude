@@ -94,7 +94,7 @@ async function joinSession(host: Host, request: JoinRequest) {
       // Resolve aliases by canonical identity; never replace this producer with an empty frontier.
       setProgress(host, 'Reconnecting to the shared thread…', 'active')
       await restoreMounts(host, request.session, () => assertJoinSession(host, request.session, request))
-      await verifyCheckout(host, await load(host, request.session))
+      await verifyJoinedCheckout(host, request.session, () => assertJoinSession(host, request.session, request))
       await assertJoinSession(host, request.session, request)
       if (runtime.unsaved.length) await flushUnsaved(host, request.session)
       const binding = await load(host, request.session)
@@ -109,7 +109,7 @@ async function joinSession(host: Host, request: JoinRequest) {
       await recoverExecution(host, request.session)
       await drain(host, request.session)
       await assertJoinSession(host, request.session, request)
-      await verifyCheckout(host, await load(host, request.session))
+      await verifyJoinedCheckout(host, request.session, () => assertJoinSession(host, request.session, request))
       if (isPaused(runtime) || runtime.unsaved.length)
         throw new Error('Joined participation remains paused; saved records remain queued')
       // The band reports the rejoin through the finished notice; the transcript keeps only conversation.
@@ -187,23 +187,34 @@ async function joinSession(host: Host, request: JoinRequest) {
 const JOIN_RETRY_BUDGET_MS = 30_000
 
 /**
- * Reads the thread's status for a join, retrying failures Delta marks retryable.
+ * Runs `read` for a join, retrying failures Delta marks retryable; `check` runs after each wait.
  *
  * A join often runs right after the session starts, when Delta's daemon may still be connecting
- * and answers `disconnected`; a person waiting on the join should not have to retry that.
+ * and answers `disconnected`, or while a worktree inspection is slow; a person waiting on the join
+ * should not have to retry that.
  */
-async function readJoinStatus(host: Host, request: JoinRequest) {
+async function retryJoinStatus<T>(host: Host, read: () => Promise<T>, check: () => Promise<unknown>): Promise<T> {
   const deadline = await host.clock.now() + JOIN_RETRY_BUDGET_MS
   for (let attempt = 0; ; attempt++) {
-    try { return await threadStatus(host, request.locator, request.session) }
+    try { return await read() }
     catch (error) {
       const delay = deliveryRetryDelay(attempt, error instanceof DeltaCommandError ? error.hints.retryAfterMs : undefined)
       if (classifyCommandFailure(error) !== 'transient' || await host.clock.now() + delay > deadline) throw error
-      setProgress(host, 'Waiting for Delta to connect…', 'active')
+      setProgress(host, 'Waiting for Delta…', 'active')
       await host.clock.sleep(delay)
-      await assertJoinSession(host, request.session, request)
+      await check()
     }
   }
+}
+
+function readJoinStatus(host: Host, request: JoinRequest) {
+  return retryJoinStatus(host, () => threadStatus(host, request.locator, request.session),
+    () => assertJoinSession(host, request.session, request))
+}
+
+/** Check a joined session's mounts as `verifyCheckout` does, retrying failures Delta marks retryable. */
+function verifyJoinedCheckout(host: Host, session: string, check: () => Promise<unknown>) {
+  return retryJoinStatus(host, async () => verifyCheckout(host, await serial(() => load(host, session))), check)
 }
 
 async function assertJoinSession(host: Host, session: string, request: JoinRequest) {
@@ -279,7 +290,7 @@ async function joinInPlace(host: Host, session: string, plan: JoinPlan, join: In
     snapshot: true, next: 1, pending: [],
     ...join.managedCheckout ? { managedCheckout: join.managedCheckout } : {},
   }
-  const status = await verifyCheckout(host, binding)
+  const status = await retryJoinStatus(host, () => verifyCheckout(host, binding), check)
   await check()
   Object.assign(binding, statusFields(status))
   await serial(async () => {
@@ -319,7 +330,8 @@ export async function joinSubthreadInPlace(
 
 /**
  * Keep the checkout of every worktree of a joined thread mounted for this session, as its thread's
- * attachments change, until this plugin process stops the mount.
+ * attachments change, until this plugin process stops the mount. A mount that ends by itself is
+ * mounted again if it is the joined session's own.
  */
 export async function mountThread(
   host: Host,
@@ -328,9 +340,53 @@ export async function mountThread(
 ): Promise<MountedThread> {
   const locator = binding.locator ?? binding.thread
   if (!locator) throw new Error('This session has no thread to mount')
+  const mount = { thread: binding.thread ?? locator, owner: binding.owner ?? binding.session }
   return threadMount(host, {
-    session: binding.session, thread: binding.thread ?? locator, locator, owner: binding.owner ?? binding.session,
-    join: !!options.reportJoin, form: options.form,
+    session: binding.session, ...mount, locator, join: !!options.reportJoin, form: options.form,
+    ended: () => remountThread(host, binding.session, mount),
+  })
+}
+
+/** How long a joined session keeps mounting its thread again before telling the person it can't. */
+const REMOUNT_BUDGET_MS = 120_000
+
+/**
+ * Mount a joined session's thread again after its mount command ended, as it does when Delta quits
+ * or restarts, until Delta is back or the budget runs out. Prompts go on meanwhile, and the band
+ * says the worktrees aren't syncing until they are again.
+ */
+function remountThread(host: Host, session: string, ended: { thread: string; owner: string }) {
+  const runtime = stateFor(session)
+  if (activation.session !== session || !runtime.mounted) return
+  const current = (binding: Binding) => activation.session === session && binding.joined &&
+    (binding.thread ?? binding.locator) === ended.thread && (binding.owner ?? session) === ended.owner
+  setProgress(host, "Delta stopped syncing this thread's worktrees. Mounting them again…", 'active')
+  runtime.mountRefresh = (runtime.mountRefresh ?? Promise.resolve()).then(async () => {
+    const deadline = await host.clock.now() + REMOUNT_BUDGET_MS
+    for (let attempt = 0; ; attempt++) {
+      const binding = await serial(() => load(host, session))
+      if (!current(binding)) return
+      try {
+        await applyWorktrees(host, session, binding.mounts ?? [], true)
+        finishProgress(host, "Delta is syncing this thread's worktrees again", 'done')
+        // A delivery that found the checkouts inactive meanwhile paused; the remount lifts that.
+        if (runtime.pauses.has('verification')) await verifyCheckout(host, await serial(() => load(host, session)))
+        void drain(host, session).catch((error) => report(host, error))
+        return
+      } catch (error) {
+        const delay = deliveryRetryDelay(attempt)
+        // Only a refusal Delta marks permanent ends the retries early, since Delta being down fails otherwise.
+        const refused = error instanceof DeltaCommandError && classifyCommandFailure(error) === 'permanent'
+        if (refused || await host.clock.now() + delay > deadline) {
+          if (!current(await serial(() => load(host, session)))) return
+          // The band keeps to one line of an 80-column terminal; the transcript has the cause and the link.
+          setProgress(host, "Delta couldn't remount this thread's worktrees. Run /delta-join to retry.", 'error')
+          await host.ui.log(`Delta stopped syncing this thread's worktrees and couldn't mount them again: ${errorText(error)}. Run ${recoveryCommand(binding)} to mount them again.`, { to: 'transcript' })
+          return
+        }
+        await host.clock.sleep(delay)
+      }
+    }
   })
 }
 
@@ -613,14 +669,15 @@ export function refreshMounts(host: Host, session: string, listed: { reference: 
     })
 }
 
-async function applyWorktrees(host: Host, session: string, listed: { reference: string }[]) {
+/** Mount `listed` again for a joined session, unless it matches its mounts and `remount` is unset. */
+async function applyWorktrees(host: Host, session: string, listed: { reference: string }[], remount = false) {
   const runtime = stateFor(session)
   if (activation.session !== session || !runtime.mounted) return
   const binding = await serial(() => load(host, session))
   const previous = binding.mounts
   if (!binding.joined || !previous) return
   // Every reconnect reports the current list; most of those change nothing.
-  if (listed.length === previous.length && listed.every((tree) => previous.some((mount) => mount.reference === tree.reference))) return
+  if (!remount && listed.length === previous.length && listed.every((tree) => previous.some((mount) => mount.reference === tree.reference))) return
   const mounted = await mountThread(host, binding)
   if (activation.session !== session || mounted.thread_id !== binding.thread) return
   await serial(async () => save(host, { ...await load(host, session), mounts: mounted.worktrees }))
@@ -700,7 +757,9 @@ async function moveSession(host: Host, session: string) {
 
 /** Check a joined session's mounts, then watch the thread; the watch lifts the watcher pause once live. */
 export async function startParticipation(host: Host, session: string, binding: Binding, owns: () => boolean) {
-  if (binding.joined) await verifyCheckout(host, binding)
+  if (binding.joined) await retryJoinStatus(host, () => verifyCheckout(host, binding), async () => {
+    if (!owns()) throw new Error('The session ended while its worktrees were being checked')
+  })
   if (!owns()) return
   const ready = await startConversation(host, session)
   if (owns() && isCurrentReady(ready)) resumeCheckout(stateFor(session), 'watcher')

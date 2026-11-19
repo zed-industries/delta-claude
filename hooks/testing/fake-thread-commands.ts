@@ -1412,7 +1412,7 @@ export function fakeThreads(hostOn: On, options: {
           fake.violations.push(`unexpected upload visibility: ${visibility}`)
         if (fake.server.upload && fake.server.upload.organization !== organization)
           return output(JSON.stringify(cliFixture('error', faultEnvelope({
-            code: 'invalid_invocation', reason: 'organization_mismatch',
+            code: 'organization_mismatch', reason: 'organization_mismatch',
             message: 'this thread already uploads to a different organization',
           }))), 2)
       }

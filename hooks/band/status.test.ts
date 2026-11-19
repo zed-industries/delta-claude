@@ -79,6 +79,12 @@ test('a recorded session says so beside the name at every width, and an unrecord
     const band = renderBand({ ...live, recording: true, people }, { columns, terminal: true })
     expect(text(band.label)).toBe(' Delta · Syncing')
   }
+  // Beside a failure it never claims to sync: a paused session says so, and another failure leaves
+  // its reason to the detail line.
+  const recorded = { ...live, recording: true }
+  expect(text(renderBand({ ...recorded, error: 'watch failed', deliveryPause: 'record refused' }, WIDE).label)).toBe(' Delta · Paused')
+  expect(text(renderBand({ ...recorded, error: 'watch failed' }, WIDE).label)).toBe(' Delta')
+  expect(text(renderBand({ ...recorded, retryReason: 'timeout' }, WIDE).label)).toBe(' Delta · Syncing')
 })
 
 test('a running share shows its step and the link only once it can be followed', () => {

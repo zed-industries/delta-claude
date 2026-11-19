@@ -370,7 +370,8 @@ export function boundDirectory(binding?: Binding): string | undefined {
 export async function report(host: Host, error: unknown) {
   // A delivery failure was already shown, with its retry or pause, where it was classified.
   if (error instanceof DeltaSendError) return
-  const text = `Delta sharing paused: ${errorText(error)}. ${recoveryAdvice(sessions.get(activation.session)?.binding)}.`
+  const advice = recoveryAdvice(sessions.get(activation.session)?.binding)
+  const text = `Delta sharing paused: ${errorText(error).replace(/\.$/, '')}. ${advice[0]!.toUpperCase()}${advice.slice(1)}.`
   await host.ui.status(text)
   await host.ui.log(text)
 }

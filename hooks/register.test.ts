@@ -691,7 +691,7 @@ describe('sharing', () => {
   test('a checkout Delta manages for another thread is named in the share failure, which a retry can still finish', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
-    fake.commandFault = { operation: 'attach', code: 'failed', reason: 'worktree_directory_in_use', message: `${CHECKOUT} is a checkout Delta manages for worktree w#t=1` }
+    fake.commandFault = { operation: 'attach', code: 'checkout_in_use', reason: 'worktree_directory_in_use', message: `${CHECKOUT} is a checkout Delta manages for worktree w#t=1` }
     expect(await fake.share($)).toContain('manages for another thread')
     fake.commandFault = undefined
     expect(await fake.share($)).toBe(`https://delta.dev/join/${fake.shareId}`)
@@ -985,13 +985,30 @@ describe('sharing', () => {
     fake.expectClean()
   })
 
+  test('a prompt asks Delta nothing, and a checkout mount that ends is mounted again while prompts go on', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('one')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await fake.settle()
+    const statuses = () => fake.operations().filter((operation) => operation === 'status').length
+    const checks = statuses()
+    expect((await $.prompt.submit(prompt('shared'))).drop).toBeUndefined()
+    expect(statuses()).toBe(checks)
+    // Delta quitting ends the mount command; the next prompt runs while the checkout is mounted again.
+    fake.activeCheckouts.get(CHECKOUT)!.exit(1)
+    await fake.settleUntil(() => fake.activeCheckouts.size === 0)
+    expect((await $.prompt.submit(prompt('after Delta quit'))).drop).toBeUndefined()
+    await fake.settleUntil(() => fake.activeCheckouts.size === 1)
+    fake.expectClean()
+  })
+
   test('resume reports a permanent checkout restore refusal once and does not retry it on each prompt', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
     await $.session.end(sessionEnd(fake.session))
     fake.commandFault = {
-      operation: 'worktree mount', code: 'failed', reason: 'worktree_directory_in_use', retryable: false,
+      operation: 'worktree mount', code: 'checkout_in_use', reason: 'worktree_directory_in_use', retryable: false,
       message: 'Checkout is managed by another thread',
     }
     const mounts = () => fake.operations().filter((operation) => operation === 'worktree mount').length

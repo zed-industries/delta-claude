@@ -259,11 +259,16 @@ async function requireJoinedDirectory(host: Host, binding: Binding) {
     throw new JoinNotReadyError(`This joined session must run in ${binding.directory}. Run /cd ${binding.directory}, then ${recoveryCommand(binding)}; no other checkout will be attached`)
 }
 
-/** Status observes the common owner's mounts; watcher lifetime is not checkout ownership. */
-export async function verifyCheckout(host: Host, binding: Binding) {
+/** Check what needs no Delta command: the checkout is attached, and a joined session runs in its directory. */
+export async function requireBoundCheckout(host: Host, binding: Binding) {
   if (!boundDirectory(binding))
     throw new Error('the checkout has not been attached; saved messages remain queued')
   if (binding.joined) await requireJoinedDirectory(host, binding)
+}
+
+/** Status observes the common owner's mounts; watcher lifetime is not checkout ownership. */
+export async function verifyCheckout(host: Host, binding: Binding) {
+  await requireBoundCheckout(host, binding)
   const status = await threadStatus(host, binding.locator ?? binding.thread!, producerOf(binding))
   validateThreadFrontier(status, binding)
   if (binding.joined) validateJoinedMounts(status, binding.mounts ?? [])
@@ -586,7 +591,7 @@ async function failDelivery(host: Host, session: string, error: unknown): Promis
   if (refused) state.refusedOffline = true
   const pausedText = refused
     ? "Delta couldn't publish this thread's offline changes."
-    : `Delta sharing paused: ${failure.message}. The message stays queued. ${permanentFailureAdvice(error.code, !!state.binding?.autoUpload, error.reason)}, then ${recoveryAdvice(state.binding)}.`
+    : `Delta sharing paused: ${failure.message}. The message stays queued. ${permanentFailureAdvice(error.code, !!state.binding?.autoUpload)}, then ${recoveryAdvice(state.binding)}.`
   if (!willRetry) {
     pauseCheckout(state, decision.pause, pausedText)
   } else scheduleSendRetry(host, session, error.hints.retryAfterMs)

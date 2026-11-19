@@ -170,7 +170,7 @@ describe('automatic activation', () => {
 
     // A /delta-share that fails at the mount leaves it paused, so the next prompt restores nothing either.
     fake.commandFault = {
-      operation: 'worktree mount', code: 'failed', reason: 'worktree_directory_in_use', retryable: false,
+      operation: 'worktree mount', code: 'checkout_in_use', reason: 'worktree_directory_in_use', retryable: false,
       message: 'Checkout is managed by another thread',
     }
     await runShare($, fake, 'share')
@@ -837,7 +837,7 @@ describe('offline recording', () => {
       const fake = fakeThreads(on)
       fake.files.set(POLICY, policy('private', 'org-1'))
       fake.commandFault = {
-        operation, code: 'failed', reason: 'worktree_directory_in_use', retryable: false,
+        operation, code: 'checkout_in_use', reason: 'worktree_directory_in_use', retryable: false,
         message: 'Checkout is managed by another thread', after,
       }
       let release!: () => void
@@ -912,7 +912,7 @@ describe('offline recording', () => {
     // Memberships aren't loaded, so only the create itself can refuse.
     fake.organizations = []
     fake.files.set(POLICY, policy('private', 'org-1'))
-    fake.commandFault = { operation: 'create', code: 'not_visible', reason: 'organization_not_member', message: 'not a member of org-1', retryable: false }
+    fake.commandFault = { operation: 'create', code: 'organization_not_member', reason: 'organization_not_member', message: 'not a member of org-1', retryable: false }
     let release!: () => void
     fake.holdRun = (operation) => operation === 'create' ? new Promise<void>((resolve) => { release = resolve }) : undefined
     await startAuto($, fake)

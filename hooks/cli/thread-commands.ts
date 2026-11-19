@@ -25,7 +25,7 @@ export type ThreadState = {
       reference: string
       checkouts: { directory: string; state: 'attached' | 'inactive' | 'detached' | 'missing'; active?: boolean }[]
     }[]
-  } | { status: 'unavailable'; error: { code: string; reason?: string; message: string } }
+  } | { status: 'unavailable'; error: StatusError }
   producer: {
     source: string; external_id: string; next_sequence: number; turn: ThreadTurn | null
     /** The actor this device records the producer as, which its items' `author.actor_id` names. */
@@ -33,11 +33,14 @@ export type ThreadState = {
   } | null
 }
 
+/** A failure status reports for one of its parts, with the fields of a failure envelope's `error`. */
+export type StatusError = { code: string; reason?: string; message: string; retryable?: boolean }
+
 /** Delta's background upload of a thread, as status reports it. */
 export type ThreadUpload = {
   state: 'queued' | 'uploading' | 'uploaded' | 'failed'
   organization_id: string | null
-  error: null | { code: string; reason?: string; message: string }
+  error: null | StatusError
 }
 
 export type ThreadReady = Pick<ThreadState, 'thread_id' | 'producer'>
@@ -176,15 +179,11 @@ export function classifyCommandFailure(error: unknown): FailureClass {
   return LOCAL_FAILURE_CLASSES[error.code] ?? 'permanent'
 }
 
-/**
- * What is wrong with a failure that will not be retried, for a person to act on. A `reason` that
- * names a more specific cause than its published code wins.
- */
-export function permanentFailureAdvice(code: string, automatic = false, reason?: string): string {
-  // Delta publishes an organization mismatch as `invalid_invocation`; only the reason tells it apart.
-  if (reason === 'organization_mismatch')
+/** What is wrong with a failure that will not be retried, for a person to act on. */
+export function permanentFailureAdvice(code: string, automatic = false): string {
+  if (code === 'organization_mismatch')
     return "This thread already syncs to a different Delta team, so who can see it can't change"
-  if (['not_visible', 'authentication_required', 'wrong_account'].includes(code))
+  if (['not_visible', 'organization_not_member', 'authentication_required', 'wrong_account'].includes(code))
     return 'Check your Delta sign-in and access to this thread'
   if (code === 'organization_required')
     return 'Find your team with `/delta-org list`, then select it with `/delta-org switch <ID>`'
@@ -370,9 +369,10 @@ function validUpload(value: unknown): boolean {
 }
 
 /** An error object as status reports one for an upload or an inspection. */
-function validErrorObject(error: unknown): boolean {
+function validErrorObject(error: unknown): error is StatusError {
   return isJsonObject(error) && typeof error.code === 'string' &&
-    (error.reason === undefined || typeof error.reason === 'string') && typeof error.message === 'string'
+    (error.reason === undefined || typeof error.reason === 'string') && typeof error.message === 'string' &&
+    (error.retryable === undefined || typeof error.retryable === 'boolean')
 }
 
 function validProducer(value: unknown): value is ThreadState['producer'] {
@@ -392,10 +392,12 @@ function validWorktrees(value: unknown): boolean {
       (checkout.active === undefined || typeof checkout.active === 'boolean')))
 }
 
-/** Word a failed checkout inspection, keeping the CLI's reason when it adds to the published code. */
-function inspectionUnavailableMessage(error: { code: string; reason?: string; message: string }): string {
-  const label = error.reason && error.reason !== error.code ? `${error.code} (${error.reason})` : error.code
-  return `Delta checkout inspection unavailable (${label}): ${error.message}. Resolve the inspection failure and retry; the existing binding and queued messages were preserved.`
+/** The failure a status's checkout inspection reported, decoded like any envelope's, with its retry verdict. */
+function inspectionFailure(error: StatusError): DeltaCommandError {
+  const failure = commandErrorFromEnvelope(error, 'Delta checkout inspection unavailable')
+  // `validWorktrees` checked the error object's shape when the status was decoded.
+  if (!failure) throw new Error('Unexpected thread status; use matching CLI and plugin builds')
+  return failure
 }
 
 /**
@@ -489,7 +491,7 @@ export function validateThreadCheckout(
   if (state.access.state !== 'granted' && !(binding.autoUpload && state.access.state === 'local_only'))
     throw new Error('The thread has no authenticated shared access; run /delta-share to explicitly publish it')
   if (state.worktrees.status === 'unavailable')
-    throw new DeltaCommandError(state.worktrees.error.code, inspectionUnavailableMessage(state.worktrees.error), {}, state.worktrees.error.reason)
+    throw inspectionFailure(state.worktrees.error)
   const matches = state.worktrees.items.flatMap((worktree) => worktree.checkouts
     .filter((checkout) => binding.checkout !== undefined && samePath(checkout.directory, binding.checkout) &&
       worktree.reference === binding.checkoutReference &&
@@ -532,7 +534,7 @@ export function validateJoinedMounts(state: ThreadState, mounts: readonly { refe
   if (state.access.state !== 'granted')
     throw new Error('Access to the joined thread is not granted; check your Delta sign-in and thread access')
   if (state.worktrees.status === 'unavailable')
-    throw new DeltaCommandError(state.worktrees.error.code, inspectionUnavailableMessage(state.worktrees.error), {}, state.worktrees.error.reason)
+    throw inspectionFailure(state.worktrees.error)
   const items = state.worktrees.items
   for (const mount of mounts) {
     const ready = items.some((tree) => tree.reference === mount.reference && tree.checkouts.some((checkout) =>
