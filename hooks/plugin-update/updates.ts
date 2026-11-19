@@ -19,7 +19,7 @@ import {
 
 const NOTIFICATIONS = 'plugin-update:notifications'
 const CHECK = 'plugin-update:check'
-const PLUGIN_UPDATE_USAGE = 'Usage: /delta-plugin-update [check | notifications on | notifications off]. Updates this Claude Code plugin; terminals request a reload, while Desktop may need a new session. /delta-update updates the Delta app and CLI instead.'
+const PLUGIN_UPDATE_USAGE = 'Usage: /delta-plugin-update [check | notifications on | notifications off]. Updates this Claude Code plugin; terminals request a reload, while Desktop may need a new session. To update the Delta app and CLI instead, run /delta update.'
 const UNSUPPORTED = 'This copy of Delta is not installed from the Zed Industries marketplace on main or develop. Local copies and pinned or other marketplace sources are left unchanged.'
 const APP_UPDATE_BUSY = 'A Delta installation update is still running. Let it finish before updating or activating the Claude Code plugin.'
 const RESTART_ADVICE = 'The updated Delta plugin is not active in this session yet. Start a new Claude Code session to apply it.'

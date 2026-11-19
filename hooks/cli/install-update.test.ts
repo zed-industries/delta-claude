@@ -79,8 +79,8 @@ const WINDOWS_OUTCOMES = {
   installed: 'Updated Delta to 1.1.0.',
   restart: 'Updated Delta to 1.1.0. Windows reports that a restart is required to finish the installation; restart Windows, then Claude Code.',
   refused: 'Delta installation update failed: update: app_running: Delta is running. Quit it, then update again.',
-  crash: 'Delta installation update failed: The Delta installer helper exited with code 3221225477. Run `delta update --check` before retrying /delta-update.',
-  unsaid: 'Delta installation update failed: Unexpected Delta update response. Update your Delta installation from https://delta.dev, then restart Claude Code and retry /delta-update.',
+  crash: 'Delta installation update failed: The Delta installer helper exited with code 3221225477. Run `delta update --check` before retrying /delta update.',
+  unsaid: 'Delta installation update failed: Unexpected Delta update response. Update your Delta installation from https://delta.dev, then restart Claude Code and retry /delta update.',
 } as const
 
 test('on Windows the plugin runs the installer once the CLI exits and reports each outcome', async ($, on) => {
@@ -126,7 +126,7 @@ test('a Windows installer still running at the deadline is left to finish', asyn
   expect(next).toContain('Waiting for installer approval')
   expect(next).not.toBe(waiting)
   await fake.advance(600_000)
-  expect((await updating).text).toBe('Delta installation update failed: The Delta installer is still running after 10 minutes; it may be waiting for you to approve a Windows prompt. Let it finish, then run `delta update --check` before retrying /delta-update.')
+  expect((await updating).text).toBe('Delta installation update failed: The Delta installer is still running after 10 minutes; it may be waiting for you to approve a Windows prompt. Let it finish, then run `delta update --check` before retrying /delta update.')
   expect(fake.helperStopped).toBe(false)
   release()
   fake.expectClean()
@@ -165,7 +165,7 @@ const FAILURE_ADVICE = {
   network: 'Check network access.',
   'app-running': 'Quit Delta and retry.',
   // The CLI's own advice names `delta update`; the plugin's names its own command.
-  'app-working': 'Retry /delta-update once that work finishes.',
+  'app-working': 'Retry /delta update once that work finishes.',
   malformed: 'https://delta.dev',
   crash: 'exited with code 101 without reporting a result',
 } as const

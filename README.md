@@ -36,7 +36,7 @@ background, with a ten-second budget. It notifies you when an update is availabl
 it never installs updates or opens a browser as part of this check. A failed check
 does not stop syncing or sharing.
 
-Run `/delta-update` (or `/delta update`) to update the installed Delta app and CLI.
+Run `/delta update` to update the installed Delta app and CLI.
 A running Delta app, including the one serving synced and shared sessions,
 restarts to install the update; those sessions briefly disconnect and reconnect
 on their own, and an app that had a window reopens. On Windows, the installer runs

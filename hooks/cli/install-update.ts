@@ -39,7 +39,7 @@ type CommandOutput = {
   stdout: string; stderr: string; exitCode: number | null; isStdoutTruncated: boolean; isStderrTruncated: boolean
 }
 
-const MANUAL_UPDATE = 'Update your Delta installation from https://delta.dev, then restart Claude Code and retry /delta-update.'
+const MANUAL_UPDATE = 'Update your Delta installation from https://delta.dev, then restart Claude Code and retry /delta update.'
 class UnsupportedUpdateCommandError extends Error {}
 
 /** Parses the versioned installation-update response, independently of the thread protocol. */
@@ -80,7 +80,7 @@ export class InstallationUpdates {
       if (revision !== this.revision) return
       if (result.status === 'update_available')
         await host.log(`Delta ${result.latestVersion} is available (installed: ${result.currentVersion}). ${
-          result.canInstall ? 'Run /delta-update or /delta update to update the installation.' : result.message
+          result.canInstall ? 'Run /delta update to update the installation.' : result.message
         }`, 'transcript')
       else if (result.status === 'unsupported')
         await host.log(`Delta update check: ${result.message}`, 'transcript')
@@ -95,7 +95,7 @@ export class InstallationUpdates {
   async update(host: UpdateHost, form: CommandForm): Promise<string> {
     const release = claimInstallation('app')
     if (!release) return installation?.kind === 'plugin'
-      ? 'A Delta plugin update or activation is in progress. Wait for its result before running /delta-update.'
+      ? 'A Delta plugin update or activation is in progress. Wait for its result before running /delta update.'
       : 'A Delta installation update is already in progress. Wait for its result.'
     this.revision++
     try {
@@ -119,7 +119,7 @@ export class InstallationUpdates {
       await host.log(`Delta installation update failed: ${String(error)}`, 'debug').catch(() => {})
       // The CLI's own advice for this refusal names its terminal command, not this one.
       if (error instanceof DeltaCommandError && error.code === 'app_working')
-        return 'Delta was not updated because it is running agent work, such as a turn or a terminal. Nothing was stopped. Retry /delta-update once that work finishes.'
+        return 'Delta was not updated because it is running agent work, such as a turn or a terminal. Nothing was stopped. Retry /delta update once that work finishes.'
       return `Delta installation update failed: ${errorText(error)}`
     } finally {
       host.progress(undefined)
@@ -132,7 +132,7 @@ export class InstallationUpdates {
   ): Promise<Exclude<UpdateResult, { status: 'install_ready' }>> {
     const env = { DELTA_CLI_INTEGRATION: 'claude_code', ...form ? { DELTA_CLI_COMMAND_FORM: form } : {} }
     const result = await withDeadline(host, check ? 10_000 : 600_000,
-      `Delta ${check ? 'update check' : 'update'} timed out. Retry /delta-update; check the installation before retrying an interrupted update.`,
+      `Delta ${check ? 'update check' : 'update'} timed out. Retry /delta update; check the installation before retrying an interrupted update.`,
       async (live) => {
         const run: UpdateHost['run'] = (argv, init) => {
           live.ensure()
@@ -151,7 +151,7 @@ export class InstallationUpdates {
           throw new UnsupportedUpdateCommandError(output.stderr.trim())
         // Without a typed error the CLI crashed or was stopped; its stderr is a backtrace or progress, not advice.
         const result = parseOutput(output, (failed) => `Delta ${failed.exitCode === null ? 'was stopped'
-          : `exited with code ${failed.exitCode}`} without reporting a result. Run \`delta update\` in a terminal to see why, then retry /delta-update.`)
+          : `exited with code ${failed.exitCode}`} without reporting a result. Run \`delta update\` in a terminal to see why, then retry /delta update.`)
         if (check && (result.status === 'updated' || result.status === 'install_ready'))
           throw new Error('Unexpected installation change reported by a read-only update check.')
         if (result.status === 'install_ready' && !windows)
@@ -163,9 +163,9 @@ export class InstallationUpdates {
     // again and rechecks for running sessions before it installs. Past the deadline it is left to
     // finish: stopping it mid-install would release that lock while the installer still runs.
     const installed = await withDeadline(host, 600_000,
-      'The Delta installer is still running after 10 minutes; it may be waiting for you to approve a Windows prompt. Let it finish, then run `delta update --check` before retrying /delta-update.',
+      'The Delta installer is still running after 10 minutes; it may be waiting for you to approve a Windows prompt. Let it finish, then run `delta update --check` before retrying /delta update.',
       async (live) => parseOutput(await stream(host, result.installArgv, env, live), (failed) =>
-        `The Delta installer helper exited with code ${failed.exitCode}. Run \`delta update --check\` before retrying /delta-update.`),
+        `The Delta installer helper exited with code ${failed.exitCode}. Run \`delta update --check\` before retrying /delta update.`),
       { leaveRunning: true })
     if (installed.status !== 'updated' || installed.restartRequired === undefined)
       throw new Error(`Unexpected Delta update response. ${MANUAL_UPDATE}`)
@@ -272,7 +272,7 @@ export function parseProgressEvent(line: string): ProgressEvent | undefined {
 /** The update response on stdout. A nonzero exit without a typed envelope is described by `failure`. */
 function parseOutput(output: CommandOutput, failure: (output: CommandOutput) => string): UpdateResult {
   if (output.isStdoutTruncated || output.isStderrTruncated)
-    throw new Error('Delta update output was truncated. Retry /delta-update.')
+    throw new Error('Delta update output was truncated. Retry /delta update.')
   if (output.exitCode !== 0) {
     // Typed failures use the same envelope as the rest of the CLI.
     if (output.stdout.trim().startsWith('{')) parseInstallUpdate(output.stdout)
