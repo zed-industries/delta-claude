@@ -347,6 +347,8 @@ describe('permanent failure advice', () => {
     expect(permanentFailureAdvice('incompatible_app')).toContain('restart')
     expect(permanentFailureAdvice('invalid_invocation')).toContain('plugin')
     expect(permanentFailureAdvice('organization_mismatch')).toContain('different Delta team')
+    // Delta builds before the code publish a mismatch as `invalid_invocation`.
+    expect(permanentFailureAdvice('invalid_invocation', false, 'organization_mismatch')).toContain('different Delta team')
   })
 })
 

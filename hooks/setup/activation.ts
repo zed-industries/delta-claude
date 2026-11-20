@@ -801,12 +801,15 @@ async function policyMisconfiguration(host: Host, organization: string): Promise
 
 /** Describe a permanent activation failure, recognizing the account problems a person can fix. */
 function activationRefusal(error: unknown, organization: string): ActivationRefusal {
-  if (error instanceof DeltaCommandError && error.code === 'organization_not_member') return notMemberRefusal(organization)
+  // Delta builds before `organization_not_member` publish it as `not_visible`; their reason can go once
+  // stable has the code.
+  if (error instanceof DeltaCommandError
+    && (error.code === 'organization_not_member' || error.reason === 'organization_not_member')) return notMemberRefusal(organization)
   if (error instanceof DeltaCommandError && error.code === 'authentication_required') return SIGNED_OUT_REFUSAL
   if (error instanceof ContractRefusalError)
     return { band: `Not syncing: ${error.message}`, transcript: `This session isn't syncing: ${error.message}.` }
   const advice = error instanceof DeltaCommandError
-    ? permanentFailureAdvice(error.code, true) : 'Fix the cause, then start a new session'
+    ? permanentFailureAdvice(error.code, true, error.reason) : 'Fix the cause, then start a new session'
   return {
     band: `Not syncing: ${advice}`,
     transcript: `Delta couldn't start syncing this session: ${errorText(error)}. This session isn't syncing. ${advice}.`,

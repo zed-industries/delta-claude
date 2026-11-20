@@ -179,9 +179,14 @@ export function classifyCommandFailure(error: unknown): FailureClass {
   return LOCAL_FAILURE_CLASSES[error.code] ?? 'permanent'
 }
 
-/** What is wrong with a failure that will not be retried, for a person to act on. */
-export function permanentFailureAdvice(code: string, automatic = false): string {
-  if (code === 'organization_mismatch')
+/**
+ * What is wrong with a failure that will not be retried, for a person to act on. `reason` only
+ * recognizes failures that Delta builds before their own codes published under a broader one.
+ */
+export function permanentFailureAdvice(code: string, automatic = false, reason?: string): string {
+  // Delta builds before `organization_mismatch` publish it as `invalid_invocation`; their reason can go
+  // once stable has the code.
+  if (code === 'organization_mismatch' || reason === 'organization_mismatch')
     return "This thread already syncs to a different Delta team, so who can see it can't change"
   if (['not_visible', 'organization_not_member', 'authentication_required', 'wrong_account'].includes(code))
     return 'Check your Delta sign-in and access to this thread'

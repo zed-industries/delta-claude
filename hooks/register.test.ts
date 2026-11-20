@@ -1007,8 +1007,9 @@ describe('sharing', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     await $.session.end(sessionEnd(fake.session))
+    // Delta builds before `checkout_in_use` publish the refusal as `failed`.
     fake.commandFault = {
-      operation: 'worktree mount', code: 'checkout_in_use', reason: 'worktree_directory_in_use', retryable: false,
+      operation: 'worktree mount', code: 'failed', reason: 'worktree_directory_in_use', retryable: false,
       message: 'Checkout is managed by another thread',
     }
     const mounts = () => fake.operations().filter((operation) => operation === 'worktree mount').length

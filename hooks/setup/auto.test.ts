@@ -912,7 +912,8 @@ describe('offline recording', () => {
     // Memberships aren't loaded, so only the create itself can refuse.
     fake.organizations = []
     fake.files.set(POLICY, policy('private', 'org-1'))
-    fake.commandFault = { operation: 'create', code: 'organization_not_member', reason: 'organization_not_member', message: 'not a member of org-1', retryable: false }
+    // Delta builds before `organization_not_member` publish it as `not_visible`.
+    fake.commandFault = { operation: 'create', code: 'not_visible', reason: 'organization_not_member', message: 'not a member of org-1', retryable: false }
     let release!: () => void
     fake.holdRun = (operation) => operation === 'create' ? new Promise<void>((resolve) => { release = resolve }) : undefined
     await startAuto($, fake)
