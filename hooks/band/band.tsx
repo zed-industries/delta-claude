@@ -219,7 +219,7 @@ async function statusView(host: Host): Promise<StatusState> {
     connection: watch.connection,
     reconnecting: watch.reconnecting,
     error: watch.error,
-    deliveryPause: state?.pauses.get('delivery') ?? state?.pauses.get('verification'),
+    deliveryPause: state?.pauses.get('delivery') ?? state?.pauses.get('verification') ?? state?.pauses.get('checkout'),
     retryReason: state?.retryTimer ? state.retryReason : undefined,
     progress: currentProgress(),
     spinner: bandState.spinner,

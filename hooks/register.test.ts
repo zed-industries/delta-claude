@@ -2532,6 +2532,39 @@ describe('the watch', () => {
     fake.expectClean()
   })
 
+  test('a shared session whose own checkout Delta stopped syncing keeps taking prompts and delivers once it is ready', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('one')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    const binding = fake.store.get(`session:${fake.session}`) as any
+    const inactive = { reference: binding.checkoutReference, checkouts: [{ directory: binding.checkout, state: 'inactive', active: false }] }
+    fake.statusPatch = { worktrees: { status: 'available', items: [inactive] } }
+    await $.tool.call(bash('while-inactive', 'echo queued'))
+    await fake.settle()
+    expect(fake.records()).toHaveLength(1)
+    const notice = `Syncing paused: Delta is no longer syncing ${binding.checkout}. Run /delta-share to sync it again. Claude keeps working.`
+    expect(fake.logs.filter((log) => log.includes('Delta is no longer syncing'))).toEqual([notice])
+    // The band names the problem without the path, which would push the advice off its row.
+    expect(await drawBandText($)).toContain('Delta is no longer syncing this folder. Run /delta-share to sync it again')
+    // The checkout is still unavailable: Claude's prompts and turns go on, and their records queue.
+    expect((await $.prompt.submit(prompt('keeps working'))).drop).toBeUndefined()
+    await $.turn.start(turnStart('unsynced', 'keeps working'))
+    await fake.settle()
+    await $.turn.complete(turnComplete('unsynced'))
+    await fake.settle()
+    expect(fake.aborts).toEqual([])
+    expect(fake.records()).toHaveLength(1)
+    expect(fake.logs.filter((log) => log.includes('Delta is no longer syncing'))).toEqual([notice])
+    // The next prompt finds the checkout ready, and everything queued goes out.
+    fake.statusPatch = undefined
+    expect((await $.prompt.submit(prompt('ready again'))).drop).toBeUndefined()
+    await $.turn.start(turnStart('synced', 'ready again'))
+    await fake.settle()
+    expect((fake.store.get(`session:${fake.session}`) as any).pending).toEqual([])
+    expect(fake.records().length).toBeGreaterThan(1)
+    fake.expectClean()
+  })
+
   test('a large status bypasses short-command capture', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)

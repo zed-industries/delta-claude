@@ -1,8 +1,8 @@
 import { describe, expect, test, tier } from 'claude-code/testing'
 import { cliFixture } from '../testing/cli-fixtures'
 import {
-  appendFailure, classifyCommandFailure, contractRefusal, contractVersion, DeltaCommandError, JoinNotReadyError,
-  parseAppendReceipt, parseThreadContract, parseThreadFork, parseThreadMount, parseThreadStatus, parseWatchEvent,
+  appendFailure, CheckoutUnavailableError, classifyCommandFailure, contractRefusal, contractVersion, DeltaCommandError,
+  JoinNotReadyError, parseAppendReceipt, parseThreadContract, parseThreadFork, parseThreadMount, parseThreadStatus, parseWatchEvent,
   permanentFailureAdvice, type ThreadReady, type ThreadStatus, validateJoinedMounts, validateThreadCheckout,
   validateThreadFrontier,
 } from './thread-commands'
@@ -119,7 +119,7 @@ describe('thread watch', () => {
     }
     expect(() => validateThreadCheckout({ ...common, worktrees: unavailable }, binding))
       .toThrow(unavailable.error.code)
-    expect(() => validateThreadCheckout({ ...common, worktrees: empty }, binding)).toThrow('missing')
+    expect(() => validateThreadCheckout({ ...common, worktrees: empty }, binding)).toThrow('Delta has no record of /repo in this thread')
     expect(binding).toEqual({ checkout: '/repo', checkoutReference: 'history#t=0' })
   })
 
@@ -134,9 +134,34 @@ describe('thread watch', () => {
     for (const inventory of [worktrees, [...worktrees].reverse().map((tree) => ({ ...tree, checkouts: [...tree.checkouts].reverse() }))])
       expect(validateThreadCheckout({ ...status(), worktrees: { status: 'available', items: inventory } }, binding))
         .toEqual({ directory: '/repo', reference: 'history#t=0' })
-    expect(() => validateThreadCheckout({ ...status(), worktrees: { status: 'available', items: worktrees } }, { checkout: '/repo' })).toThrow('ambiguous')
-    expect(() => validateThreadCheckout(status(), { ...binding, checkoutReference: 'wrong#t=0' })).toThrow('preserved')
+    expect(() => validateThreadCheckout({ ...status(), worktrees: { status: 'available', items: worktrees } }, { checkout: '/repo' })).toThrow('no checkout attached')
+    expect(() => validateThreadCheckout(status(), { ...binding, checkoutReference: 'wrong#t=0' })).toThrow('different worktree')
     expect(binding).toEqual({ checkout: '/repo', checkoutReference: 'history#t=0' })
+  })
+
+  test('an unavailable checkout names its own problem and what to do about it', () => {
+    const binding = { checkout: '/repo', checkoutReference: 'history#t=0' }
+    const problem = (checkouts: object[], reference = binding.checkoutReference, patch: object = {}) => {
+      const worktrees = { status: 'available' as const, items: [{ reference, checkouts }] }
+      try { validateThreadCheckout({ ...status(), worktrees } as ThreadStatus, { ...binding, ...patch }) }
+      catch (error) { return error }
+    }
+    const cases: [unknown, string][] = [
+      [problem([{ directory: '/repo', state: 'missing', active: false }]), '/repo no longer exists. Restore it, or run /delta-share from the folder you work in now'],
+      [problem([{ directory: '/repo', state: 'inactive', active: false }]), 'Delta is no longer syncing /repo. Run /delta-share to sync it again'],
+      [problem([{ directory: '/repo', state: 'attached', active: false }]), 'Delta is no longer syncing /repo. Run /delta-share to sync it again'],
+      [problem([{ directory: '/repo', state: 'detached', active: false }]), '/repo is attached to a different Delta thread. Run /delta-share to attach it to this one'],
+      [problem([{ directory: '/repo', state: 'attached' }], 'other#t=0'), 'Delta now tracks /repo as a different worktree than the one this session attached. Run /delta-share to attach the current one'],
+      [problem([{ directory: '/elsewhere', state: 'attached' }]), 'Delta has no record of /repo in this thread. Run /delta-share to attach it again'],
+      [problem([{ directory: '/repo', state: 'attached' }, { directory: '/repo', state: 'attached' }]), 'Delta has several records of /repo in this thread. This is unexpected; please report it to the Delta team'],
+      // A session the plugin created itself is never told to publish with /delta-share.
+      [problem([{ directory: '/repo', state: 'inactive', active: false }], undefined, { autoUpload: {} }), 'Delta is no longer syncing /repo. Delta checks again on your next prompt'],
+    ]
+    for (const [error, message] of cases) {
+      expect(error).toBeInstanceOf(CheckoutUnavailableError)
+      expect((error as Error).message).toBe(message)
+      expect((error as CheckoutUnavailableError).summary).toBe(message.replace('/repo', 'this folder').replace(/^t/, 'T'))
+    }
   })
 
   test('Windows separator equivalence preserves checkout identity and readiness requirements', () => {
@@ -155,7 +180,7 @@ describe('thread watch', () => {
     expect(validateThreadCheckout(state({ state: 'attached' }), { checkout: directory, checkoutReference: mount.reference }))
       .toEqual({ directory: reported, reference: mount.reference })
     expect(() => validateThreadCheckout(state(), { checkout: directory })).toThrow()
-    expect(() => validateThreadCheckout(state({ active: false }), { checkout: directory, checkoutReference: mount.reference })).toThrow('inactive')
+    expect(() => validateThreadCheckout(state({ active: false }), { checkout: directory, checkoutReference: mount.reference })).toThrow('different Delta thread')
     expect(() => validateJoinedMounts(state(), [{ ...mount, reference: 'other' }])).toThrow(JoinNotReadyError)
     for (const patch of [{ active: false }, { state: 'missing' }, { directory: `${reported}-other` }])
       expect(() => validateJoinedMounts(state(patch), [mount])).toThrow(JoinNotReadyError)

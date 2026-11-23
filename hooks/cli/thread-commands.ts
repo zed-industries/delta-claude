@@ -484,6 +484,15 @@ export function contractVersion(range: ThreadContract): number {
 }
 
 /**
+ * Delta does not report the session's own checkout as attached to its thread and synchronizing. The
+ * message names which problem it is and what to do, without a final period; the binding is unchanged.
+ */
+export class CheckoutUnavailableError extends Error {
+  /** The message without the folder's path, for a single line of the band. */
+  constructor(message: string, readonly summary: string) { super(message) }
+}
+
+/**
  * Select this binding's checkout, never the first entry in a native inventory. A session this plugin
  * created itself may participate while its thread is still local-only: its upload intent means the
  * checkout is attached and recorded, and registering the thread with the cloud happens in the
@@ -497,15 +506,40 @@ export function validateThreadCheckout(
     throw new Error('The thread has no authenticated shared access; run /delta-share to explicitly publish it')
   if (state.worktrees.status === 'unavailable')
     throw inspectionFailure(state.worktrees.error)
-  const matches = state.worktrees.items.flatMap((worktree) => worktree.checkouts
-    .filter((checkout) => binding.checkout !== undefined && samePath(checkout.directory, binding.checkout) &&
-      worktree.reference === binding.checkoutReference &&
-      ((checkout.state === 'attached' && checkout.active !== false) ||
-        (checkout.state === 'detached' && checkout.active === true)))
-    .map((checkout) => ({ directory: checkout.directory, reference: worktree.reference })))
-  if (matches.length !== 1)
-    throw new Error('The bound checkout is detached, inactive, missing, ambiguous, or has a different reference; the existing binding was preserved. Run /delta-share from the intended checkout.')
-  return matches[0]!
+
+  const { checkout: directory, checkoutReference: reference } = binding
+  // A session this plugin created itself never publishes with /delta-share; its next prompt asks Delta again.
+  const unavailable = (problem: (folder: string) => string, action: string) => {
+    const advice = binding.autoUpload ? 'Delta checks again on your next prompt' : action
+    const sentence = (folder: string) => { const text = problem(folder); return `${text[0]!.toUpperCase()}${text.slice(1)}. ${advice}` }
+    return new CheckoutUnavailableError(sentence(directory ?? 'this folder'), sentence('this folder'))
+  }
+
+  if (directory === undefined || reference === undefined)
+    throw unavailable(() => 'This session has no checkout attached to its Delta thread', 'Run /delta-share to attach one')
+
+  const here = state.worktrees.items.flatMap((worktree) => worktree.checkouts
+    .filter((checkout) => samePath(checkout.directory, directory))
+    .map((checkout) => ({ ...checkout, reference: worktree.reference })))
+  const recorded = here.filter((checkout) => checkout.reference === reference)
+  const matches = recorded.filter((checkout) => (checkout.state === 'attached' && checkout.active !== false) ||
+    (checkout.state === 'detached' && checkout.active === true))
+
+  if (matches.length === 1) return { directory: matches[0]!.directory, reference }
+  if (matches.length > 1)
+    throw unavailable((folder) => `Delta has several records of ${folder} in this thread`, 'This is unexpected; please report it to the Delta team')
+
+  if (!recorded.length) {
+    if (here.length)
+      throw unavailable((folder) => `Delta now tracks ${folder} as a different worktree than the one this session attached`, 'Run /delta-share to attach the current one')
+    throw unavailable((folder) => `Delta has no record of ${folder} in this thread`, 'Run /delta-share to attach it again')
+  }
+
+  if (recorded.some((checkout) => checkout.state === 'missing'))
+    throw unavailable((folder) => `${folder} no longer exists`, 'Restore it, or run /delta-share from the folder you work in now')
+  if (recorded.some((checkout) => checkout.state === 'detached'))
+    throw unavailable((folder) => `${folder} is attached to a different Delta thread`, 'Run /delta-share to attach it to this one')
+  throw unavailable((folder) => `Delta is no longer syncing ${folder}`, 'Run /delta-share to sync it again')
 }
 
 /** One worktree of a joined thread, as `thread mount` placed it on this machine. */

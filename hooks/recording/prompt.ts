@@ -14,7 +14,7 @@ import {
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import { errorText } from '../core/text'
-import { classifyCommandFailure, JoinNotReadyError } from '../cli/thread-commands'
+import { CheckoutUnavailableError, classifyCommandFailure, JoinNotReadyError } from '../cli/thread-commands'
 import { liveFor, startConversation } from '../watch/watch'
 import { settleRemote, settling } from '../watch/rows'
 
@@ -120,15 +120,18 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
     if (!activationIncomplete(runtime) && !runtime.restoringCheckout && !runtime.checkoutRefusal) {
       // Delivery asks Delta about the checkout before every send, so a prompt doesn't wait for that.
       // A session a failed check paused asks again here, which is how it recovers.
-      if (runtime.pauses.has('verification')) await verifyCheckout(host, runtime.binding)
+      if (runtime.pauses.has('verification') || runtime.pauses.has('checkout')) await verifyCheckout(host, runtime.binding)
       else await requireBoundCheckout(host, runtime.binding)
       if (isPaused(runtime)) throw new Error(pauseNotice(runtime))
     }
   } catch (error) {
     // Offline, an unanswered checkout check says nothing about the checkout: the records stay
-    // queued and retry, so the prompt proceeds rather than being dropped. A non-retryable refusal
-    // or a local persistence failure still stops it.
-    if (!(offline && classifyCommandFailure(error) === 'transient' && !isPaused(runtime))) {
+    // queued and retry, so the prompt proceeds rather than being dropped. So does one whose own
+    // checkout Delta reports unavailable: delivery stays paused, and the band says why. Any other
+    // non-retryable refusal or a local persistence failure still stops it.
+    const queues = offline && (error instanceof CheckoutUnavailableError ||
+      (classifyCommandFailure(error) === 'transient' && !isPaused(runtime)))
+    if (!queues) {
       // A check that could pass next time is no reason to suggest pausing Delta.
       const hint = classifyCommandFailure(error) === 'transient' ? '' : pauseSessionHint(runtime.binding)
       const text = `Delta is not ready for this prompt: ${errorText(error)}.${hint} The prompt was not submitted.`

@@ -22,8 +22,8 @@ import {
 import type { Host } from '../core/host'
 import { children, deliverChild, stopReasonOf } from '../subagents/subagents'
 import {
-  appendFailure, classifyCommandFailure, DeltaCommandError, DeltaSendError, JoinNotReadyError, permanentFailureAdvice,
-  PLAN_CONTRACT_VERSION, type ThreadTurn, validateJoinedMounts, validateThreadCheckout, validateThreadFrontier,
+  appendFailure, CheckoutUnavailableError, classifyCommandFailure, DeltaCommandError, DeltaSendError, JoinNotReadyError,
+  permanentFailureAdvice, PLAN_CONTRACT_VERSION, type ThreadTurn, validateJoinedMounts, validateThreadCheckout, validateThreadFrontier,
 } from '../cli/thread-commands'
 import { errorText } from '../core/text'
 import { capturesEdits, startCapture } from './edit-capture'
@@ -272,7 +272,15 @@ export async function verifyCheckout(host: Host, binding: Binding) {
   const status = await threadStatus(host, binding.locator ?? binding.thread!, producerOf(binding))
   validateThreadFrontier(status, binding)
   if (binding.joined) validateJoinedMounts(status, binding.mounts ?? [])
-  else validateThreadCheckout(status, binding)
+  else {
+    try { validateThreadCheckout(status, binding) }
+    catch (error) {
+      // What Delta answered tells the cases apart when someone reports this.
+      if (error instanceof CheckoutUnavailableError)
+        await host.ui.log(`Delta checkout check failed for ${binding.checkout} (${binding.checkoutReference}): ${JSON.stringify(status.worktrees)}`, { to: 'debug' })
+      throw error
+    }
+  }
   if (binding.joined) {
     try { await requireJoinedDirectory(host, binding) }
     catch { throw new Error('The joined session or directory changed during checkout inspection; participation was not enabled') }
@@ -280,6 +288,7 @@ export async function verifyCheckout(host: Host, binding: Binding) {
   const runtime = sessions.get(binding.session)
   if (runtime) {
     resumeCheckout(runtime, 'verification')
+    resumeCheckout(runtime, 'checkout')
     runtime.joinFailure = undefined
   }
   await rememberStatus(host, binding.session, status)
@@ -315,6 +324,14 @@ async function drainPending(host: Host, session: string): Promise<boolean> {
         // any other session waits, and drain decides how long to keep asking.
         const state = sessions.get(session)
         const permanent = classifyCommandFailure(error) === 'permanent'
+        if (state && !state.binding?.stopped && error instanceof CheckoutUnavailableError) {
+          // The session's own checkout is not synchronizing: delivery stops until a prompt finds it
+          // ready, and a session that records offline keeps taking prompts meanwhile.
+          pauseCheckout(state, 'checkout', error.summary)
+          host.ui.invalidate()
+          await host.ui.log(`Syncing paused: ${error.message}.${recordsOffline(session, binding) ? ' Claude keeps working.' : ''}`, { to: 'transcript' })
+          throw new DeltaSendError(error.message, false)
+        }
         if (state && permanent && !state.binding?.stopped) pauseCheckout(state, 'verification')
         if (permanent || !recordsOffline(session, binding)) throw error
       }
@@ -757,7 +774,8 @@ export async function startTurn(host: Host, e: HookEvent<'turn.start'>, next: Ho
     await beginExecution(host, session, e.turnId)
     // A session that records offline keeps its turn while the watcher is down, and a delivery pause
     // stops delivery rather than Claude: observation and delivery are not required to record, and a
-    // transient refusal queues rather than stopping the turn. A verification pause still stops it.
+    // transient refusal queues rather than stopping the turn. Nor does its own checkout being
+    // unavailable stop it. Any other verification pause still does.
     const offline = recordsOffline(session, runtime.binding)
     const blockingPause = offline ? runtime.pauses.has('verification') : isPaused(runtime)
     const observationDown = !offline && !activationIncomplete(runtime) &&

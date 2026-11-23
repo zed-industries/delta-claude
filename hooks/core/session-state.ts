@@ -153,9 +153,11 @@ export const requests: { join?: JoinRequest; share?: ShareRequest; shareAfterTur
 /**
  * `watcher`: observation is not live; the next live watch connection lifts it.
  * `verification`: a checkout check failed; a passing check lifts it.
+ * `checkout`: Delta reports the session's own checkout unavailable; a passing check lifts it. Unlike
+ * `verification`, it stops delivery but not Claude in a session that records offline.
  * `delivery`: Delta refused a record or the thread; only explicit share/join recovery lifts it.
  */
-type CheckoutPause = 'watcher' | 'verification' | 'delivery'
+type CheckoutPause = 'watcher' | 'verification' | 'checkout' | 'delivery'
 /** One row waiting for its turn's start record, with the tool identity it later attributes. */
 export type HeldRow = { update: Update; toolId?: string; turnId?: string }
 export type SessionState = {
