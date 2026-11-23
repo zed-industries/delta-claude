@@ -7,7 +7,9 @@ import { activationIncomplete, captureDecided, noticeSession, outbox } from '../
 import type { Entry } from '../subagents/children'
 import { capturedMessage, isOmittedTool, messageUpdates, resultUpdate, toolInfo, type Update } from './content'
 import { deliveryFailure, deliveryRetryDelay } from './delivery-policy'
-import { requireContract, threadAppend, threadDiscard, threadFork, threadStatus, verifiedContract } from '../cli/delta-cli'
+import {
+  requireContract, stopWorktreeMount, threadAppend, threadDiscard, threadFork, threadStatus, verifiedContract,
+} from '../cli/delta-cli'
 import { isAskingOwnQuestion, notifyOnce } from '../setup/interaction'
 import { isJsonObject } from '../core/json'
 import {
@@ -296,6 +298,21 @@ export async function verifyCheckout(host: Host, binding: Binding) {
 }
 
 /**
+ * Stop delivery because Delta reports the session's own checkout unavailable, and say so once: the
+ * pause lasts until a check finds the checkout ready, and a session that records offline keeps taking
+ * prompts meanwhile. When only synchronization stopped, this process's mount command no longer
+ * keeps it running, so it is ended and the next prompt mounts the checkout again.
+ */
+export async function pauseForCheckout(host: Host, state: SessionState, binding: Binding, error: CheckoutUnavailableError) {
+  if (state.pauses.has('checkout')) return
+  pauseCheckout(state, 'checkout', error.summary)
+  host.ui.invalidate()
+  const offline = recordsOffline(binding.session, binding)
+  if (offline && error.syncStopped && binding.checkout) await stopWorktreeMount(binding.session, binding.checkout)
+  await host.ui.log(`Syncing paused: ${error.message}.${offline ? ' Claude keeps working.' : ''}`, { to: 'transcript' })
+}
+
+/**
  * Resolves true only when every pending record was delivered; stopping early because of a pause or
  * session change is not success. Rejects with the refusal, and appends nothing, when the CLI's
  * recording contract is one this plugin does not speak.
@@ -325,11 +342,7 @@ async function drainPending(host: Host, session: string): Promise<boolean> {
         const state = sessions.get(session)
         const permanent = classifyCommandFailure(error) === 'permanent'
         if (state && !state.binding?.stopped && error instanceof CheckoutUnavailableError) {
-          // The session's own checkout is not synchronizing: delivery stops until a prompt finds it
-          // ready, and a session that records offline keeps taking prompts meanwhile.
-          pauseCheckout(state, 'checkout', error.summary)
-          host.ui.invalidate()
-          await host.ui.log(`Syncing paused: ${error.message}.${recordsOffline(session, binding) ? ' Claude keeps working.' : ''}`, { to: 'transcript' })
+          await pauseForCheckout(host, state, binding, error)
           throw new DeltaSendError(error.message, false)
         }
         if (state && permanent && !state.binding?.stopped) pauseCheckout(state, 'verification')

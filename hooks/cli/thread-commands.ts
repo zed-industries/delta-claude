@@ -488,8 +488,12 @@ export function contractVersion(range: ThreadContract): number {
  * message names which problem it is and what to do, without a final period; the binding is unchanged.
  */
 export class CheckoutUnavailableError extends Error {
-  /** The message without the folder's path, for a single line of the band. */
-  constructor(message: string, readonly summary: string) { super(message) }
+  /**
+   * `summary` is the message without the folder's path, for a single line of the band. `syncStopped`
+   * says Delta still records the checkout in this thread and only its synchronization is not running,
+   * which mounting it again can fix.
+   */
+  constructor(message: string, readonly summary: string, readonly syncStopped = false) { super(message) }
 }
 
 /**
@@ -509,10 +513,10 @@ export function validateThreadCheckout(
 
   const { checkout: directory, checkoutReference: reference } = binding
   // A session this plugin created itself never publishes with /delta-share; its next prompt asks Delta again.
-  const unavailable = (problem: (folder: string) => string, action: string) => {
+  const unavailable = (problem: (folder: string) => string, action: string, syncStopped = false) => {
     const advice = binding.autoUpload ? 'Delta checks again on your next prompt' : action
     const sentence = (folder: string) => { const text = problem(folder); return `${text[0]!.toUpperCase()}${text.slice(1)}. ${advice}` }
-    return new CheckoutUnavailableError(sentence(directory ?? 'this folder'), sentence('this folder'))
+    return new CheckoutUnavailableError(sentence(directory ?? 'this folder'), sentence('this folder'), syncStopped)
   }
 
   if (directory === undefined || reference === undefined)
@@ -539,7 +543,7 @@ export function validateThreadCheckout(
     throw unavailable((folder) => `${folder} no longer exists`, 'Restore it, or run /delta-share from the folder you work in now')
   if (recorded.some((checkout) => checkout.state === 'detached'))
     throw unavailable((folder) => `${folder} is attached to a different Delta thread`, 'Run /delta-share to attach it to this one')
-  throw unavailable((folder) => `Delta is no longer syncing ${folder}`, 'Run /delta-share to sync it again')
+  throw unavailable((folder) => `Delta is no longer syncing ${folder}`, 'Run /delta-share to sync it again', true)
 }
 
 /** One worktree of a joined thread, as `thread mount` placed it on this machine. */

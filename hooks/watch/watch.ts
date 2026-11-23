@@ -8,7 +8,7 @@ import {
 } from '../band/band'
 import { reconnectDelay } from '../cli/command-outcomes'
 import { conversationText, type Ledger, RemoteView } from './conversation'
-import { drain, loseExecution, observeTurn, recordsOffline } from '../recording/delivery'
+import { drain, loseExecution, observeTurn, pauseForCheckout, recordsOffline } from '../recording/delivery'
 import { threadStatus, threadWatch, watchEvents } from '../cli/delta-cli'
 import { refreshMounts } from '../sharing/join'
 import { PresenceTracker } from './presence'
@@ -20,7 +20,7 @@ import type { Host } from '../core/host'
 import { personKey, statusCurrentTurn, type StatusState, threadTurnOwned, type TurnStatus } from '../band/status'
 import { recordsChildren } from '../subagents/subagents'
 import {
-  DeltaCommandError, permanentFailureAdvice, type ThreadReady, type ThreadStatus, type ThreadTurn,
+  CheckoutUnavailableError, DeltaCommandError, permanentFailureAdvice, type ThreadReady, type ThreadStatus, type ThreadTurn,
   validateJoinedMounts, validateThreadCheckout, validateThreadFrontier, type WatchChild, type WatchEvent,
 } from '../cli/thread-commands'
 import { errorText } from '../core/text'
@@ -475,6 +475,15 @@ async function consumeConversation(
       if (running) await loseExecution(host, session, running.sequence, 'The Delta watcher disconnected', ownsObserver)
       if (!ownsObserver()) return
     }
+    // Delta answered, and the session's own checkout is what is not ready. The pause a resumed session
+    // took for this watch gives way to the checkout's, under which an offline session takes prompts.
+    const checkoutUnavailable = failure instanceof CheckoutUnavailableError && !stateFor(session).binding?.stopped &&
+      recordsOffline(session, stateFor(session).binding) ? failure : undefined
+    if (checkoutUnavailable) {
+      await pauseForCheckout(host, stateFor(session), stateFor(session).binding!, checkoutUnavailable)
+      if (!ownsObserver()) return
+      resumeCheckout(stateFor(session), 'watcher')
+    }
     if (failure instanceof DeltaCommandError && failure.hints.retryable === false) {
       // A retryable failure is a lost connection, but a non-retryable one needs a person:
       // reconnecting cannot bring back a deleted thread or restored access on its own.
@@ -494,7 +503,7 @@ async function consumeConversation(
     // The transcript says why once; the band waits out a brief drop before showing it.
     const interruption = `Connection interrupted: ${errorText(failure)} Retrying in ${delay / 1000}s.`
     retrying(host, interruption)
-    if (attempts === 1) await host.ui.log(interruption, { to: 'transcript' })
+    if (attempts === 1 && !checkoutUnavailable) await host.ui.log(interruption, { to: 'transcript' })
     if (!ownsObserver()) return
     try { await host.clock.sleep(delay, { signal }) }
     catch (error) { if (!signal.aborted) throw error }

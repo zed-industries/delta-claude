@@ -1110,7 +1110,12 @@ describe('sharing', () => {
       const commands = fake.operations().length
       await $.session.start(sessionStart)
       await fake.settle()
-      expect((await $.prompt.submit(prompt('unsafe'))).drop).toBeDefined()
+      // The resumed session keeps taking prompts, says once what is wrong, and delivers nothing.
+      expect((await $.prompt.submit(prompt('unsafe'))).drop).toBeUndefined()
+      expect(fake.logs.filter((log) => log.startsWith('Syncing paused'))).toEqual([
+        `Syncing paused: Delta now tracks ${CHECKOUT} as a different worktree than the one this session attached. Run /delta-share to attach the current one. Claude keeps working.`,
+      ])
+      expect(fake.logs.some((log) => log.includes('Connection interrupted'))).toBe(false)
       expect(fake.store.get(`session:${fake.session}`)).toEqual(saved)
       expect(fake.records()).toHaveLength(1)
       expectNoSetupCommands(fake, commands)
@@ -2546,8 +2551,13 @@ describe('the watch', () => {
     expect(fake.logs.filter((log) => log.includes('Delta is no longer syncing'))).toEqual([notice])
     // The band names the problem without the path, which would push the advice off its row.
     expect(await drawBandText($)).toContain('Delta is no longer syncing this folder. Run /delta-share to sync it again')
-    // The checkout is still unavailable: Claude's prompts and turns go on, and their records queue.
+    // Delta still lists the checkout, so the mount command that no longer syncs it was ended, and the
+    // next prompt mounts it again. Claude's prompts and turns go on meanwhile, and their records queue.
+    const mounts = () => fake.operations().filter((operation) => operation === 'worktree mount').length
+    const mounted = mounts()
     expect((await $.prompt.submit(prompt('keeps working'))).drop).toBeUndefined()
+    await fake.settle()
+    expect(mounts()).toBe(mounted + 1)
     await $.turn.start(turnStart('unsynced', 'keeps working'))
     await fake.settle()
     await $.turn.complete(turnComplete('unsynced'))
@@ -2555,6 +2565,8 @@ describe('the watch', () => {
     expect(fake.aborts).toEqual([])
     expect(fake.records()).toHaveLength(1)
     expect(fake.logs.filter((log) => log.includes('Delta is no longer syncing'))).toEqual([notice])
+    // Mounting again did not help, and it is not tried on every prompt.
+    expect(mounts()).toBe(mounted + 1)
     // The next prompt finds the checkout ready, and everything queued goes out.
     fake.statusPatch = undefined
     expect((await $.prompt.submit(prompt('ready again'))).drop).toBeUndefined()
