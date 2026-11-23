@@ -492,7 +492,7 @@ describe('the band on an automatic session', () => {
       await drawBandText($)
       await fake.settle()
       const band = await drawBandText($)
-      expect(band).toContain("Synced with tester's Organization")
+      expect(band).toContain("Private · tester's Organization")
       expect(band).not.toContain('Shared with')
       // A wide band has room for every control, so a share control would be drawn if offered.
       expect(JSON.stringify(await $.ui.render({ ...abovePrompt, props: { ...abovePrompt.props, bodyColumns: 200 } }))).not.toContain('Share with')
@@ -547,7 +547,7 @@ describe('the band on an automatic session', () => {
     // The first draw reads the organization directory; the next one names it.
     await drawBandText($)
     await fake.settle()
-    expect(await drawBandText($)).toContain('Synced with Personal')
+    expect(await drawBandText($)).toContain('Private · Personal')
     await fake.settle()
     const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
     expect(await terminal.find({ type: 'Button', text: 'Share with Personal' })).toBeDefined()

@@ -247,7 +247,7 @@ async function statusView(host: Host): Promise<StatusState> {
 }
 
 /**
- * Who can see the thread, apart from whether it has a link: `Synced with <org>` for a thread only
+ * Who can see the thread, apart from whether it has a link: `Private · <org>` for a thread only
  * its owner sees (a private one, or any in a personal organization, which has no other members),
  * `Shared with <org>`, or `Unlisted`.
  */
@@ -257,7 +257,7 @@ function audienceLabel(binding: Binding | undefined): string | undefined {
   const organization = threadOrganization(binding) ?? currentOrganizationId
   const name = organizationName(organization) ?? 'your team'
   return binding.visibility === 'private' || isPersonalOrganizationId(organization ?? '')
-    ? `Synced with ${name}` : `Shared with ${name}`
+    ? `Private · ${name}` : `Shared with ${name}`
 }
 
 /**
