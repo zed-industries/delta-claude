@@ -2,7 +2,7 @@ import { describe, type Engine, expect, test as kitTest, tier } from 'claude-cod
 import type { On } from 'claude-code'
 import {
   agentInfo, bash, CHECKOUT, childActor, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
-  turnComplete, turnStart, userText,
+  turnComplete, turnStart, typedDelta, userText,
 } from '../testing/fake-thread-commands'
 import { cliFixture } from '../testing/cli-fixtures'
 
@@ -552,6 +552,31 @@ describe('Delta threads as subagents', () => {
     expect(records[1]!.update?._meta?.delta?.sender).toEqual({ external_id: fake.session })
     expect(fake.entered.at(-1)?.text).toBe('The Delta thread "Release notes" finished its turn. Its reply:\n\nWrote RELEASE.md')
     fake.expectClean()
+  })
+
+  test('/delta pause leaves a running thread run the mount it works in until the session ends', async ($, on) => {
+    const fake = await sharedSession($, on)
+    fake.server.worktrees = [{ reference: 'worktree-1#t=1', name: 'repo' }]
+    const tree = { reference: 'notes-tree#t=1', name: 'notes' }
+    fake.server.threads.set('root#s=notes', { thread: 'notes-thread', name: 'Release notes', worktrees: [tree], items: [] })
+    fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
+    fake.mountReply = (owner) => cliFixture('mount', { thread_id: 'notes-thread', owner, directory: '/mounts/notes',
+      worktrees: [{ ...tree, directory: '/mounts/notes/notes', state: 'mounted' }] })
+    await fake.settle()
+    const sending = $.session.send({ to: 'Release notes', text: 'Write RELEASE.md' } as never)
+    await fake.settle()
+    const agentId = threadAgent(fake)
+    await $.turn.start({ ...turnStart('first'), agentId } as never)
+    expect(await sending).toEqual({ isDelivered: true })
+    await fake.settle()
+    const owner = fake.mountRequests.at(-1)!.owner
+
+    expect((await $.command.run(typedDelta('pause'))).text).toStartWith('Delta is paused for this session')
+    await fake.settle()
+    expect(fake.unmounts).toEqual([])
+    await $.session.end(sessionEnd(fake.session))
+    await fake.settle()
+    expect(fake.unmounts.map((unmount) => unmount.owner)).toEqual([owner])
   })
 
   test("a thread run's own mount is released after 5 idle minutes and mounted again when it resumes", async ($, on) => {

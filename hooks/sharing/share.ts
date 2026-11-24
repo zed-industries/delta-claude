@@ -111,8 +111,9 @@ export type SessionPause =
  * and clear `snapshot`, which every recording path and the band's `Syncing` read. The binding keeps its
  * thread, producer and sequence, and where the conversation stood, so `/delta share` resumes the same
  * thread and adds what was said meanwhile. Its watch, checkout mount and subagents' mounts stop; the
- * checkout's files stay as they are. A joined session, a turn underway, a share or join in flight, or a
- * running subagent is refused, since stopping under any of them would cut a live transition.
+ * checkout's files stay as they are. A joined session, a turn underway, or a share or join in flight is
+ * refused, since stopping under any of them would cut a live transition. A running subagent goes
+ * unrecorded from here and keeps any mount it works in until the session ends.
  */
 export async function pauseSession(host: Host, session: string): Promise<SessionPause> {
   const runtime = stateFor(session)
@@ -133,9 +134,6 @@ export async function pauseSession(host: Host, session: string): Promise<Session
     return { kind: 'refused', reason: 'a share or join is still running; try again when it finishes' }
   if (runtime.currentTurnId)
     return { kind: 'refused', reason: 'a turn is running; try again when it finishes' }
-  // A recorded subagent may be working in a mount pausing releases.
-  if (binding.children?.length && activeBackgroundAgents(await host.agent.list()))
-    return { kind: 'refused', reason: 'a subagent is still running; try again when it finishes' }
   // Send what was recorded first, but never wait long: Delta may be unreachable, which is often why it
   // is being paused. What is left stays queued with its sequence and is sent when the session syncs again.
   const cancelled = new AbortController()
@@ -169,7 +167,9 @@ export async function pauseSession(host: Host, session: string): Promise<Session
   // A failure that held every prompt, such as a CLI too old to record with, no longer applies.
   runtime.joinFailure = undefined
   resetRuntime(runtime)
-  await releaseThreadMounts(host, session, stopped.children ?? [])
+  // A running subagent may be working in a mount of its own, which stays until the session ends.
+  const running = new Set((await host.agent.list()).filter((agent) => activeBackgroundAgents([agent])).map((agent) => agent.id))
+  await releaseThreadMounts(host, session, (stopped.children ?? []).filter((agentId) => !running.has(agentId)))
   // A share or join running for another session keeps its progress in the band.
   if (!requests.join && !requests.share) clearProgress(host)
   return { kind: 'paused', queued: stopped.pending.length + runtime.unsaved.length }
