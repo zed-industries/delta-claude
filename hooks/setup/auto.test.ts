@@ -105,12 +105,40 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
+  test('a failed joined-checkout lookup stops automatic recording but not Claude prompts', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('private', 'org-1'))
+    fake.storeKeysError = 'store file is malformed (the JSON is not an object)'
+    await startAuto($, fake)
+
+    expect(fake.operations()).not.toContain('create')
+    expect(fake.logs.join('\n')).toContain(fake.storeKeysError)
+    expect((await $.prompt.submit(prompt('still working'))).drop).toBeUndefined()
+    fake.expectClean()
+  })
+
   // Resume and fork take the same branch: only `startup` and `clear` start a new session.
   test('a resumed session never activates', async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('organization', 'org-1'))
     await startAuto($, fake, 'resume')
     expect(fake.server.thread).toBeUndefined()
+    expect(fake.operations()).not.toContain('create')
+    expect(binding(fake)).toBeUndefined()
+    fake.expectClean()
+  })
+
+  test('a failed continuation lookup leaves Claude usable and reports the error once', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('manual', 'org-1'))
+    const failure = 'could not read the store file'
+    fake.storeKeysError = failure
+    await startAuto($, fake, 'resume')
+
+    expect((await $.prompt.submit(prompt('still working'))).drop).toBeUndefined()
+    const notices = fake.logs.filter((line) => line.startsWith("Couldn't list saved session state"))
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toContain(failure)
     expect(fake.operations()).not.toContain('create')
     expect(binding(fake)).toBeUndefined()
     fake.expectClean()
@@ -964,6 +992,21 @@ describe('setup command and policy problems', () => {
 })
 
 describe('store retention', () => {
+  test('a failed cleanup is logged only to debug without interrupting an existing recording', async ($, on) => {
+    const fake = fakeThreads(on)
+    await startAuto($, fake)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    fake.storeKeysError = 'store file is unreadable'
+    await startAuto($, fake, 'resume')
+
+    expect(fake.debugLogs.join('\n')).toContain('Delta could not clean up old recordings')
+    expect(fake.debugLogs.join('\n')).toContain(fake.storeKeysError)
+    expect(fake.logs.join('\n')).not.toContain(fake.storeKeysError)
+    expect((await $.prompt.submit(prompt('still recording'))).drop).toBeUndefined()
+    fake.expectClean()
+  })
+
   test('the store prunes a long-ended session through activation, and keeps every unsettled one', async ($, on) => {
     const fake = fakeThreads(on)
     const store = fake.store as Map<string, unknown>
@@ -1158,6 +1201,21 @@ describe('setup dialogs and notices', () => {
       ({ result: { answers: { [question.questions[0].question]: 'Keep current sharing' } } })
     await runShare($, fake, 'share')
     expect(fake.operations()).not.toContain('share')
+    fake.expectClean()
+  })
+
+  test('a failed joined-checkout lookup stops an explicit share before exporting history', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] })
+    fake.files.set(POLICY, policy('manual', 'org-1'))
+    fake.answerQuestion = (question: any) =>
+      ({ result: { answers: { [question.questions[0].question]: 'Just me (sync privately)' } } })
+    await startAuto($, fake)
+    fake.storeKeysError = 'permission denied reading the store'
+    await runShare($, fake, 'share')
+
+    expect(fake.logs.join('\n')).toContain(fake.storeKeysError)
+    expect(fake.exports).toBe(0)
+    expect(fake.operations()).not.toContain('create')
     fake.expectClean()
   })
 

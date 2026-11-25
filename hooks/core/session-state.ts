@@ -352,6 +352,11 @@ export async function storedBinding(host: Host, storeKey: string): Promise<Bindi
   return await host.store.get(storeKey) as Binding | undefined
 }
 
+export async function listStoreKeys(host: Host): Promise<string[]> {
+  try { return await host.store.keys() }
+  catch (error) { throw new Error(`Couldn't list saved session state: ${errorText(error)}`, { cause: error }) }
+}
+
 export async function load(host: Host, session: string): Promise<Binding> {
   const previous = await storedBinding(host, key(session))
   if (!previous || previous.session !== session) return { session, snapshot: false, next: 1, pending: [] }

@@ -425,6 +425,7 @@ export function fakeThreads(hostOn: On, options: {
     endSession: undefined as ((session: string) => Promise<unknown>) | undefined,
     clock: mock.clock(on) as MockClock,
     store: new Map<string, unknown>(),
+    storeKeysError: undefined as string | undefined,
     files: new FixtureFiles(),
     commands: [] as string[][],
     /** The timeout each `delta --json org` command ran with, in order. */
@@ -895,9 +896,7 @@ export function fakeThreads(hostOn: On, options: {
     return { value: undefined }
   })
   on('store.delete', ($, e) => { fake.store.delete(e.key); return { value: undefined } })
-  // Only a Claude build that exposes `$.store.keys` can bound the store; registering the handler is
-  // harmless when the running kit does not know the event.
-  try { on('store.keys', () => ({ value: [...fake.store.keys()] })) } catch {}
+  on('store.keys', () => fake.storeKeysError ? { deny: fake.storeKeysError } : { value: [...fake.store.keys()] })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.attach', ($, e) => ({ clientId: e.clientId }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))

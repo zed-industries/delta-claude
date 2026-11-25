@@ -17,9 +17,9 @@ import { listOrganizations, organizationName } from './organizations'
 import { startPluginUpdates } from '../plugin-update/updates'
 import { policyPath, type ProjectPolicy, readProjectPolicy, recordsAutomatically } from './project-policy'
 import {
-  activation, type AutoUpload, type Binding, boundDirectory, drawnRowKey, isPaused, key, ledgerKey, load, pauseSessionHint,
-  pauseCheckout, producerOf, rememberTranscriptPath, report, requests, resumeCheckout, save, serial, sessions,
-  type SessionState, stateFor, stillActive, storedBinding, transcriptPathOf,
+  activation, type AutoUpload, type Binding, boundDirectory, drawnRowKey, isPaused, key, ledgerKey, listStoreKeys, load,
+  pauseCheckout, pauseSessionHint, producerOf, rememberTranscriptPath, report, requests, resumeCheckout, save, serial,
+  sessions, type SessionState, stateFor, stillActive, storedBinding, transcriptPathOf,
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import { offerOnboarding, type OnboardingStore, releaseOnboarding } from './setup'
@@ -85,8 +85,12 @@ export async function activate(host: Host, session: string, isCurrent = () => tr
     }
     // A conversation Claude Code moved here from a recording session keeps recording, here.
     if (continuationCandidate(session, binding)) {
-      const parent = await continuedFrom(host, session)
+      const parent = await continuedFrom(host, session, ownsActivation)
       if (!ownsActivation()) return
+      if (parent === 'unavailable') {
+        stateFor(session).binding = binding
+        return
+      }
       if (parent) binding = await adoptContinuation(host, session, parent.session) ?? binding
       if (!ownsActivation()) return
     }
@@ -112,7 +116,9 @@ export async function activate(host: Host, session: string, isCurrent = () => tr
     scheduleOutboxCleanup(host, binding)
     // Bounded store retention: entries for sessions that ended long ago are pruned only when they
     // hold nothing a later session would need. It never blocks activation.
-    void pruneStore(host).catch(() => {})
+    void pruneStore(host).catch((error) =>
+      host.ui.log(`Delta could not clean up old recordings: ${errorText(error)}`, { to: 'debug' }))
+      .catch(() => { /* Claude can close before the background notice is logged. */ })
     // An automatic session whose activation never finished, for example because Delta was unreachable
     // when it started, resumes that activation rather than waiting for a thread it does not have yet.
     if (activationIncomplete(runtime)) {
@@ -311,8 +317,10 @@ async function beginSession(host: Host, session: string) {
   // is activated again, which takes the conversation over now that its start is known.
   let activates = activation.session !== session || !binding
   if (!activates && binding && continuationCandidate(session, binding)) {
-    try { activates = await continuedFrom(host, session) !== undefined }
-    catch (error) { await report(host, error) }
+    try {
+      const parent = await continuedFrom(host, session)
+      activates = parent !== undefined && parent !== 'unavailable'
+    } catch (error) { await report(host, error) }
   }
   if (activates) {
     try { await activate(host, session) }
@@ -429,11 +437,16 @@ export function continuationCandidate(session: string, binding: Binding): boolea
     !binding.stopped
 }
 
-/** The recording session whose conversation Claude Code continued as `session`, if any. */
-export async function continuedFrom(host: Host, session: string): Promise<Binding | undefined> {
-  // A Claude build without `$.store.keys` cannot enumerate the store; the continuation goes unrecorded.
+/** Find the prior recording, or report why its store couldn't be searched. */
+export async function continuedFrom(
+  host: Host, session: string, isCurrent = () => true,
+): Promise<Binding | 'unavailable' | undefined> {
   let keys: string[]
-  try { keys = await host.store.keys() } catch { return }
+  try { keys = await listStoreKeys(host) }
+  catch (error) {
+    if (isCurrent()) await notifyOnce(host, errorText(error))
+    return 'unavailable'
+  }
   const now = await host.clock.now()
   for (const storeKey of keys) {
     if (!storeKey.startsWith('session:') || storeKey === key(session)) continue
@@ -866,9 +879,7 @@ const STORE_HORIZON_MS = 30 * 24 * 60 * 60 * 1000
  * checked, and deleted in turn: a resume elsewhere can only be lost in that one read-to-delete window.
  */
 async function pruneStore(host: Host) {
-  // A Claude build without `$.store.keys` cannot enumerate the store, so retention is skipped there.
-  let keys: string[]
-  try { keys = await host.store.keys() } catch { return }
+  const keys = await listStoreKeys(host)
   const now = await host.clock.now()
   const ids = new Set(keys.flatMap((storeKey) => /^(?:session|appended):(.+)$/.exec(storeKey)?.[1] ?? []))
   for (const id of ids) {

@@ -77,6 +77,10 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
   if (runtime.binding && continuationCandidate(session, runtime.binding) && !runtime.continuationRechecked) {
     runtime.continuationRechecked = true
     const parent = await continuedFrom(host, session)
+    if (parent === 'unavailable') {
+      delete runtime.continuationRechecked
+      return next(e)
+    }
     if (parent && await adoptContinuation(host, session, parent.session)) {
       try { await activate(host, session) }
       catch (error) { return { drop: `Delta couldn't continue recording this conversation: ${errorText(error)}. The prompt was not submitted.` } }

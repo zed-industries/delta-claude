@@ -26,7 +26,7 @@ import {
 } from '../setup/organizations'
 import { samePath } from '../core/paths'
 import {
-  activation, type Binding, digest, isPaused, load, pauseCheckout, recoveryCommand, report, requests, resetRuntime,
+  activation, type Binding, digest, isPaused, listStoreKeys, load, pauseCheckout, recoveryCommand, report, requests, resetRuntime,
   save, serial, stateFor, type StopPoint, storedBinding,
 } from '../core/session-state'
 import type { Host } from '../core/host'
@@ -461,9 +461,7 @@ async function resumeAfterOff(host: Host, request: ShareRequest, root: string, s
  * owner, so a match means the directory is that thread's checkout, not one this session can share.
  */
 export async function joinedBindingAt(host: Host, directory: string): Promise<Binding | undefined> {
-  // A Claude build without `$.store.keys` cannot enumerate the store; Delta still refuses the attach.
-  let keys: string[]
-  try { keys = await host.store.keys() } catch { return }
+  const keys = await listStoreKeys(host)
   for (const storeKey of keys) {
     if (!storeKey.startsWith('session:')) continue
     const binding = await storedBinding(host, storeKey)
