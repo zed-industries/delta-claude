@@ -15,7 +15,6 @@ export type Host = {
   agent: Pick<EngineInterface['agent'], 'list' | 'spawn'>
   clock: Pick<EngineInterface['clock'], 'after' | 'every' | 'now' | 'sleep'>
   command: Pick<EngineInterface['command'], 'list' | 'register' | 'run'>
-  config: Pick<EngineInterface['config'], 'list'>
   env: {
     claudeCodeRemote(): Promise<string | undefined>
     claudeConfigDir(): Promise<string | undefined>

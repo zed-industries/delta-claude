@@ -55,27 +55,29 @@ export async function drawPluginUpdateNotice(
   const row = pluginUpdateRow(shown.version, shown.ready, columns, shown.terminal)
   if (!row) return null
   const { Box, Text, Button } = host.ui.resolve(e)
-  const color = shown.ready ? 'green' : 'cyan'
+  const terminal = e.surface === 'terminal'
+  const accent = terminal ? {} : { color: shown.ready ? 'green' : 'cyan' }
+  const secondary = terminal ? {} : { dimColor: true }
   return <Box key="plugin-update-row" flexDirection="row" columnGap={1} height={1}>
     <Box width={row.summaryColumns} flexShrink={0}>
       <Text wrap="truncate-end">
-        <Text color={color}>{shown.ready ? '✓ ' : '↑ '}</Text>
-        <Text dimColor>{row.prefix}</Text>
-        <Text color={color} bold>{row.version}</Text>
+        <Text {...accent}>{shown.ready ? '✓ ' : '↑ '}</Text>
+        <Text {...secondary}>{row.prefix}</Text>
+        <Text {...accent} bold>{row.version}</Text>
       </Text>
     </Box>
     <Box flexDirection="row" columnGap={1} flexShrink={0}>
       <Button key="plugin-update" label={row.action}
         onPress={() => { void runNoticeCommand(host, shown, '').catch((error) => reportNoticeFailure(host, error)) }}>
-        <Text color={color} bold>{row.action}</Text>
+        <Text {...accent} bold>{row.action}</Text>
       </Button>
-      {row.later ? <Button key="plugin-update-later" dimColor label="Later"
+      {row.later ? <Button key="plugin-update-later" {...secondary} label="Later"
         onPress={() => {
           if (notice !== shown) return
           void snoozePluginUpdate(host, shown.session, shown.branch, shown.version)
             .catch((error) => reportNoticeFailure(host, error))
         }} /> : null}
-      {row.mute ? <Button key="plugin-update-off" dimColor label="Mute"
+      {row.mute ? <Button key="plugin-update-off" {...secondary} label="Mute"
         onPress={() => {
           void runNoticeCommand(host, shown, 'notifications off').catch((error) => reportNoticeFailure(host, error))
         }} /> : null}

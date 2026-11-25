@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import {
   bandWidth, firstNames, formatSeconds, personColor, personKey, pluginUpdateRow, renderBand, shortLink, statusCurrentTurn,
-  type StatusSegment, statusSpinnerRunning, type StatusState, toolRowParts,
+  type StatusSegment, statusSpinnerRunning, type StatusState, TERMINAL_INSET, toolRowParts,
 } from './status'
 import { cliFixture } from '../testing/cli-fixtures'
 import type { WatchItem } from '../cli/thread-commands'
@@ -17,12 +17,11 @@ test('a plugin update and its bracketed buttons fit one row', () => {
   for (const version of ['0.1.25', '10.100.1000']) {
     for (const ready of [false, true]) {
       for (let columns = 12; columns <= 160; columns++) {
-        // The status band reserves one cell of padding on each side on the terminal.
-        const row = pluginUpdateRow(version, ready, columns - 2)
+        const row = pluginUpdateRow(version, ready, columns - TERMINAL_INSET)
         if (!row) continue
         const controls = [`[ ${row.action} ]`, ...row.later ? ['[ Later ]'] : [], ...row.mute ? ['[ Mute ]'] : []]
         const text = `${ready ? '✓' : '↑'} ${row.prefix}${row.version} ${controls.join(' ')}`
-        expect([...text].length + 2).toBeLessThanOrEqual(columns)
+        expect([...text].length + TERMINAL_INSET).toBeLessThanOrEqual(columns)
         expect(row.summaryColumns).toBe(2 + row.prefix.length + row.version.length)
         expect(text).not.toContain('\n')
       }
@@ -67,6 +66,7 @@ test('the mark carries the connection, and a failure adds its reason below', () 
   const reconnecting = renderBand({ ...live, connection: 'retrying', reconnecting: true, people,
     turn: { state: 'remote', name: 'Maya', id: 'u-maya' } }, WIDE)
   expect(reconnecting.mark.text).toBe('◌')
+  expect(text(reconnecting.label)).toBe(' Delta · Offline')
   expect(text(reconnecting.right)).toBe('Maya, Sam, Ada')
   expect(reconnecting.right.filter((segment) => segment.bold).every((segment) => segment.dim)).toBe(true)
   expect(renderBand({ ...live, retryReason: 'timeout' }, WIDE).detail?.[0]?.text).toContain('timeout')
@@ -84,6 +84,10 @@ test('a recorded session says so beside the name at every width, and an unrecord
   const recorded = { ...live, recording: true }
   expect(text(renderBand({ ...recorded, error: 'watch failed', deliveryPause: 'record refused' }, WIDE).label)).toBe(' Delta · Paused')
   expect(text(renderBand({ ...recorded, error: 'watch failed' }, WIDE).label)).toBe(' Delta')
+  const short = renderBand({ ...recorded, error: 'watch failed' }, { columns: 24, terminal: true, rows: 1 })
+  expect(text(short.label)).toBe(' Delta · Error')
+  expect(short.link).toEqual({ href: LINK, copy: { label: 'copy' } })
+  expect(bandWidth(short, true)).toBeLessThanOrEqual(24)
   expect(text(renderBand({ ...recorded, retryReason: 'timeout' }, WIDE).label)).toBe(' Delta · Syncing')
 })
 

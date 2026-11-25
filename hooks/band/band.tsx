@@ -13,7 +13,7 @@ import {
 } from '../core/session-state'
 import type { Host } from '../core/host'
 import {
-  copyText, personColor, personKey, renderBand, SPINNER_FRAMES, type StatusSegment, statusSpinnerRunning,
+  copyText, personColor, personKey, renderBand, SPINNER_FRAMES, type StatusSegment, statusSpinnerRunning, TERMINAL_INSET,
   type StatusState,
 } from './status'
 import type { UpdateStep } from '../cli/install-update'
@@ -311,28 +311,6 @@ function statusLink(): string | undefined {
   return conversationWebLink(sessions.get(session)?.binding?.url)
 }
 
-/** The status bar's shade for each kind of theme: a step off the terminal's own background. */
-const BAR_SHADES = { dark: '#303030', light: '#e8e8e8' }
-/** The shade for the person's theme, read once and again whenever they change it. */
-let barTheme: keyof typeof BAR_SHADES | undefined
-
-/** A changed theme changes the shade; the next draw reads it again. */
-export function forgetBarTheme() {
-  barTheme = undefined
-}
-
-/**
- * The status bar's shade for the person's theme. A terminal that cannot show it as given rounds it
- * to a color it has; at worst the shade is lost and the band reads as a plain row.
- */
-async function barShade(host: Host): Promise<string> {
-  if (!barTheme) {
-    const theme = (await host.config.list()).find((row) => row.key === 'theme')?.value
-    barTheme = typeof theme === 'string' && theme.startsWith('light') ? 'light' : 'dark'
-  }
-  return BAR_SHADES[barTheme]
-}
-
 /** Copy the link to the surface the press came from, and confirm it only once the clipboard took it. */
 async function copyLink(host: Host, link: string, surface: RenderSurface) {
   const result = await host.ui.copy({ text: link, surface })
@@ -351,16 +329,16 @@ async function copyLink(host: Host, link: string, surface: RenderSurface) {
 }
 
 /** Only the props a segment actually sets, so the surface never sees an undefined style. */
-function segmentProps(segment: StatusSegment): TextProps {
+function segmentProps(segment: StatusSegment, terminalText = false): TextProps {
   const props: TextProps = {}
-  if (segment.color !== undefined) props.color = segment.color
+  if (!terminalText && segment.color !== undefined) props.color = segment.color
   if (segment.bold) props.bold = true
-  if (segment.dim) props.dimColor = true
+  if (!terminalText && segment.dim) props.dimColor = true
   if (segment.inverse) props.inverse = true
   return props
 }
 
-/** The color the band gives an item's author, so a person reads the same everywhere. */
+/** The color shared by an item's author and the desktop band's roster. */
 export function authorColor(item: WatchItem): string {
   return personColor(personKey(item.author ?? { user_id: null, name: itemAuthor(item) }))
 }
@@ -368,7 +346,7 @@ export function authorColor(item: WatchItem): string {
 /**
  * The band above the prompt: sync status, the thread's link and people, and an optional plugin update
  * row inside the same surface. It yields to a survey and bounds its own rows; remote agent
- * activity sits above the shaded status rows. Draining queued message rows here also gives them the
+ * activity sits above the status rows. Draining queued message rows here also gives them the
  * hook context their own command needs.
  */
 export async function drawBand(
@@ -382,7 +360,8 @@ export async function drawBand(
   if (maxRows === 0) return next(e)
   const terminal = e.surface === 'terminal'
   const columns = Math.max(0, e.props.bodyColumns)
-  let update = maxRows >= 2 ? await drawPluginUpdateNotice(host, e, columns - (terminal ? 2 : 0)) : null
+  const statusColumns = Math.max(0, columns - (terminal ? TERMINAL_INSET : 0))
+  let update = maxRows >= 2 ? await drawPluginUpdateNotice(host, e, statusColumns) : null
   if (!statusShown() && !update) return next(e)
   // This draw shows the current frame, so the animation may ask for the next.
   syncSpinner(host)
@@ -395,7 +374,8 @@ export async function drawBand(
   if (update) band = renderBand(state, { columns, terminal, rows: statusRows })
   const { Box, Text, Link, Button } = host.ui.resolve(e)
   const spans = (segments: StatusSegment[]) =>
-    segments.map((segment, index) => <Text key={String(index)} {...segmentProps(segment)}>{segment.text}</Text>)
+    segments.map((segment, index) =>
+      <Text key={String(index)} {...segmentProps(segment, terminal)}>{segment.text}</Text>)
   const { text, href, ownRow, copy } = band.link ?? {}
   // A followable link is a real hyperlink on every surface, so a terminal can open it however it
   // handles clicks. The terminal's Link takes no label: where Claude does not treat the terminal as
@@ -404,33 +384,35 @@ export async function drawBand(
   // offered.
   let link = null
   if (text && href) link = terminal ? <Link href={href} /> : <Link href={href} label={text} />
-  else if (text) link = <Text {...segmentProps({ text, dim: true })}>{text}</Text>
+  else if (text) link = <Text {...segmentProps({ text, dim: true }, terminal)}>{text}</Text>
+  const controlStyle = terminal ? {} : { dimColor: true }
   let copier = null
-  if (href && copy?.copied) copier = <Text color="green">{copyText(copy)}</Text>
+  if (href && copy?.copied) copier = <Text {...terminal ? {} : { color: 'green' }}>{copyText(copy)}</Text>
   // Taking the band's focus lands on the copy control, so Enter copies; a hotkey hint would read
   // as though the key worked from the prompt, where it only types.
-  else if (href && copy) copier = <Button key="copy" plain dimColor autoFocus label={copy.label}
+  else if (href && copy) copier = <Button key="copy" plain {...controlStyle} autoFocus label={copy.label}
     onPress={(press) => { void copyLink(host, href, press.surface).catch((error) => report(host, error)) }} />
   // A private thread offers the same publication `/delta share` runs; the band does not repeat it
   // once the thread is shared with the organization.
-  const sharer = band.share ? <Button key="share" plain dimColor label={band.share.label}
+  const sharer = band.share ? <Button key="share" plain {...controlStyle} label={band.share.label}
     onPress={() => { const session = watchedSession(); if (session) beginShare(host, session) }} /> : null
   // A refused offline thread offers the person the choice that resolves it.
   const conflict = band.conflict ? [
-    <Button key="fork" plain dimColor label={band.conflict.fork}
+    <Button key="fork" plain {...controlStyle} label={band.conflict.fork}
       onPress={() => { const session = watchedSession(); if (session) beginRefusalResolution(host, session, 'fork') }} />,
-    <Button key="discard" plain dimColor label={band.conflict.discard}
+    <Button key="discard" plain {...controlStyle} label={band.conflict.discard}
       onPress={() => { const session = watchedSession(); if (session) beginRefusalResolution(host, session, 'discard') }} />,
   ] : []
   // Every control is set apart by the same gap the band's other segments use.
   const controls = [copier, sharer, ...conflict].filter((control) => control !== null)
     .flatMap((control, index) => index ? [<Text key={`gap-${index}`}>{'  '}</Text>, control] : [control])
   const inline = link && !ownRow
+  const mark = segmentProps({ ...band.mark, dim: !terminal && band.mark.dim })
   const rows = [
     <Box key="band" flexDirection="row" justifyContent="space-between" columnGap={2}>
       <Box flexDirection="row">
         <Text wrap="truncate-end">
-          <Text {...segmentProps(band.mark)}>{band.mark.text}</Text>
+          <Text {...mark}>{band.mark.text}</Text>
           {spans(band.label)}
           {inline ? '  ' : ''}{inline ? link : null}
           {band.audience?.length ? <Text>{'  '}{spans(band.audience)}</Text> : null}
@@ -444,19 +426,20 @@ export async function drawBand(
     link && ownRow ? <Text key="link">{'  '}{link}</Text> : null,
     band.detail && statusRows >= 2 ? <Text key="detail" wrap="truncate-end">{'  '}{spans(band.detail)}</Text> : null,
   ].filter((part) => part !== null)
-  // Another participant's working agent reads like Claude's own working line: unshaded, above the
+  // Another participant's working agent reads like Claude's own working line: above the
   // band, where its finished calls then land in the transcript.
   const activity = band.activity ? <Text key="activity" wrap="truncate-end">{spans(band.activity)}</Text> : null
   const childActivity = band.childActivity ? <Text key="children" wrap="truncate-end">{spans(band.childActivity)}</Text> : null
-  // The desktop's own card sets the band apart. The terminal shades it, a status bar the width of
-  // the band, so it reads as part of the input area rather than another transcript row.
+  // The desktop's card sets it apart. In the terminal, a rail uses the former padding columns.
   let own = <Box flexDirection="column">{activity}{childActivity}{rows}</Box>
   if (terminal) {
-    const bar = <Box key="bar" flexDirection="column" width={columns} paddingX={1} backgroundColor={await barShade(host)}>{rows}</Box>
-    own = !activity && !childActivity ? bar : <Box flexDirection="column" width={columns}>
+    own = <Box flexDirection="column" width={columns}>
       {activity ? <Box paddingX={1}>{activity}</Box> : null}
       {childActivity ? <Box paddingX={1}>{childActivity}</Box> : null}
-      {bar}
+      <Box flexDirection="row">
+        <Box width={Math.min(TERMINAL_INSET, columns)} flexShrink={0}><Text wrap="truncate-end">▏</Text></Box>
+        <Box key="bar" flexDirection="column" width={statusColumns}>{rows}</Box>
+      </Box>
     </Box>
   }
   const rest = await next(e)

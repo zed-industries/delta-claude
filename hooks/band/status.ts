@@ -197,8 +197,8 @@ function childStatus(children: readonly WatchChild[], stale: boolean, frame: str
 const PERSON_COLORS = ['magenta', 'cyan', 'blue', 'magentaBright', 'cyanBright', 'blueBright']
 /** The least space between the two sides of the row. */
 const MIN_GAP = 2
-/** The status bar's padding, a column at each end. */
-const BAR_PADDING = 2
+/** Terminal columns reserved for the rail or for padding around activity rows. */
+export const TERMINAL_INSET = 2
 /** Names shown before the rest collapse to +N. */
 const MAX_NAMES = 3
 
@@ -296,7 +296,7 @@ export function copyText(copy: { label: string; copied?: true }): string {
 
 /**
  * The columns the band's first row takes, as its renderer draws it:
- * `● Delta  link  copy link        Maya, Sam`, padded by a column at each end on the terminal.
+ * `● Delta  link  copy link        Maya, Sam`, with a rail in the terminal.
  */
 export function bandWidth(band: BandView, terminal: boolean): number {
   const link = band.link?.text && !band.link.ownRow ? 2 + textWidth(band.link.text) : 0
@@ -305,7 +305,7 @@ export function bandWidth(band: BandView, terminal: boolean): number {
   const conflict = band.conflict ? 2 + textWidth(band.conflict.fork) + 2 + textWidth(band.conflict.discard) : 0
   const share = band.share ? 2 + textWidth(band.share.label) : 0
   const right = width(band.right)
-  return (terminal ? BAR_PADDING : 0) + width([band.mark, ...band.label]) + link + audience + copy + share + conflict +
+  return (terminal ? TERMINAL_INSET : 0) + width([band.mark, ...band.label]) + link + audience + copy + share + conflict +
     (right ? MIN_GAP + right : 0)
 }
 
@@ -346,10 +346,12 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     error: { text: '✕', color: 'red' }, pending: { text: '◌', color: 'yellow' },
     live: { text: '●', color: 'green' }, quiet: { text: '○', dim: true },
   } as const)[tone]
-  const label: StatusSegment[] = [{ text: ' Delta', dim: true },
+  const label: StatusSegment[] = [{ text: ' Delta', bold: layout.terminal, dim: !layout.terminal },
     ...running?.update ? [{ text: ' · ', dim: true }, { text: 'Updating' }]
       // Another failure may leave records still going out, so only a pause says the session stopped.
       : state.recording && state.deliveryPause ? [{ text: ' · ', dim: true }, { text: 'Paused' }]
+      : layout.terminal && failure && layout.rows === 1 ? [{ text: ' · Error' }]
+      : layout.terminal && !failure && state.reconnecting ? [{ text: ' · Offline' }]
       : state.recording && !failure ? [{ text: ' · ', dim: true }, { text: 'Syncing' }]
       : state.recording ? []
       : state.reminder ? [{ text: ' · ', dim: true }, { text: state.reminder.text }, { text: `  ${state.reminder.command}`, dim: true }]
@@ -373,7 +375,7 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     state.childrenStale || !['completed', 'stopped'].includes(child.status)) &&
     (layout.rows ?? Infinity) >= 2 + (detail ? 1 : 0) + (activityLine ? 1 : 0)
   // The URL's own row, wrapped as the terminal wraps it, fits only within the rows the others leave.
-  const linkRows = linkText ? Math.ceil((2 + textWidth(linkText)) / Math.max(1, layout.columns - BAR_PADDING)) : 0
+  const linkRows = linkText ? Math.ceil((2 + textWidth(linkText)) / Math.max(1, layout.columns - TERMINAL_INSET)) : 0
   const roomBelow = layout.terminal &&
     (layout.rows ?? Infinity) >= 1 + linkRows + (detail ? 1 : 0) + (activityLine ? 1 : 0) + (childLine ? 1 : 0)
   const others = (state.people ?? []).filter((person) => activityLine || person.id !== owner?.id)
@@ -406,7 +408,7 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     const separator = { text: ' › ', dim: true }
     const time = { text: `  (${formatSeconds(doing.seconds)}${doing.more ? ` · ${doing.more} more running` : ''})`, dim: true }
     // The line has the whole width, so a long title gives up its middle rather than its end.
-    const room = layout.columns - (layout.terminal ? BAR_PADDING : 0) - width([spinner, who, separator, time])
+    const room = layout.columns - (layout.terminal ? TERMINAL_INSET : 0) - width([spinner, who, separator, time])
     return [spinner, who, separator, { text: middleTruncate(doing.text, room), ...doing.tool ? { bold: true } : {} }, time]
   }
   const right = (give: GiveWay): StatusSegment[] => {
@@ -421,7 +423,7 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     const linkRoom = inlineLink && !below ? 2 + textWidth(inlineLink) : 0
     const copyRoom = href ? 2 + textWidth(give.shortCopy ? 'copy' : 'copy link') : 0
     const child = childLine ? [] : childStatus(children, !!state.childrenStale, frame,
-      Math.max(0, layout.columns - (layout.terminal ? BAR_PADDING : 0) - 7 - linkRoom - copyRoom -
+      Math.max(0, layout.columns - (layout.terminal ? TERMINAL_INSET : 0) - width([mark, ...label]) - linkRoom - copyRoom -
         MIN_GAP - width(working) - (working.length ? 3 : 0)))
     const parts = [working, child, people].filter((part) => part.length)
     return parts.flatMap((part, index) => index ? [{ text: ' · ', dim: true }, ...part] : part)
@@ -438,7 +440,7 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
       ...state.share && !give.noShare ? { share: state.share } : {},
       ...activityLine ? { activity: agent(false, true) } : {},
       ...childLine ? { childActivity: childStatus(children, !!state.childrenStale, frame,
-        Math.max(10, layout.columns - (layout.terminal ? BAR_PADDING : 0))) } : {},
+        Math.max(10, layout.columns - (layout.terminal ? TERMINAL_INSET : 0))) } : {},
       ...linkText ? { link: { ...text ? { text } : {}, ...href ? { href } : {}, ...below ? { ownRow: true as const } : {}, ...copy } } : {},
     }
   }

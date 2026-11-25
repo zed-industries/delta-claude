@@ -1,6 +1,6 @@
 import type { EngineInterface, HookFailure, On } from 'claude-code'
 import { activate, followTranscript, forgetSessionStart, noticeStart, pollTitle } from './setup/activation'
-import { clearProgress, drawBand, forgetBarTheme } from './band/band'
+import { clearProgress, drawBand } from './band/band'
 import {
   DELTA_USAGE, deltaMenu, installationUpdates, installUpdateHost, JOIN_USAGE, ORG_USAGE, registerCommands,
   runDeltaCommand,
@@ -71,9 +71,6 @@ function hostOf($: EngineInterface): Host {
       list: () => $.command.list(),
       register: (command) => $.command.register(command),
       run: (input) => $.command.run(input),
-    },
-    config: {
-      list: () => $.config.list(),
     },
     env: {
       claudeCodeRemote: () => $.env.get('CLAUDE_CODE_REMOTE'),
@@ -233,14 +230,6 @@ export function register(on: On) {
     forgetTranscriptPath(session)
     return next(e)
   })
-
-  // A changed theme changes the status bar's shade.
-  on('config.set', { key: 'theme' }, async ($, e, next) => {
-    const result = await next(e)
-    forgetBarTheme()
-    $.ui.invalidate('ui.render')
-    return result
-  }).catch(async ($, e, next) => { await logHookFailure($, 'config.set', next.error); return next(e) })
 
   on('session.start', async ($, e, next) => {
     const host = hostOf($)

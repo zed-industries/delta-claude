@@ -1,6 +1,6 @@
 /** CLI boundary fixture and Claude host; watching never creates, mounts, or publishes. */
 import { type Engine, expect, mock, type MockClock, type Plugin, type TestRest } from 'claude-code/testing'
-import type { AgentInfo, ApiMessage, ConfigRow, On, ProcessRunResult, ToolCallResult } from 'claude-code'
+import type { AgentInfo, ApiMessage, On, ProcessRunResult, ToolCallResult } from 'claude-code'
 import type { ThreadState, ThreadUser, WatchChild, WatchComment, WatchItem } from '../cli/thread-commands'
 import { cliErrorCodes, cliFixture } from './cli-fixtures'
 import { MINIMUM_CLAUDE_VERSION } from '../core/compatibility'
@@ -956,12 +956,6 @@ export function fakeThreads(hostOn: On, options: {
       if (fake.reloadResponse !== undefined) return { text: fake.reloadResponse }
     } else if (!['clear', 'cd', 'add-dir', 'rename'].includes(e.command)) throw new Error(`Unexpected fixture session command ${e.command}`)
     return {}
-  })
-  // The settings menu's rows, of which the band reads the theme for its status bar's shade.
-  on('config.list', () => {
-    const theme: ConfigRow = { key: 'theme', label: 'Theme', kind: 'choice', value: 'dark',
-      provider: { plugin: 'engine', tier: 'core' }, isLocked: false }
-    return { value: [theme] }
   })
   on('session.messages', async ($, e) => {
     if (e.agentId !== undefined && fake.unreadableAgents.has(e.agentId))

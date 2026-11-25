@@ -192,7 +192,7 @@ describe('plugin updates', () => {
     expect(await ui.find({ key: 'plugin-update' })).toBeDefined()
   })
 
-  test('the status band contains a single colored update row with visible button chrome', async ($, on) => {
+  test('the status band fits an update notice and its buttons in the second row', async ($, on) => {
     const fake = fakeThreads(on)
     fake.pluginInstalled = true
     fake.files.set(`${CHECKOUT}/.delta/settings.json`, '{"threads":{"mode":"manual"}}')
@@ -200,14 +200,14 @@ describe('plugin updates', () => {
     await fake.advance(0)
     const ui = await $.ui.mount({ ...abovePrompt, plugin: 'delta', props: { ...abovePrompt.props, maxRows: 2 } })
     const bar = await ui.find({ key: 'bar' })
-    expect(bar?.props.backgroundColor).toBe('#303030')
     expect(bar?.text).toContain('Not syncing')
     expect(bar?.children).toMatchObject([
       { type: 'Box', props: { key: 'band' } },
       { type: 'Box', props: { key: 'plugin-update-row', flexDirection: 'row', height: 1 } },
     ])
     expect((await ui.findAll({ type: 'Text', text: '0.1.2' }))
-      .some((element) => element.props.color === 'cyan' && element.props.bold === true)).toBe(true)
+      .some((element) => element.props.bold === true)).toBe(true)
+    expect(JSON.stringify(await ui.find({ key: 'plugin-update-row' }))).not.toMatch(/"color"|"dimColor"/)
     for (const [key, label] of [
       ['plugin-update', 'Update'], ['plugin-update-later', 'Later'], ['plugin-update-off', 'Mute'],
     ]) {
@@ -364,8 +364,6 @@ describe('plugin updates', () => {
     await fake.advance(0)
     const ui = await $.ui.mount({ ...abovePrompt, plugin: 'delta' })
     expect(await ui.find({ key: 'plugin-update', text: 'Reload' })).toBeDefined()
-    expect((await ui.findAll({ type: 'Text', text: '0.1.2' }))
-      .some((element) => element.props.color === 'green')).toBe(true)
     await ui.press({ key: 'plugin-update' })
     await fake.advance(0)
     expect(fake.pluginHttpCalls).toEqual([])
@@ -3043,7 +3041,7 @@ describe('remote activity', () => {
     expect(tree).toContain('Markdown')
     expect(tree).toContain('# Title')
     expect(tree).not.toContain('what the engine prefixes')
-    // Another agent's message is labelled apart from a person's, its author in the color the band gives them.
+    // Another agent's message is labelled apart from a person's, with the same color as on desktop.
     fake.upsert(remoteItem('Reply', { id: 'r', kind: 'agent_message', author: { user_id: null, name: 'Claude' } }))
     await fake.settle()
     await drawReady($, fake)
@@ -3594,21 +3592,22 @@ describe('the status band', () => {
     const fake = fakeThreads(on)
     await $.session.start(sessionStart)
     await fake.share($)
+    const desktop = await $.ui.mount({ ...abovePrompt, surface: 'desktop', plugin: 'delta' })
     // Delta reports the turn before it knows the requester's user, then again once it does.
     const adaColor = `"color":"${personColor(personKey(ADA))}"`
     fake.turn('running', { user_id: null, name: null, actor_id: 'actor-ada' }, 'remote-turn')
     await fake.settle()
     expect(await drawBandText($)).toContain('An agent')
-    expect(await drawBandText($)).not.toContain(adaColor)
+    expect(JSON.stringify(await desktop.drawn())).not.toContain(adaColor)
     // A user resolved before their name still colors the agent as theirs.
     fake.turn('running', { user_id: ADA.user_id, name: null, actor_id: 'actor-ada' }, 'remote-turn')
     await fake.settle()
     expect(await drawBandText($)).toContain('An agent')
-    expect(await drawBandText($)).toContain(adaColor)
+    expect(JSON.stringify(await desktop.drawn())).toContain(adaColor)
     fake.turn('running', { ...ADA, actor_id: 'actor-ada' }, 'remote-turn')
     await fake.settle()
     expect(await drawBandText($)).toContain("Ada's agent")
-    expect(await drawBandText($)).toContain(adaColor)
+    expect(JSON.stringify(await desktop.drawn())).toContain(adaColor)
     fake.expectClean()
   })
 
@@ -3645,8 +3644,10 @@ describe('the status band', () => {
     fake.expectClean()
   })
 
-  test('the band is a shaded row with the link to copy; it yields to a survey', async ($, on) => {
+  test('the band uses terminal defaults and keeps the link to copy; it yields to a survey', async ($, on) => {
     const fake = fakeThreads(on)
+    let configReads = 0
+    on('config.list', () => { configReads++; return { value: [] } })
     const copied: string[] = []
     let refuse = false
     on('ui.copy', (_$, e) => {
@@ -3662,11 +3663,15 @@ describe('the status band', () => {
     // A survey owns the band, and with no room at all the band is the host's.
     expect(JSON.stringify(await (await mount('terminal', { hasSurvey: true })).drawn())).not.toContain('Delta')
     expect(JSON.stringify(await (await mount('terminal', { maxRows: 0 })).drawn())).not.toContain('Delta')
-    // The terminal shades the row and draws the URL as an unlabelled hyperlink: a labelled one prints
+    // The terminal draws the URL as an unlabelled hyperlink: a labelled one prints
     // the URL twice in a terminal Claude does not treat as hyperlink-capable. Pressing copy puts the
     // whole link on the clipboard, and says so only once the clipboard took it.
     const terminal = await mount('terminal')
-    expect(JSON.stringify(await terminal.drawn())).toContain('"backgroundColor":"#303030"')
+    expect(JSON.stringify(await terminal.drawn())).not.toMatch(/"backgroundColor"|"dimColor"/)
+    expect(await terminal.find({ text: '▏' })).toBeDefined()
+    expect((await terminal.findAll({ type: 'Text', text: ' Delta' }))
+      .some((element) => element.props.bold === true)).toBe(true)
+    expect(configReads).toBe(0)
     expect((await terminal.find({ type: 'Link' }))?.props).toEqual({ href: link })
     await terminal.press({ key: 'copy' })
     expect(copied).toEqual([link])
@@ -3678,9 +3683,9 @@ describe('the status band', () => {
     await terminal.press({ key: 'copy' })
     await fake.settle()
     expect(await drawBandText($)).not.toContain('✔ copied')
-    // The desktop's own card sets the band apart: no shade, and a link labelled with its short form.
+    // The desktop's card needs no rail, and labels its link with the short form.
     const desktop = await mount('desktop')
-    expect(JSON.stringify(await desktop.drawn())).not.toContain('backgroundColor')
+    expect(await desktop.find({ text: '▏' })).toBeUndefined()
     expect((await desktop.find({ type: 'Link' }))?.props).toMatchObject({ href: link, label: expect.stringContaining('…') })
     fake.expectClean()
   })
