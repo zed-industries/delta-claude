@@ -14,8 +14,18 @@ describe('delivery policy', () => {
   test('a local code with no envelope falls back to the plugin local table', () => {
     for (const code of ['process_failed', 'timeout'])
       expect(deliveryFailure({}, new DeltaCommandError(code, 'offline'), false).retry).toBe(true)
-    for (const code of ['command_failed', 'invalid_acknowledgment'])
+    for (const code of ['process_refused', 'command_failed', 'invalid_acknowledgment'])
       expect(deliveryFailure({}, new DeltaCommandError(code, 'bad output'), false).retry).toBe(false)
+  })
+
+  test('a local process failure retries up to a cap, then pauses; an envelope verdict is never capped', () => {
+    for (const code of ['process_failed', 'timeout']) {
+      for (let retryAttempts = 0; retryAttempts < 5; retryAttempts++)
+        expect(deliveryFailure({ retryAttempts }, new DeltaCommandError(code, 'stuck'), false).retry).toBe(true)
+      expect(deliveryFailure({ retryAttempts: 5 }, new DeltaCommandError(code, 'stuck'), false).retry).toBe(false)
+    }
+    // A server failure that says it is retryable keeps retrying however many attempts have passed.
+    expect(deliveryFailure({ retryAttempts: 99 }, new DeltaCommandError('failed', 'offline', { retryable: true }), false).retry).toBe(true)
   })
 
   test('a failed checkout check still pauses verification, not delivery', () => {

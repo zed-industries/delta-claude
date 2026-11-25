@@ -2,13 +2,27 @@ import { classifyCommandFailure, type DeltaCommandError } from '../cli/thread-co
 
 export type FailureStreak = {
   deliveryNotice?: string
+  retryAttempts?: number
 }
+
+/**
+ * A local process failure retries this many times before it pauses instead. The CLI running the
+ * append either never started or never finished, with no server verdict to trust; a refusal Claude
+ * Code reworded past `isHostPolicyRefusal`, or a CLI that cannot run here, would otherwise retry
+ * forever. A server failure's own `retryable` verdict is honored however many attempts have passed.
+ */
+const MAX_LOCAL_PROCESS_RETRIES = 5
 
 /** Decide retries and pauses without touching timers, UI, or queued records. */
 export function deliveryFailure(
   state: FailureStreak, error: DeltaCommandError, verificationPaused: boolean,
 ) {
-  const retry = classifyCommandFailure(error) !== 'permanent'
+  const transient = classifyCommandFailure(error) !== 'permanent'
+  // A local process failure carries no envelope verdict; bound its retries so a stuck one pauses.
+  const localProcessFailure = error.hints.retryable === undefined
+    && (error.code === 'process_failed' || error.code === 'timeout')
+  const exhausted = localProcessFailure && (state.retryAttempts ?? 0) >= MAX_LOCAL_PROCESS_RETRIES
+  const retry = transient && !exhausted
   const notice = `${retry}:${error.code}`
   return {
     retry,

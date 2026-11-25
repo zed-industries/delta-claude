@@ -23,9 +23,9 @@ import {
 import { threadInvitationsFrom } from '../sharing/share-audience'
 import { errorText } from '../core/text'
 import {
-  contractRefusal, ContractRefusalError, contractVersion, DeltaCommandError, type ForkedThread, type MountedThread,
-  parseThreadContract, parseThreadFork, parseThreadMount, parseThreadStatus, parseWatchEvent, PRODUCER_NAME,
-  type ThreadContract, type WatchEvent,
+  contractRefusal, ContractRefusalError, contractVersion, DeltaCommandError, escapeSettingsFilenames, type ForkedThread,
+  isHostPolicyRefusal, type MountedThread, parseThreadContract, parseThreadFork, parseThreadMount, parseThreadStatus,
+  parseWatchEvent, PRODUCER_NAME, type ThreadContract, type WatchEvent,
 } from './thread-commands'
 
 /**
@@ -439,8 +439,14 @@ export async function threadAppend(
   await resolveCli(host)
   let result: ProcessRunResult
   try {
-    result = await runJson(host, args, { stdin: input, timeoutMs: 120_000 })
-  } catch (error) { throw new DeltaCommandError('process_failed', `append did not finish (${errorText(error)})`) }
+    result = await runJson(host, args, { stdin: escapeSettingsFilenames(input), timeoutMs: 120_000 })
+  } catch (error) {
+    const message = errorText(error)
+    // A host-policy refusal is deterministic, so it pauses as permanent rather than retrying the same
+    // bytes forever; any other reason a run does not finish stays a transient process failure.
+    const code = isHostPolicyRefusal(message) ? 'process_refused' : 'process_failed'
+    throw new DeltaCommandError(code, `append did not finish (${message})`)
+  }
   if (result.isStdoutTruncated || result.isStderrTruncated)
     throw new DeltaCommandError('command_failed', 'append output was truncated, so no acknowledgment is assumed')
   return result

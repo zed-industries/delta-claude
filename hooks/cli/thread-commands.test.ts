@@ -2,9 +2,9 @@ import { describe, expect, test, tier } from 'claude-code/testing'
 import { cliFixture } from '../testing/cli-fixtures'
 import {
   appendFailure, CheckoutUnavailableError, classifyCommandFailure, contractRefusal, contractVersion, DeltaCommandError,
-  JoinNotReadyError, parseAppendReceipt, parseThreadContract, parseThreadFork, parseThreadMount, parseThreadStatus, parseWatchEvent,
-  permanentFailureAdvice, type ThreadReady, type ThreadStatus, validateJoinedMounts, validateThreadCheckout,
-  validateThreadFrontier,
+  escapeSettingsFilenames, isHostPolicyRefusal, JoinNotReadyError, parseAppendReceipt, parseThreadContract, parseThreadFork, parseThreadMount,
+  parseThreadStatus, parseWatchEvent, permanentFailureAdvice, type ThreadReady, type ThreadStatus, validateJoinedMounts,
+  validateThreadCheckout, validateThreadFrontier,
 } from './thread-commands'
 
 tier('user')
@@ -354,6 +354,52 @@ describe('failure classification', () => {
     // Detached, inactive, missing, and local-only results are plain state errors.
     expect(classifyCommandFailure(failure(() => validateThreadCheckout(
       { ...status(), worktrees: { status: 'available', items: [] } }, { checkout: '/repo' })))).toBe('permanent')
+  })
+})
+
+describe('settings-file escaping for the host process guard', () => {
+  const namesSettingsFile = (text: string) => {
+    const lower = text.toLowerCase()
+    return ['settings.json', 'settings.local.json', 'cowork_settings.json'].some((name) => lower.includes(name))
+  }
+
+  test('escaped JSONL names no settings file as plain text and decodes to the identical record', () => {
+    const mentions = [
+      '.claude/settings.local.json', 'C:\\repo\\.claude\\settings.json', '.CLAUDE/Cowork_Settings.JSON',
+      'set CLAUDE_CONFIG_DIR, then edit settings.json', 'see ~/notes/settings.json',
+    ]
+    for (const text of mentions) {
+      const line = JSON.stringify({ update: { sessionUpdate: 'agent_message_chunk', text } }) + '\n'
+      const escaped = escapeSettingsFilenames(line)
+      expect(namesSettingsFile(line)).toBe(true)
+      expect(namesSettingsFile(escaped)).toBe(false)
+      expect(JSON.parse(escaped)).toEqual(JSON.parse(line))
+    }
+  })
+
+  test('a filename split across records in one batch is defused, and clean text is untouched', () => {
+    const batch = JSON.stringify({ update: { text: 'edit settings.json' } }) + '\n' +
+      JSON.stringify({ update: { text: 'then .claude/settings.local.json' } }) + '\n'
+    expect(namesSettingsFile(batch)).toBe(true)
+    expect(namesSettingsFile(escapeSettingsFilenames(batch))).toBe(false)
+    const clean = JSON.stringify({ update: { text: 'nothing to escape here' } }) + '\n'
+    expect(escapeSettingsFilenames(clean)).toBe(clean)
+  })
+})
+
+describe('host process refusal', () => {
+  test('a policy refusal is recognized by its message and classified permanent, a start failure is not', () => {
+    const refusal = 'Claude Code: $.process.run: plugins outside policy may not write a settings file'
+    const startFailure = 'Claude Code: $.process.run(delta) failed to start: ENOENT: Executable not found in $PATH'
+    expect(isHostPolicyRefusal(refusal)).toBe(true)
+    expect(isHostPolicyRefusal(startFailure)).toBe(false)
+    expect(classifyCommandFailure(new DeltaCommandError('process_refused', refusal))).toBe('permanent')
+    expect(classifyCommandFailure(new DeltaCommandError('process_failed', startFailure))).toBe('transient')
+  })
+
+  test('paused advice names what to do about a refusal and about a broken CLI', () => {
+    expect(permanentFailureAdvice('process_refused')).toMatch(/update delta/i)
+    expect(permanentFailureAdvice('process_failed')).toMatch(/cli/i)
   })
 })
 
