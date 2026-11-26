@@ -10,6 +10,7 @@ import { completeTurn, recordRow, recordToolCall, startTurn } from './recording/
 import { forgetContract } from './cli/delta-cli'
 import type { Host } from './core/host'
 import { withQuestionHints } from './setup/interaction'
+import { followEnterWorktree, followExitWorktree } from './sharing/checkout'
 import { releaseOnEnd } from './sharing/join'
 import { admitPrompt } from './recording/prompt'
 import { recheckPluginUpdates, startPluginUpdates, stopPluginUpdates } from './plugin-update/updates'
@@ -340,9 +341,13 @@ export function register(on: On) {
   }).catch(async ($, e, next) => { await logHookFailure($, 'session.send', next.error); return next(e) })
 
   // An Agent call is followed while it runs, which tells a foreground subagent from a background one.
+  // The session's own moves into and out of Claude's worktrees move its checkout in Delta with it.
   on('tool.call', async ($, e, next) => {
     const host = hostOf($)
     const run = () => e.agentId !== undefined ? recordChildToolCall(host, e, e.agentId, next) : recordToolCall(host, e, next)
-    return isAgentTool(e.tool) ? followAgentCall(host, e, run) : run()
+    if (isAgentTool(e.tool)) return followAgentCall(host, e, run)
+    if (e.agentId === undefined && e.tool === 'EnterWorktree') return followEnterWorktree(host, run)
+    if (e.agentId === undefined && e.tool === 'ExitWorktree') return followExitWorktree(host, run)
+    return run()
   }).catch(async ($, e, next) => { await logHookFailure($, 'tool.call', next.error); return next(e) })
 }

@@ -59,6 +59,13 @@ export function validateWorktreeMembershipReceipt(
     throw new Error('Invalid worktree membership receipt; the session was not activated')
 }
 
+/** Require the detachment receipt for the intended thread and local worktree. */
+export function validateWorktreeDetachmentReceipt(detached: JsonObject, thread: string, reference: string) {
+  if (detached.operation !== 'detached' || detached.thread_id !== thread ||
+      typeof detached.reference !== 'string' || worktreeHistory(detached.reference) !== worktreeHistory(reference))
+    throw new Error('Invalid worktree detachment receipt; the checkout may still be attached')
+}
+
 /** Ignore a timeline selector when comparing references to one worktree. */
 export function worktreeHistory(reference: string): string {
   return reference.replace(/^delta:\/\/worktree\//, '').split('#')[0]!

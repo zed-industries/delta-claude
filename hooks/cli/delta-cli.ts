@@ -10,7 +10,8 @@ import { DeltaCli } from './cli'
 import {
   checkoutStillSyncing, checkResult, type CreationReceipt, localWorktreesAt, type ManagedCheckout, managedCheckoutAt,
   type MembershipReceipt, type PublicationReceipt, type UnshareReceipt, validateAttachmentReceipt, validateCreationReceipt, validatePublicationReceipt,
-  validateUnshareReceipt, validateWorktreeCreationReceipt, validateWorktreeMembershipReceipt, type WorktreeCreationReceipt,
+  validateUnshareReceipt, validateWorktreeCreationReceipt, validateWorktreeDetachmentReceipt,
+  validateWorktreeMembershipReceipt, type WorktreeCreationReceipt,
 } from './command-outcomes'
 import { readCommandStream, readMountReady } from './command-reader'
 import { isJsonObject, type JsonObject } from '../core/json'
@@ -527,6 +528,12 @@ export async function worktreeAttach(
   const attached = await command(host, ['worktree', 'attach', reference, '--thread', thread], 'worktree attach', { check })
   validateWorktreeMembershipReceipt(attached, thread, reference)
   return attached
+}
+
+/** Remove the worktree `reference` from `thread`, leaving its files and any mount alone. */
+export async function worktreeDetach(host: Host, reference: string, thread: string) {
+  const detached = await command(host, ['worktree', 'detach', reference, '--thread', thread], 'worktree detach')
+  validateWorktreeDetachmentReceipt(detached, thread, reference)
 }
 
 /**

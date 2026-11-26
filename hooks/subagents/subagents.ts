@@ -16,10 +16,9 @@ import {
 } from '../recording/delivery'
 import { deliveryRetryDelay } from '../recording/delivery-policy'
 import {
-  checkoutSyncing, hasWorktreeMount, stopWorktreeMount, threadCreate, threadWatch,
-  verifiedContract, watchEvents,
+  hasWorktreeMount, stopWorktreeMount, threadCreate, threadWatch, verifiedContract, watchEvents,
 } from '../cli/delta-cli'
-import { attachWorktree, mountCheckout } from '../sharing/checkout'
+import { attachWorktree, awaitCheckoutReleased, mountCheckout } from '../sharing/checkout'
 import { samePath } from '../core/paths'
 import { deliverNote } from '../watch/rows'
 import {
@@ -574,25 +573,6 @@ function watchChildTurn(host: Host, child: ChildRuntime, binding: ChildBinding) 
 
 /** How long a child's `turn.complete` hook delivers before ending its mount; see `finishChildRun`. */
 const CHILD_FINISH_DELIVERY_BUDGET_MS = 3_000
-/**
- * How long a child's hook waits for Delta to stop syncing its checkout after its mount ends. Delta
- * bounds the final upload at 5 seconds, then stops watching the directory.
- */
-const CHILD_RELEASE_BUDGET_MS = 6_000
-/** How often a finishing child's checkout is checked for Delta's release. */
-const CHILD_RELEASE_POLL_MS = 100
-
-/** Wait until Delta no longer syncs `directory`, within `CHILD_RELEASE_BUDGET_MS`. */
-async function awaitCheckoutReleased(host: Host, directory: string) {
-  const deadline = await host.clock.now() + CHILD_RELEASE_BUDGET_MS
-  while (true) {
-    const remaining = deadline - await host.clock.now()
-    if (remaining <= 0)
-      throw new Error(`Delta was still syncing ${directory} ${CHILD_RELEASE_BUDGET_MS / 1000} seconds after its mount ended`)
-    if (!await checkoutSyncing(host, directory, remaining)) return
-    await host.clock.sleep(Math.min(CHILD_RELEASE_POLL_MS, remaining))
-  }
-}
 
 /**
  * After a child's run ends, deliver what it recorded within a short budget, then end its

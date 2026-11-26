@@ -509,6 +509,8 @@ export function fakeThreads(hostOn: On, options: {
     linkCommands: [] as string[],
     /** Directories that exist besides the files, such as a git worktree Claude made for a subagent. */
     worktreeDirectories: new Set<string>(),
+    /** The worktree the main session moved into with EnterWorktree, until ExitWorktree. */
+    sessionWorktree: undefined as string | undefined,
     /** Every Agent tool call as it reached Claude, after the plugin's hooks. */
     agentCalls: [] as Record<string, unknown>[],
     /** Stands in for Claude running an Agent call's subagent, which it starts and, in the foreground, waits for inside the call. */
@@ -1054,6 +1056,24 @@ export function fakeThreads(hostOn: On, options: {
       const background = (e as Record<string, unknown>).run_in_background === true
       return { result: { status: background ? 'async_launched' : 'completed', agentId: spawned?.agentId } } as any
     }
+    // Claude makes a worktree of the checkout and moves the session into it, and back out.
+    if (e.tool === 'EnterWorktree') {
+      const worktreePath = `${fake.checkoutRoot}/.claude/worktrees/${(e as any).name ?? 'session'}`
+      fake.worktreeDirectories.add(worktreePath)
+      fake.sessionWorktree = worktreePath
+      return { result: { worktreePath, worktreeBranch: `claude/${(e as any).name ?? 'session'}`, message: 'entered' } } as any
+    }
+    if (e.tool === 'ExitWorktree') {
+      const worktreePath = fake.sessionWorktree
+      if (!worktreePath) return { result: 'Not in a worktree', isError: true } as any
+      if ((e as any).action === 'remove') {
+        if (fake.activeCheckouts.has(worktreePath) || fake.releasingCheckouts.has(worktreePath))
+          fake.violations.push(`removed the worktree ${worktreePath} while Delta still synced it`)
+        fake.worktreeDirectories.delete(worktreePath)
+      }
+      fake.sessionWorktree = undefined
+      return { result: { action: (e as any).action, originalCwd: CHECKOUT, worktreePath, message: 'exited' } } as any
+    }
     if (fake.holdTool) await fake.holdTool
     return fake.toolResult
   })
@@ -1338,8 +1358,10 @@ export function fakeThreads(hostOn: On, options: {
         return output(JSON.stringify(cliFixture('error', faultEnvelope({ code: 'worktree_invalid_reference', message: 'unknown worktree' }))), 2)
       }
       const reference = `${local}#t=0`
+      // A thread holds one worktree per Git checkout, and Claude's worktrees share the sharer's.
       if (!child && fake.server.mount?.thread === thread &&
-          samePath(fake.server.mount.directory, checkout!.directory) &&
+          (samePath(fake.server.mount.directory, checkout!.directory) ||
+            checkout!.directory.startsWith(`${fake.checkoutRoot}/.claude/worktrees/`)) &&
           fake.server.mount.reference.split('#')[0] !== local)
         return output(JSON.stringify(cliFixture('error', faultEnvelope({
           code: 'failed', reason: 'worktree_conflict', retryable: false,
@@ -1352,6 +1374,19 @@ export function fakeThreads(hostOn: On, options: {
       }
       return fault ? output(JSON.stringify(cliFixture('error', faultEnvelope(fault))), fault.exitCode ?? 2)
         : output(JSON.stringify({ operation: 'attached', thread_id: thread, reference, ...fake.attachmentPatch }))
+    }
+    if (parsed?.positionals[0] === 'worktree' && operation === 'detach') {
+      const thread = String(parsed.options['--thread'])
+      const reference = String(parsed.positionals[2])
+      if (!matchesCommand(argv, ['worktree', 'detach', reference], { '--thread': thread }))
+        fake.violations.push(`unexpected worktree detach: ${argv.join(' ')}`)
+      if (fake.server.mount?.thread === thread && fake.server.mount.reference.split('#')[0] === reference.split('#')[0]) {
+        if (fake.activeCheckouts.has(fake.server.mount.directory))
+          fake.violations.push(`detached ${fake.server.mount.directory} while it was still mounted`)
+        fake.server.mount = undefined
+        fake.server.checkout = 'missing'
+      }
+      return output(JSON.stringify(cliFixture('detach', { thread_id: thread, reference })))
     }
     if (operation === 'unmount') {
       fake.violations.push(`obsolete unmount command: ${argv.join(' ')}`)

@@ -40,6 +40,11 @@ export type Binding = {
   /** Last confirmed location of a shared session's attached checkout, not proof that the thread still owns it. */
   checkout?: string
   checkoutReference?: string
+  /**
+   * The checkout this session left for a worktree Claude made with EnterWorktree. `checkout` is that
+   * worktree until ExitWorktree, which attaches this one to the thread again.
+   */
+  worktreeReturn?: { checkout: string; checkoutReference: string }
   /** Local identity saved before membership, so a lost attach receipt cannot create another worktree. */
   pendingWorktree?: { directory: string; reference: string }
   /**
@@ -156,8 +161,10 @@ export const requests: { join?: JoinRequest; share?: ShareRequest; shareAfterTur
  * `checkout`: Delta reports the session's own checkout unavailable; a passing check lifts it. Unlike
  * `verification`, it stops delivery but not Claude in a session that records offline.
  * `delivery`: Delta refused a record or the thread; only explicit share/join recovery lifts it.
+ * `move`: the session's checkout is moving into or out of a worktree of Claude's, detached from the
+ * thread meanwhile; the move lifts it when it ends.
  */
-type CheckoutPause = 'watcher' | 'verification' | 'checkout' | 'delivery'
+type CheckoutPause = 'watcher' | 'verification' | 'checkout' | 'delivery' | 'move'
 /** One row waiting for its turn's start record, with the tool identity it later attributes. */
 export type HeldRow = { update: Update; toolId?: string; turnId?: string }
 export type SessionState = {

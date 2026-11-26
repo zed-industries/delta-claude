@@ -340,6 +340,8 @@ async function drainPending(host: Host, session: string): Promise<boolean> {
         // delivers, acknowledged locally, and checks the checkout again once the server answers;
         // any other session waits, and drain decides how long to keep asking.
         const state = sessions.get(session)
+        // A check that began before the checkout started moving saw it detached; the move delivers after.
+        if (state?.pauses.has('move')) return false
         const permanent = classifyCommandFailure(error) === 'permanent'
         if (state && !state.binding?.stopped && error instanceof CheckoutUnavailableError) {
           await pauseForCheckout(host, state, binding, error)

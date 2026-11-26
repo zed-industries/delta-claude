@@ -1502,6 +1502,39 @@ describe('recording', () => {
     fake.expectClean()
   })
 
+  test("the thread's worktree follows the session into Claude's worktree and back out", async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('one')] })
+    await $.session.start(sessionStart)
+    await fake.share($)
+    const original = (fake.store.get(`session:${fake.session}`) as any).checkoutReference
+    const worktree = `${CHECKOUT}/.claude/worktrees/feature`
+    await $.tool.call({ tool: 'EnterWorktree', tool_use_id: 'enter', name: 'feature' } as never)
+    await fake.settle()
+    // A thread holds one worktree per Git checkout, so Claude's worktree replaces the session's.
+    expect(fake.server.mount?.directory).toBe(worktree)
+    expect([...fake.activeCheckouts.keys()]).toEqual([worktree])
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({
+      checkout: worktree, worktreeReturn: { checkout: CHECKOUT, checkoutReference: original },
+    })
+    await $.tool.call(bash('in-worktree', 'echo edited'))
+    await fake.settleUntil(() => fake.records().length >= 3)
+    expectStagedRecords(fake, [])
+    // Delta takes in the worktree before Claude removes it, and the session's checkout comes back.
+    await $.tool.call({ tool: 'ExitWorktree', tool_use_id: 'exit', action: 'remove' } as never)
+    await fake.settle()
+    expect(fake.server.mount).toMatchObject({ directory: CHECKOUT, reference: original })
+    expect([...fake.activeCheckouts.keys()]).toEqual([CHECKOUT])
+    const binding = fake.store.get(`session:${fake.session}`) as any
+    expect(binding).toMatchObject({ checkout: CHECKOUT, checkoutReference: original })
+    expect(binding.worktreeReturn).toBeUndefined()
+    await $.tool.call(bash('after-exit', 'echo back'))
+    await fake.settleUntil(() => fake.records().length >= 5)
+    expectStagedRecords(fake, [])
+    // Delivery waits out each move, which detaches the checkout meanwhile, so sharing never pauses.
+    expect(fake.logs.filter((log) => log.startsWith('Syncing paused'))).toEqual([])
+    fake.expectClean()
+  })
+
   test('outbox collection follows durable acknowledgments and never blocks delivery', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     const directory = `${CONFIG}/delta-plugin/outbox/${fake.session}`
