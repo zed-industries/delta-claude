@@ -4,6 +4,7 @@ import {
   activate, activationIncomplete, adoptContinuation, captureDecided, continuationCandidate, continuedFrom,
   noticeSession, retryAutomaticActivation,
 } from '../setup/activation'
+import { isRecordedFork } from '../sharing/fork'
 import { recordsOffline, requireBoundCheckout, verifyCheckout } from './delivery'
 import { beginRestoreCheckout, checkoutNeedsMount } from '../sharing/checkout'
 import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_PROMPT } from '../sharing/handoff'
@@ -85,6 +86,15 @@ export async function admitPrompt(host: Host, e: HookEvent<'prompt.submit'>, nex
       try { await activate(host, session) }
       catch (error) { return { drop: `Delta couldn't continue recording this conversation: ${errorText(error)}. The prompt was not submitted.` } }
       if (runtime.restoring) return { drop: "Delta is restoring this thread's worktrees for the continued conversation. Wait for the band to say they are restored, then try again. The prompt was not submitted." }
+    }
+  }
+  // Claude Desktop starts a fork's session before it writes the fork's `derived-from`, which lands with
+  // the first prompt; look once more.
+  if (runtime.binding && continuationCandidate(session, runtime.binding) && !runtime.forkRechecked) {
+    runtime.forkRechecked = true
+    if (await isRecordedFork(host, session)) {
+      try { await activate(host, session) }
+      catch (error) { return { drop: `Delta couldn't record this forked conversation: ${errorText(error)}. The prompt was not submitted.` } }
     }
   }
   if (!runtime.binding?.snapshot) return next(e)

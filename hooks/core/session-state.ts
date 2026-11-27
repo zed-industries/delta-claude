@@ -171,6 +171,7 @@ export type SessionState = {
   binding?: Binding
   /** The first prompt of an unbound session looked again for a conversation it continues. */
   continuationRechecked?: true
+  forkRechecked?: true
   captureFailure?: string
   /** Why checkout sharing is paused; each reason is lifted only by its own recovery. */
   pauses: Map<CheckoutPause, string | undefined>
