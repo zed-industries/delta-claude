@@ -5,6 +5,35 @@ import { isJsonObject, type JsonObject, jsonText } from '../core/json'
 type RecordValue = Record<string, unknown>
 export type Update = RecordValue & { sessionUpdate: string }
 
+/** Format a row already identified by Claude as a task notification. */
+export function taskNotice(content: Readonly<ApiMessage['content']>): Update {
+  const text = content.flatMap((block) =>
+    block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n').trim()
+  const body = /^<task-notification>\s*([\s\S]*?)\s*<\/task-notification>$/.exec(text)?.[1]
+  const fields = new Map<string, string>()
+  for (const match of (body ?? '').matchAll(/(?:^|\n)\s*<([\w-]+)>([\s\S]*?)<\/\1>/g)) {
+    const [, name, value] = match
+    if (name !== undefined && value !== undefined && !fields.has(name)) fields.set(name, value.trim())
+  }
+  const source = fields.get('fork-source')
+  if (source) return {
+    sessionUpdate: 'notice',
+    severity: 'info',
+    title: 'Claude Code session forked',
+    description: source.split(' To coordinate with it ', 1)[0],
+  }
+  const status = fields.get('status')
+  return {
+    sessionUpdate: 'notice',
+    severity: status === 'failed' ? 'error' : status === 'killed' ? 'warning' : 'info',
+    title: status === 'completed' ? 'Claude Code task completed'
+      : status === 'failed' ? 'Claude Code task failed'
+      : status === 'killed' ? 'Claude Code task stopped'
+      : 'Claude Code task notification',
+    description: fields.get('summary') || (!text.startsWith('<') ? text || undefined : undefined),
+  }
+}
+
 /** Capture authored rows and tool results, not the engine's model-only framing. */
 export function capturedMessage(message: {
   type: string

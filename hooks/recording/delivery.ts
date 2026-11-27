@@ -5,7 +5,7 @@
 import type { ApiMessage } from 'claude-code'
 import { activationIncomplete, captureDecided, noticeSession, outbox, sessionBegun } from '../setup/activation'
 import type { Entry } from '../subagents/children'
-import { capturedMessage, isOmittedTool, messageUpdates, resultUpdate, toolInfo, type Update } from './content'
+import { capturedMessage, isOmittedTool, messageUpdates, resultUpdate, taskNotice, toolInfo, type Update } from './content'
 import { deliveryFailure, deliveryRetryDelay } from './delivery-policy'
 import {
   requireContract, stopWorktreeMount, threadAppend, threadDiscard, threadFork, threadStatus, verifiedContract,
@@ -25,7 +25,8 @@ import type { Host } from '../core/host'
 import { children, deliverChild, stopReasonOf } from '../subagents/subagents'
 import {
   appendFailure, CheckoutUnavailableError, classifyCommandFailure, DeltaCommandError, DeltaSendError, JoinNotReadyError,
-  permanentFailureAdvice, PLAN_CONTRACT_VERSION, type ThreadTurn, validateJoinedMounts, validateThreadCheckout, validateThreadFrontier,
+  permanentFailureAdvice, type ThreadTurn, TURN_ANNOTATION_CONTRACT_VERSION,
+  validateJoinedMounts, validateThreadCheckout, validateThreadFrontier,
 } from '../cli/thread-commands'
 import { errorText } from '../core/text'
 import { capturesEdits, startCapture } from './edit-capture'
@@ -66,7 +67,11 @@ export function recordsOffline(session: string, binding: Binding | undefined): b
 
 /** Whether this session records TodoWrite as its turn's plan: its CLI accepts `plan_update`. */
 export function recordsPlans(session: string): boolean {
-  return (verifiedContract(session) ?? 0) >= PLAN_CONTRACT_VERSION
+  return acceptsTurnAnnotations(session)
+}
+
+function acceptsTurnAnnotations(session: string): boolean {
+  return (verifiedContract(session) ?? 0) >= TURN_ANNOTATION_CONTRACT_VERSION
 }
 
 export function rememberToolResults(tools: ToolRecords, message: ApiMessage, plans = false) {
@@ -456,7 +461,12 @@ async function beginExecution(host: Host, session: string, turnId: string) {
     const rows = runtime.heldRows
     if (rows?.length) {
       runtime.heldRows = undefined
-      for (const { update, toolId, turnId: owner } of rows) {
+      const isNotice = (row: typeof rows[number]) => row.update.sessionUpdate === 'notice'
+      const notices = rows.filter(isNotice)
+      // A held notice belongs below the opening prompt. Otherwise it opens the assistant
+      // section itself and Delta can attribute the response to the previous prompt.
+      const ordered = notices.length ? [...rows.filter((row) => !isNotice(row)), ...notices] : rows
+      for (const { update, toolId, turnId: owner } of ordered) {
         if (owner !== undefined && owner !== turnId) continue
         if (toolId && !runtime.tools.toolTurns.has(toolId)) runtime.tools.toolTurns.set(toolId, sequence)
         binding = await stageRecord(host, binding, { update, turnSequence: sequence })
@@ -864,8 +874,10 @@ export async function recordRow(host: Host, e: HookEvent<'session.append'>, next
     if (!('deny' in stored)) await storeShownRow(host, stored.uuid, shown)
     return stored
   }
-  if (!capturedMessage(e.message, e.door)) return next(e)
+  const taskOrigin = e.origin?.kind === 'task-notification'
+  if (!taskOrigin && !capturedMessage(e.message, e.door)) return next(e)
   const session = await host.session.id()
+  const taskNotification = taskOrigin && acceptsTurnAnnotations(session)
   // A row from a brand-new session waits for its capture boundary, so a prompt or its output that
   // reaches a hook before the snapshot is staged is recorded under the session's new thread.
   await captureDecided(session)
@@ -881,23 +893,30 @@ export async function recordRow(host: Host, e: HookEvent<'session.append'>, next
   try {
     const stored = await next(e)
     if (!('deny' in stored) && runtime.binding?.snapshot) {
-      const message = capturedMessage(stored.message, e.door)
-      if (message) {
-        const plans = recordsPlans(session)
-        rememberToolResults(runtime.tools, message, plans)
-        const updates = messageUpdates(message, stored.uuid, runtime.tools.structuredResults,
-          { root: boundDirectory(runtime.binding), omitted: runtime.tools.omitted, plans }).map(liveActivity)
+      const message = taskNotification ? undefined : capturedMessage(stored.message, e.door)
+      if (taskNotification || message) {
+        let updates: Update[]
+        if (message) {
+          const plans = recordsPlans(session)
+          rememberToolResults(runtime.tools, message, plans)
+          updates = messageUpdates(message, stored.uuid, runtime.tools.structuredResults,
+            { root: boundDirectory(runtime.binding), omitted: runtime.tools.omitted, plans }).map(liveActivity)
+        } else {
+          updates = [taskNotice(stored.message.content)]
+        }
         // Output from the turn Claude is running waits for that turn's scoped start record, so
         // it names its own turn rather than the turn before it. The prompt starting a turn is
         // held the same way, because its start record is written after its row.
-        const turnSequence = assistant ? contentTurn(runtime)
+        const running = runtime.currentTurnId
+        const turnSequence = assistant || (taskNotification && running !== undefined) ? contentTurn(runtime)
+          : taskNotification ? undefined
           : ownPrompt ? runtime.binding?.execution?.sequence : undefined
-        const hold = ownPrompt ? !runtime.binding?.execution
-          : assistant && turnSequence === undefined && runtime.currentTurnId !== undefined
+        const hold = taskNotification ? turnSequence === undefined : ownPrompt ? !runtime.binding?.execution
+          : assistant && turnSequence === undefined && running !== undefined
         if (hold) {
           // A composer prompt is held for whichever turn starts next; output is held for the
           // turn Claude is running, and dropped if that turn never owns its start.
-          holdRows(runtime, updates, ownPrompt ? undefined : runtime.currentTurnId)
+          holdRows(runtime, updates, ownPrompt && !taskNotification ? undefined : running)
         } else {
           for (const update of updates) {
             const tool = update.sessionUpdate === 'tool_call_update' && typeof update.toolCallId === 'string'
@@ -906,7 +925,7 @@ export async function recordRow(host: Host, e: HookEvent<'session.append'>, next
             await persistUpdates(host, session, [update], tool ? runtime.tools.toolTurns.get(tool) : turnSequence)
           }
         }
-        for (const block of message.content) {
+        for (const block of message?.content ?? []) {
           if (block.type === 'tool_result' && typeof block.tool_use_id === 'string')
             runtime.tools.settle(block.tool_use_id, 'row')
         }

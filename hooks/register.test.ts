@@ -1125,6 +1125,55 @@ describe('sharing', () => {
 })
 
 describe('recording', () => {
+  test('Claude task notifications become notices on their turn, never prompts', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.turn.start(turnStart('previous'))
+    await $.turn.complete(turnComplete('previous'))
+    const source = 'This session began as a fork (copy) of another session that is still running.'
+    const text = [
+      '<task-notification>', '<fork-source>', `${source} To coordinate with it — use SendMessage.`,
+      '</fork-source>', '</task-notification>',
+    ].join('\n')
+    const message = { type: 'user', role: 'user', content: [{ type: 'text', text }] }
+    await $.session.append({
+      door: 'delivery', uuid: 'fork-notice', origin: { kind: 'task-notification' }, message,
+    } as never)
+    await fake.settle()
+    expect(fake.records().filter((record) => ['notice', 'user_message'].includes(record.update?.sessionUpdate)))
+      .toEqual([])
+
+    await $.session.append({
+      door: 'prompt', uuid: 'next-prompt', origin: { kind: 'human' }, message,
+    } as never)
+    await $.turn.start(turnStart('next', text))
+    const summary = 'Background command exited with code 1'
+    for (const [uuid, body] of [
+      ['task-failed', `<status>failed</status>\n<summary>${summary}</summary>`],
+      ['new-task-kind', '<future-format>internal metadata</future-format>'],
+    ]) {
+      await $.session.append({
+        door: 'delivery', uuid, origin: { kind: 'task-notification' },
+        message: { type: 'user', role: 'user', content: [
+          { type: 'text', text: `<task-notification>\n${body}\n</task-notification>` },
+        ] },
+      } as never)
+    }
+    await $.turn.complete(turnComplete('next'))
+    await fake.settle()
+    const [, turnSequence] = fake.starts()
+    expect(turnSequence).toBeDefined()
+    expect(fake.records().filter((record) => ['notice', 'user_message'].includes(record.update?.sessionUpdate)))
+      .toMatchObject([
+        { turnSequence, update: { sessionUpdate: 'user_message', content: [{ type: 'text', text }] } },
+        { turnSequence, update: { sessionUpdate: 'notice', severity: 'info', description: source } },
+        { turnSequence, update: { sessionUpdate: 'notice', severity: 'error', description: summary } },
+        { turnSequence, update: { sessionUpdate: 'notice', severity: 'info', title: 'Claude Code task notification' } },
+      ])
+    fake.expectClean()
+  })
+
   test('completed turn stages one Haiku summary with its own prose despite the next turn', async ($, on) => {
     const fake = fakeThreads(on)
     await $.session.start(sessionStart)

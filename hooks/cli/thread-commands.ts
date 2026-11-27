@@ -461,8 +461,8 @@ export const PRODUCER_NAME = 'Claude Code'
  * thread, and a prompt names the conversation that sent it in `_meta.delta.sender`.
  */
 export const CHILD_CONTRACT_VERSION = 7
-/** The first contract that accepts a turn's `plan_update`, which records TodoWrite as its plan. */
-export const PLAN_CONTRACT_VERSION = 10
+/** The first contract that accepts turn-scoped `plan_update` and `notice` records. */
+export const TURN_ANNOTATION_CONTRACT_VERSION = 10
 /** The first contract that attributes tool edits through `thread capture start` and `stop`. */
 export const CAPTURE_CONTRACT_VERSION = 11
 /** The first contract whose `thread create --parent` forks the parent's conversation with `--fork-after`. */
