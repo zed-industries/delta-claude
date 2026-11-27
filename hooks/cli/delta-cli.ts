@@ -233,10 +233,12 @@ export async function threadCreate(host: Host, creation: {
   organization?: { id: string; visibility: 'private' | 'organization' }
   /**
    * The thread a child is created under. With `fork`, the child is a fork of that thread's conversation
-   * through the record of `after`, a message or tool call id the producer `externalId` recorded there.
+   * through the record of `after`, a message or tool call id the producer `externalId` recorded there,
+   * and shares the parent's worktrees unless `withoutWorktrees`.
    */
   parent?: {
-    reference: string; name?: string; worktrees?: 'shared'; fork?: { externalId: string; after: string }
+    reference: string; name?: string; worktrees?: 'shared'
+    fork?: { externalId: string; after: string; withoutWorktrees?: boolean }
   }
   check?: () => Promise<void>
 }): Promise<JsonObject & CreationReceipt> {
@@ -246,7 +248,8 @@ export async function threadCreate(host: Host, creation: {
     ...parent ? ['--parent', parent.reference] : [],
     ...parent?.name ? ['--name', parent.name] : [],
     ...parent?.worktrees ? [`--${parent.worktrees}-worktrees`] : [],
-    ...parent?.fork ? ['--fork-external-id', parent.fork.externalId, '--fork-after', parent.fork.after] : []],
+    ...parent?.fork ? ['--fork-external-id', parent.fork.externalId, '--fork-after', parent.fork.after] : [],
+    ...parent?.fork?.withoutWorktrees ? ['--no-worktrees'] : []],
     'thread create', { check })
   validateCreationReceipt(created)
   return created

@@ -1,18 +1,22 @@
 /**
  * Recording a Claude conversation forked from a recorded one, as `/fork` and `/branch` make it. The fork
  * records into a subthread of the parent's thread that holds the parent's conversation through the fork
- * point, and shares the parent's checkout, where Claude starts the fork.
+ * point. A fork that starts in the parent's checkout shares its worktrees; one Claude Desktop started in
+ * a Git worktree of its own attaches that checkout instead.
  */
 import type { ApiMessage } from 'claude-code'
 import { requireContract, threadCreate } from '../cli/delta-cli'
 import { DeltaCommandError, FORK_CONTRACT_VERSION } from '../cli/thread-commands'
 import { isJsonObject } from '../core/json'
+import { samePath } from '../core/paths'
 import { type Binding, key, listStoreKeys, load, producerOf, save, serial, storedBinding, transcriptPathOf } from '../core/session-state'
 import type { Host } from '../core/host'
 import { expectedTranscript } from '../core/transcript'
 import { messageUpdates } from '../recording/content'
 import { stageRecord } from '../recording/delivery'
 import { snapshotMessages } from '../recording/snapshot'
+import { attachWorktree } from './checkout'
+import { checkoutRoot } from './share'
 import { FS_READ_LIMIT, readFrom } from '../recording/title'
 
 /**
@@ -116,6 +120,8 @@ export async function adoptFork(host: Host, session: string, isCurrent: () => bo
   const fork = await recordedForkOf(host, session)
   if (!fork || !isCurrent()) return
   const { transcript, origin, parent } = fork
+  const ownCheckout = await forkCheckout(host, parent)
+  if (!isCurrent()) return
   const rows = await readRows(host, transcript)
   const parentRows = new Set((await readRows(host, parent.transcript)).flatMap((row) =>
     isJsonObject(row) && typeof row.uuid === 'string' ? [row.uuid] : []))
@@ -126,7 +132,10 @@ export async function adoptFork(host: Host, session: string, isCurrent: () => bo
     try {
       created = await threadCreate(host, {
         externalId: session,
-        parent: { reference: parent.locator ?? parent.thread, name: origin.name, fork: { externalId: producerOf(parent), after } },
+        parent: {
+          reference: parent.locator ?? parent.thread, name: origin.name,
+          fork: { externalId: producerOf(parent), after, withoutWorktrees: !!ownCheckout },
+        },
       })
       break
     } catch (error) {
@@ -137,13 +146,17 @@ export async function adoptFork(host: Host, session: string, isCurrent: () => bo
   if (!created) throw new Error(`Delta has no record of where this conversation was forked from session ${origin.parent}`)
   const thread = created.thread_id
   const locator = typeof created.reference === 'string' ? created.reference : undefined
+  // Until the attach succeeds nothing is bound, so a later start retries it on the same subthread.
+  const checkout = ownCheckout
+    ? { checkout: ownCheckout, checkoutReference: await attachWorktree(host, ownCheckout, thread, undefined, undefined, session) }
+    : { checkout: parent.checkout, checkoutReference: parent.checkoutReference }
   return serial(async () => {
     const current = await load(host, session)
     if (current.thread || !isCurrent()) return
     let forked: Binding = {
       ...current, thread, ...locator ? { locator } : {}, snapshot: true, transcript,
-      ...parent.checkout ? { checkout: parent.checkout } : {},
-      ...parent.checkoutReference ? { checkoutReference: parent.checkoutReference } : {},
+      ...checkout.checkout ? { checkout: checkout.checkout } : {},
+      ...checkout.checkoutReference ? { checkoutReference: checkout.checkoutReference } : {},
       ...parent.autoUpload ? { autoUpload: parent.autoUpload } : {},
       ...parent.organization ? { organization: parent.organization } : {},
       ...parent.visibility ? { visibility: parent.visibility } : {},
@@ -156,6 +169,17 @@ export async function adoptFork(host: Host, session: string, isCurrent: () => bo
     await save(host, forked)
     return forked
   })
+}
+
+/**
+ * The checkout a fork works in when it is not its parent's, such as the Git worktree Claude Desktop
+ * gives a fork of a worktree session; undefined when the fork shares the parent's checkout. A fork
+ * outside any Git checkout fails, which leaves it unrecorded.
+ */
+async function forkCheckout(host: Host, parent: Binding): Promise<string | undefined> {
+  if (!parent.checkout) return
+  const root = await checkoutRoot(host)
+  return samePath(root, parent.checkout) ? undefined : root
 }
 
 /** Whether a session other than `session` records in a way a fork of it could be adopted. */
