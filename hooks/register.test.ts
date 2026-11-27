@@ -3588,13 +3588,25 @@ describe('the status band', () => {
     fake.expectClean()
   })
 
-  test('/delta share returns at once and reports in the band before exporting', async ($, on) => {
+  test('Desktop /delta share waits for the audience but returns before exporting', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('a'), userText('b'), userText('c')] })
+    fake.surfaces = ['desktop']
     await $.session.start(sessionStart)
+    let answer!: (label: string) => void
+    const choice = new Promise<string>((resolve) => { answer = resolve })
+    fake.answerQuestion = async (event) => ({
+      result: { answers: { [event.questions[0].question]: await choice } },
+    })
     let release!: () => void
     fake.holdExport = new Promise<void>((resolve) => { release = resolve })
+    let returned = false
+    const command = $.command.run(shareCommand).then((result) => { returned = true; return result })
+    await fake.settleUntil(() => fake.questions.length > 0)
+    expect(returned).toBe(false)
+    expect(fake.exports).toBe(0)
+    answer('Share with Zed')
     // Progress is the band's alone: a started share adds no transcript row.
-    expect((await $.command.run(shareCommand)).text).toBeUndefined()
+    expect((await command).text).toBeUndefined()
     // The band reports the running share even before the watch is up.
     expect(await drawBandText($)).toContain('Preparing to share')
     expect(fake.exports).toBe(0)
@@ -3604,6 +3616,19 @@ describe('the status band', () => {
     release()
     await completed
     expect(fake.records()).toHaveLength(3)
+    fake.expectClean()
+  })
+
+  test('Desktop Skip cancels a share without exporting or printing an error', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.surfaces = ['desktop']
+    await $.session.start(sessionStart)
+    fake.answerQuestion = (event) => ({ result: { answers: { [event.questions[0].question]: '[No preference]' } } })
+    expect((await $.command.run(shareCommand)).text).toBeUndefined()
+    await fake.advance(0)
+    expect(fake.exports).toBe(0)
+    expect(fake.server.thread).toBeUndefined()
+    expect(await drawBandText($)).not.toContain('Preparing to share')
     fake.expectClean()
   })
 

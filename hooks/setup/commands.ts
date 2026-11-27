@@ -18,7 +18,7 @@ import {
   DASHBOARD_URL, emailsIn, HEADLESS_REFUSAL, InteractionDismissedError, InteractionUnavailableError, membersUrl,
   openMembersPage, type Organization, runSetupWizard,
 } from './setup'
-import { shareFailureText, startShare, type SessionPause, pauseSession } from '../sharing/share'
+import { pauseSession, type SessionPause, shareFailureText, startCommandShare } from '../sharing/share'
 import { unshare } from '../sharing/unshare'
 import { errorText } from '../core/text'
 
@@ -152,7 +152,8 @@ export async function runDeltaCommand(
   try {
     await activateForCommand(host, session)
     // Sharing and joining report through the band and ask through dialogs, which only these surfaces have.
-    if (!hasInteractiveSurface(await sessionSurfaces(host)))
+    const surfaces = await sessionSurfaces(host)
+    if (!hasInteractiveSurface(surfaces))
       return { text: `${locator ? '/delta-join' : '/delta-share'} needs an interactive Claude Code terminal or Desktop Code tab. Print mode, SDK sessions, and cloud runners aren't supported.` }
     if (locator) {
       if (stateFor(session).currentTurnId || stateFor(session).promptEntering)
@@ -163,12 +164,12 @@ export async function runDeltaCommand(
     }
     if (stateFor(session).currentTurnId)
       return { text: 'Wait for the current Claude turn to finish before sharing.' }
-    startShare(host, { session, cwd: await host.session.cwd(), form, choose: { emails: shareEmails } })
-    // Progress belongs to the band; a command with no text adds no transcript row.
-    return {}
+    return await startCommandShare(host, { session, cwd: await host.session.cwd(), form }, shareEmails, {
+      desktop: surfaces.includes('desktop'),
+    })
   }
   catch (error) {
-    // Only activation can fail here; the share or join itself runs on the clock and reports there.
+    // Failures after the share or join starts in the background are reported in the band.
     const text = shareFailureText(error, locator ? `/delta-join ${locator}` : recoveryCommand(stateFor(session).binding))
     setProgress(host, text, 'error')
     return { text }

@@ -1041,7 +1041,7 @@ export function fakeThreads(hostOn: On, options: {
       // A test answers the dialog through `answerQuestion`; otherwise it is dismissed, as a person
       // who closes the prompt would.
       const answer = fake.answerQuestion?.(e as never)
-      if (answer !== undefined) return answer as never
+      if (answer !== undefined) return await answer as never
       // `/delta share` asks who should see the session; unless a test answers, it takes the first
       // option, sharing with the organization as the command did before it asked.
       const question = (e as any).input?.questions?.[0] ?? (e as any).questions?.[0]

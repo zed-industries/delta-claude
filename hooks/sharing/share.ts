@@ -40,12 +40,10 @@ import { adoptExistingChildren, releaseThreadMounts, restoreChildren } from '../
 import { startConversation, stopConversation, stopWatching } from '../watch/watch'
 
 /**
- * A share to run. With `choose`, the share decides who sees the session once the CLI is checked: the
- * addresses typed after `/delta share`, or else the person's answer. Without it, `audience` decides, as
- * setup asks, or else it shares with the organization, as the band's control asks.
+ * A share to run. Setup supplies an audience; the band's control defaults to the organization.
  */
 export type ShareRequest = {
-  session: string; cwd: string; cancelled?: boolean; form?: CommandForm; choose?: { emails: string[] }; audience?: ShareAudience
+  session: string; cwd: string; cancelled?: boolean; form?: CommandForm; audience?: ShareAudience
 }
 /**
  * What a share's snapshot holds back: while `gate` is raised, new rows wait for the snapshot to be
@@ -204,8 +202,9 @@ async function messagesSince(host: Host, point: StopPoint): Promise<ApiMessage[]
  * shared, because the person chose not to.
  */
 type ShareOutcome = { url?: string; band?: string; notice?: string }
+type PreparedShare = { run: () => Promise<ShareOutcome> } | { text?: string }
 
-async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
+async function prepareShare(host: Host, request: ShareRequest, emails?: string[]): Promise<PreparedShare> {
   const { session } = request
   const check = () => assertShareSession(host, request)
   await assertShareSession(host, request)
@@ -218,7 +217,8 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
     if (binding.joined)
       throw new ShareRefusalError(`this session already records in its subthread; run ${recoveryCommand(binding)} if it stopped syncing`)
     // A move into the subthread that stopped partway finishes from where it stopped.
-    return await finishSubthread(host, session, binding.managedCheckout.thread)
+    const thread = binding.managedCheckout.thread
+    return { run: () => finishSubthread(host, session, thread) }
   }
   if (binding.joined || binding.joinTransition)
     throw new Error(`This session joined an already shared thread. Retry ${recoveryCommand(binding)} to reconnect; joining never attaches or republishes a checkout.`)
@@ -241,20 +241,26 @@ async function share(host: Host, request: ShareRequest): Promise<ShareOutcome> {
     const root = await checkoutRoot(host)
     const managed = await managedCheckoutOf(host, root)
     await assertShareSession(host, request)
-    if (managed) return await shareInManagedCheckout(host, session, managed, {
-      emails: request.choose?.emails ?? [], check,
+    if (managed) return { run: () => shareInManagedCheckout(host, session, managed, {
+      emails: emails ?? [], check,
       // Claude moves out of `root` once the history is staged, so later checks ignore the folder.
       stage: async () => {
         if (binding.stopped) await serial(async () => save(host, withoutUnsentRecords(await load(host, session))))
         if (!binding.snapshot || binding.stopped) await exportHistory(host, request, root)
       },
-    })
+    }) }
   }
   // Asked before anything is staged, so declining leaves the session exactly as it was.
-  const chosen: AudienceAnswer = request.choose
-    ? await chooseAudience(host, session, request.choose.emails) : request.audience ?? { kind: 'organization' }
-  if (chosen.kind === 'none') return chosen.reason ? { notice: chosen.reason } : {}
-  const audience = chosen
+  const audience = emails
+    ? await chooseAudience(host, session, emails) : request.audience ?? { kind: 'organization' }
+  if (audience.kind === 'none') return audience.reason ? { text: audience.reason } : {}
+  return { run: () => share(host, request, binding, audience) }
+}
+
+async function share(host: Host, request: ShareRequest, binding: Binding, audience: ShareAudience): Promise<ShareOutcome> {
+  const { session } = request
+  const check = () => assertShareSession(host, request)
+  const runtime = stateFor(session)
   await assertShareSession(host, request)
   if (runtime.currentTurnId) throw new Error('Wait for the current Claude turn to finish before sharing or reattaching')
   await requireAuthentication(await authenticationHost(host), await resolveCli(host), check, async (text) => {
@@ -529,24 +535,55 @@ function joinedCheckoutRefusal(root: string, joined: Binding): string {
 }
 
 /**
- * Start a share: it is in progress from now, and runs on the clock so `/delta share` returns at once.
+ * Run the share in the background; the slash command only waits for preparation and the audience.
  * The band reports its progress, and once the share succeeds it keeps the link on hand, so nothing is
  * added to the transcript.
  */
-export function startShare(host: Host, request: ShareRequest) {
+function startShare(host: Host, request: ShareRequest, prepare = () => prepareShare(host, request)) {
   requests.share = request
   setProgress(host, 'Preparing to share…', 'active', [1, 5])
   host.clock.after(0, async () => {
-    // The band's share control starts a share before it has read Claude's directory.
-    request.cwd ||= await host.session.cwd()
-    await runShare(host, request)
+    await runShare(host, request, prepare)
   })
 }
 
-async function runShare(host: Host, request: ShareRequest) {
+/** Desktop needs the slash command to stay open until its audience picker is answered. */
+export async function startCommandShare(
+  host: Host, request: ShareRequest, emails: string[], { desktop }: { desktop: boolean },
+): Promise<{ text?: string }> {
+  if (requests.share) return { text: 'A Delta share is already in progress. Wait for its result.' }
+  if (requests.join) return { text: 'A Delta join is already in progress. Wait for its result.' }
+  const prepare = () => prepareShare(host, request, emails)
+  // Terminal can ask in the background; an explicit audience needs no picker on either surface.
+  if (!desktop || emails.length) {
+    startShare(host, request, prepare)
+    return {}
+  }
+  requests.share = request
+  let scheduled = false
+  try {
+    const prepared = await prepare()
+    if (!('run' in prepared)) {
+      if (requests.share === request) clearProgress(host)
+      return prepared
+    }
+    await assertShareSession(host, request)
+    startShare(host, request, async () => prepared)
+    scheduled = true
+    return {}
+  } finally {
+    if (!scheduled && requests.share === request) requests.share = undefined
+  }
+}
+
+async function runShare(host: Host, request: ShareRequest, prepare: () => Promise<PreparedShare>) {
   const { session } = request
   try {
-    const outcome = await share(host, request)
+    // The band's share control starts a share before it has read Claude's directory.
+    request.cwd ||= await host.session.cwd()
+    const ready = await prepare()
+    await assertShareSession(host, request)
+    const outcome: ShareOutcome = 'run' in ready ? await ready.run() : { notice: ready.text }
     if (outcome.band) finishProgress(host, outcome.band, 'done')
     else clearProgress(host)
     if (outcome.notice) await host.ui.log(outcome.notice, { to: 'transcript' })

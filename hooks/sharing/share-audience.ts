@@ -53,7 +53,8 @@ export async function chooseShareAudience(interaction: Interaction, choices: Aud
     `including uncommitted changes, to DeltaDB. To invite people by email instead, select ${TYPE_SOMETHING} ` +
     'and enter their addresses, separated by commas.',
     { options: options.length < 2 ? [...options, CANCEL] : options, header: HEADER })
-  if (answer === CANCEL) return { kind: 'none', reason: '' }
+  // Desktop's Skip button answers with this sentinel rather than dismissing the question.
+  if (answer === CANCEL || answer === '[No preference]') return { kind: 'none', reason: '' }
   if (answer === team) return { kind: 'organization' }
   if (answer === JUST_ME) return { kind: 'private' }
   if (answer === KEEP) return { kind: 'unchanged' }

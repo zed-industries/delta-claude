@@ -27,6 +27,7 @@ describe('share audience', () => {
       { choices: { team: 'Zed', synced: true }, answer: 'Keep current sharing', result: { kind: 'unchanged' }, offered: [team, 'Keep current sharing'] },
       // A personal organization has no team, so "just me" is paired with Cancel.
       { choices: { synced: false }, answer: 'Cancel', result: { kind: 'none', reason: '' }, offered: [justMe, 'Cancel'] },
+      { choices: { team: 'Zed', synced: false }, answer: '[No preference]', result: { kind: 'none', reason: '' }, offered: [team, justMe] },
       { choices: { team: 'Zed', synced: false }, answer: 'ada@example.com, bo@example.com',
         result: { kind: 'invite', emails: ['ada@example.com', 'bo@example.com'] }, offered: [team, justMe] },
       { choices: { team: 'Zed', synced: false }, answer: 'ada', result: { kind: 'none', reason: expect.stringContaining('No email addresses') }, offered: [team, justMe] },
