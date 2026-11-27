@@ -175,7 +175,7 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
-  test("a subthread's Open in Claude Code button joins it here and keeps this conversation in the background", async ($, on) => {
+  test("a subthread's Open button joins it here and keeps this conversation in the background", async ($, on) => {
     const fake = sharedThread(on, $)
     await $.session.start(sessionStart)
     await fake.share($)

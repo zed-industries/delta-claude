@@ -122,7 +122,7 @@ export function itemMarkdown(item: WatchItem, thread: string): string {
 }
 
 /** Event storage can include model-only instructions after its human-readable headline. */
-function eventText(item: WatchItem): string {
+export function eventText(item: WatchItem): string {
   const text = itemText(item) ?? ''
   return (text.split(/\n<(?:subthread-event|review-thread-event|local-changes-forked)\b/, 1)[0] ?? '').trim().replace(/:$/, '')
 }

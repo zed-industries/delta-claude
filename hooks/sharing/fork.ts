@@ -21,10 +21,11 @@ import { FS_READ_LIMIT, readFrom } from '../recording/title'
  */
 const MAX_FORK_POINTS = 8
 /**
- * How much of a transcript's start is read to tell whether it is a fork: `/fork` writes its
- * `derived-from` row among the first rows, and `/branch` marks the first rows it copies.
+ * How much of a transcript's start, and then its end, is read to tell whether it is a fork. `/fork`
+ * writes its `derived-from` row among the first rows and `/branch` marks the first rows it copies,
+ * while Claude Desktop writes `derived-from` after its copy, which a starting fork's file ends with.
  */
-const FORK_HEAD_BYTES = 64 * 1024
+const FORK_WINDOW_BYTES = 64 * 1024
 
 /**
  * The `derived-from` sources that copied a conversation. Others only name a related session, such as
@@ -181,15 +182,18 @@ type RecordedFork = { transcript: string; origin: ForkOrigin; parent: Binding & 
 /** The fork `session` is of a recorded session; a transcript that is missing or unreadable is no fork. */
 async function recordedForkOf(host: Host, session: string): Promise<RecordedFork | undefined> {
   let transcript: string | undefined
-  let head: unknown[]
+  let origin: ForkOrigin | undefined
   try {
     // Only a fork of a recorded session is adopted, so without one the transcript isn't read.
     if (!await anyForkParent(host, session)) return
     transcript = transcriptPathOf(session) ?? await expectedTranscript(host, session)
     if (!transcript || !await host.fs.exists(transcript)) return
-    head = await readRows(host, transcript, FORK_HEAD_BYTES)
+    origin = forkOriginOf(await readRows(host, transcript, { limit: FORK_WINDOW_BYTES }))
+    const size = origin ? 0 : (await host.fs.stat(transcript)).size
+    if (size > FORK_WINDOW_BYTES) {
+      origin = forkOriginOf(await readRows(host, transcript, { offset: size - FORK_WINDOW_BYTES }))
+    }
   } catch { return }
-  const origin = forkOriginOf(head)
   if (!origin) return
   const parent = await storedBinding(host, key(origin.parent))
   if (!parent || !canParentFork(parent)) return
@@ -200,12 +204,12 @@ async function recordedForkOf(host: Host, session: string): Promise<RecordedFork
 }
 
 /**
- * The rows of the transcript at `path`, or of about its first `limit` bytes, where the read stops; a
- * line that does not parse, such as the cut last line of a limited read, is left out.
+ * The rows of the transcript at `path` from byte `offset`, or of about `limit` bytes from there, where
+ * the read stops; a line that does not parse, such as a window's cut first or last line, is left out.
  */
-async function readRows(host: Host, path: string, limit = Infinity): Promise<unknown[]> {
+async function readRows(host: Host, path: string, { offset = 0, limit = Infinity } = {}): Promise<unknown[]> {
   let text = ''
-  try { await readFrom(host, path, 0, (piece) => { text += piece; return text.length < limit }) }
+  try { await readFrom(host, path, offset, (piece) => { text += piece; return text.length < limit }) }
   catch {
     if ((await host.fs.stat(path)).size > FS_READ_LIMIT) throw new Error(`${path} is too large to read`)
     text = await host.fs.read(path)

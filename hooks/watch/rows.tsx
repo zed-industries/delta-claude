@@ -5,8 +5,8 @@
 
 import { authorColor } from '../band/band'
 import {
-  addRows, commentAction, commentAuthor, commentDisplay, commentMarkdown, commentQuote, createdSubthread, isDrawnItem, isEventItem,
-  isThoughtItem, itemAuthor, itemDisplay, itemMarkdown, keyedComment, type PendingRow,
+  addRows, commentAction, commentAuthor, commentDisplay, commentMarkdown, commentQuote, createdSubthread, eventText, isDrawnItem, isEventItem,
+  isThoughtItem, itemAuthor, itemDisplay, itemMarkdown, keyedComment, type PendingRow, personParagraphs,
 } from './conversation'
 import { DrawQueue, EMPTY_ROW_TEXT, shownItemId } from './row-delivery'
 import { drawnRowKey, type HookEvent, type HookNext, ledgerKey, report, stateFor } from '../core/session-state'
@@ -310,15 +310,17 @@ export async function drawRow(
   if (!isDrawnItem(item)) return <Box />
   if (isEventItem(item)) {
     const subthread = createdSubthread(item)
-    // A plain control set off by two spaces, as the band draws its own.
     return <Box flexDirection="column">
-      <Box flexDirection="row">
-        <Text dimColor>{subthread ? 'Delta activity  ' : 'Delta activity'}</Text>
-        {subthread ? <Button key="delta-open-subthread" plain {...e.surface === 'terminal' ? {} : { dimColor: true }}
-          label="Open in Claude Code"
-          onPress={() => { void openSubthread(host, subthread).catch((error) => report(host, error)) }} /> : null}
-      </Box>
-      <Markdown key="delta-event" text={itemMarkdown(item, view.thread)} />
+      <Text dimColor>Delta activity</Text>
+      {subthread
+        // The one-line notice, then a plain control set off by two spaces, as the band draws its own.
+        ? <Box key="delta-event" flexDirection="row">
+          <Text>{`${personParagraphs(eventText(item)).join(' ')}  `}</Text>
+          <Button key="delta-open-subthread" plain {...e.surface === 'terminal' ? {} : { dimColor: true }}
+            label="Open"
+            onPress={() => { void openSubthread(host, subthread).catch((error) => report(host, error)) }} />
+        </Box>
+        : <Markdown key="delta-event" text={itemMarkdown(item, view.thread)} />}
     </Box>
   }
   // An author keeps the color the band gives them; a person's message and their agent's are told apart by label.
