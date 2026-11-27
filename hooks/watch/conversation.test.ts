@@ -1,7 +1,7 @@
 import { describe, expect, test, tier } from 'claude-code/testing'
 import {
   addRows, commentAction, commentDisplay, commentFingerprint, commentKey, commentQuote, conversationText,
-  conversationWebLink, DISPLAY_LIMIT, earlierItemsNotice, isDrawnItem, isMessageItem, itemAuthor, itemDisplay,
+  conversationWebLink, createdSubthread, DISPLAY_LIMIT, earlierItemsNotice, isDrawnItem, isMessageItem, itemAuthor, itemDisplay,
   itemFingerprint, itemMarkdown, type Ledger, LEDGER_SAVE_INTERVAL, MARKDOWN_LIMIT, middleTruncate, OMITTED,
   omittedItemsRow, type PendingRow, personParagraphs, type QuotedLine, RemoteView, removedItemRow, renderComment,
   renderItem, type RowSink, SNAPSHOT_TAIL, THOUGHT,
@@ -86,6 +86,13 @@ describe('conversation', () => {
     expect(itemAuthor(view.items.get('item-1')!)).toBe('Ada')
     // Attribution is not content, so the resolved re-send adds no correction row.
     expect(await texts(view)).toEqual([])
+  })
+
+  test('a created subthread can be opened, but not a land subthread or another event', () => {
+    const event = (tag: string) => item(`Fork: Greeting\n${tag}\n</subthread-event>`, { kind: 'subthread_event' })
+    expect(createdSubthread(event('<subthread-event thread_id="child" event="created" from="Ada" note="n">'))).toBe('child')
+    expect(createdSubthread(event('<subthread-event kind="land" thread_id="land" event="created" from="Ada" note="n">'))).toBeUndefined()
+    expect(createdSubthread(event('<subthread-event thread_id="parent" event="forked-from" note="n">'))).toBeUndefined()
   })
 
   test('thread events are drawn without model-only markup, while context retains the full event', async () => {

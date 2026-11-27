@@ -428,6 +428,8 @@ export function fakeThreads(hostOn: On, options: {
     storeKeysError: undefined as string | undefined,
     files: new FixtureFiles(),
     commands: [] as string[][],
+    /** The arguments of each `claude --bg` run. */
+    backgroundRuns: [] as string[][],
     /** The timeout each `delta --json org` command ran with, in order. */
     orgTimeouts: [] as (number | undefined)[],
     watches: [] as Watch[],
@@ -1168,6 +1170,10 @@ export function fakeThreads(hostOn: On, options: {
         isStdoutTruncated: bytes.length > limit, isStderrTruncated: false } }
     }
     if (argv[0] === 'claude' && fake.claudeMissing) return output('', 127, 'claude: command not found')
+    if (argv[0] === 'claude' && argv[1] === '--bg') {
+      fake.backgroundRuns.push(argv)
+      return output('backgrounded · 3f8b154b\n')
+    }
     if (argv[0] === 'claude' && argv.slice(1).join(' ') === 'plugin list --json') {
       fake.pluginListCalls++
       return output(JSON.stringify(fake.pluginInstalled ? [{

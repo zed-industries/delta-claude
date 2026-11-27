@@ -3,7 +3,7 @@
  * retries, turn executions, checkout verification, capture failures, and refused offline changes.
  */
 import type { ApiMessage } from 'claude-code'
-import { activationIncomplete, captureDecided, noticeSession, outbox } from '../setup/activation'
+import { activationIncomplete, captureDecided, noticeSession, outbox, sessionBegun } from '../setup/activation'
 import type { Entry } from '../subagents/children'
 import { capturedMessage, isOmittedTool, messageUpdates, resultUpdate, toolInfo, type Update } from './content'
 import { deliveryFailure, deliveryRetryDelay } from './delivery-policy'
@@ -777,6 +777,9 @@ export async function startTurn(host: Host, e: HookEvent<'turn.start'>, next: Ho
   const session = await host.session.id()
   await noticeSession(host, session)
   await captureDecided(session)
+  // A session that starts recording as it begins, as a fork of a recorded conversation does, records
+  // its first turn once that start finishes.
+  if (!stateFor(session).binding?.snapshot) await sessionBegun(session)
   const runtime = stateFor(session)
   if (!runtime.syncReminderDismissed) {
     runtime.syncReminderDismissed = true

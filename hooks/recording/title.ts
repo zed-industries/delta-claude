@@ -218,8 +218,11 @@ async function scanTranscript(host: Host, reader: TitleReader, start: number, si
   reader.offset = size
 }
 
-/** Stream a file from a byte offset to its end, without holding it whole. */
-export async function readFrom(host: Host, path: string, offset: number, onText: (text: string) => void) {
+/**
+ * Stream a file from a byte offset to its end, without holding it whole. The read stops early once
+ * `onText` returns false.
+ */
+export async function readFrom(host: Host, path: string, offset: number, onText: (text: string) => boolean | void) {
   const stream = host.process.spawn(transcriptRead(path, offset, await host.env.os() === 'Windows_NT'))
   const deadline = new AbortController()
   let timedOut = false
@@ -238,7 +241,7 @@ export async function readFrom(host: Host, path: string, offset: number, onText:
         return
       }
       if (piece.value.stream === 'stderr') stderr = (stderr + piece.value.text).slice(-4000)
-      else onText(piece.value.text)
+      else if (onText(piece.value.text) === false) return
     }
   } finally {
     deadline.abort()

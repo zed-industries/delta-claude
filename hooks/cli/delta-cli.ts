@@ -231,14 +231,23 @@ export async function authStatus(host: Host): Promise<{ login: string | undefine
 export async function threadCreate(host: Host, creation: {
   externalId: string
   organization?: { id: string; visibility: 'private' | 'organization' }
-  parent?: { reference: string; name: string; worktrees?: 'shared' }
+  /**
+   * The thread a child is created under. With `fork`, the child is a fork of that thread's conversation
+   * through the record of `after`, a message or tool call id the producer `externalId` recorded there.
+   */
+  parent?: {
+    reference: string; name?: string; worktrees?: 'shared'; fork?: { externalId: string; after: string }
+  }
   check?: () => Promise<void>
 }): Promise<JsonObject & CreationReceipt> {
   const { externalId, organization, parent, check } = creation
   const created = await command(host, ['thread', 'create', '--source', 'claude-code', '--external-id', externalId,
     ...organization ? ['--organization', organization.id, '--visibility', organization.visibility] : [],
-    ...parent ? ['--parent', parent.reference, '--name', parent.name] : [],
-    ...parent?.worktrees ? [`--${parent.worktrees}-worktrees`] : []], 'thread create', { check })
+    ...parent ? ['--parent', parent.reference] : [],
+    ...parent?.name ? ['--name', parent.name] : [],
+    ...parent?.worktrees ? [`--${parent.worktrees}-worktrees`] : [],
+    ...parent?.fork ? ['--fork-external-id', parent.fork.externalId, '--fork-after', parent.fork.after] : []],
+    'thread create', { check })
   validateCreationReceipt(created)
   return created
 }

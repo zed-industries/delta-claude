@@ -175,6 +175,26 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
   })
 
+  test("a subthread's Open in Claude Code button joins it here and keeps this conversation in the background", async ($, on) => {
+    const fake = sharedThread(on, $)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    const previous = fake.session
+    const event = remoteItem(`Fork: Respond to greeting\n<subthread-event thread_id="${fake.threadId}" event="created" from="Ada" note="Informational.">\n</subthread-event>`, { kind: 'subthread_event' })
+    fake.upsert(event)
+    await fake.settle()
+    const row = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'CommandOutput',
+      props: { command: 'delta', args: `show ${event.id}`, text: '', isErrored: false } })
+    await row.press({ key: 'delta-open-subthread' })
+    await finishJoin(fake)
+    await fake.settle()
+    expect(fake.session).not.toBe(previous)
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ joined: true, snapshot: true })
+    // The checkout runs as a --plugin-dir copy, which the resumed session must load to find its binding.
+    expect(fake.backgroundRuns).toEqual([['claude', '--bg', '--plugin-dir', expect.any(String), '--resume', previous]])
+    await $.session.end(sessionEnd(fake.session))
+  })
+
   test("a join's fresh session participates and names its producer", async ($, on) => {
     const fake = sharedThread(on, $)
     await $.session.start(sessionStart)

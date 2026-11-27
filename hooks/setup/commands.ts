@@ -3,7 +3,7 @@
  */
 import { activate, noticeSession, refreshReminder, sessionBegun } from './activation'
 import { setProgress, showUpdateProgress } from '../band/band'
-import { type CommandForm, orgCommand } from '../cli/delta-cli'
+import { type CommandForm, orgCommand, threadStatus } from '../cli/delta-cli'
 import { chooseDeltaAction, type MenuStart } from './delta-menu'
 import { InstallationUpdates, type UpdateHost } from '../cli/install-update'
 import { claudeInteraction, offerToStopWaiting, setupEnv } from './interaction'
@@ -105,7 +105,9 @@ export function installUpdateHost(host: Host): UpdateHost {
 }
 
 /** Run one `/delta` action, such as `share` or `join <link>`, from `/delta` or its menu command. */
-export async function runDeltaCommand(host: Host, action: string, form: CommandForm): Promise<{ text?: string }> {
+export async function runDeltaCommand(
+  host: Host, action: string, form: CommandForm, options: { keepSession?: boolean } = {},
+): Promise<{ text?: string }> {
   await noticeSession(host)
   if (action === 'plugin-update' || action.startsWith('plugin-update '))
     return pluginUpdateCommand(host, action.slice('plugin-update'.length).trim())
@@ -155,7 +157,7 @@ export async function runDeltaCommand(host: Host, action: string, form: CommandF
     if (locator) {
       if (stateFor(session).currentTurnId || stateFor(session).promptEntering)
         return { text: 'Wait for the current Claude turn to finish before joining.' }
-      startJoin(host, { session, cwd: await host.session.cwd(), locator, form })
+      startJoin(host, { session, cwd: await host.session.cwd(), locator, form, keepSession: options.keepSession })
       // Progress belongs to the band; a command with no text adds no transcript row.
       return {}
     }
@@ -186,3 +188,16 @@ function pauseText(outcome: SessionPause): string {
 }
 
 export const installationUpdates = new InstallationUpdates()
+
+/**
+ * Join the subthread `thread` in this terminal by its link, keeping the current conversation open as a
+ * background session the agent view switches back to.
+ */
+export async function openSubthread(host: Host, thread: string) {
+  const session = await host.session.id()
+  let locator = thread
+  try { locator = (await threadStatus(host, thread, session)).url ?? thread }
+  catch { /* the join reports a thread it cannot reach */ }
+  const { text } = await runDeltaCommand(host, `join ${locator}`, 'delta_subcommand', { keepSession: true })
+  if (text) await host.ui.log(text, { to: 'transcript' })
+}

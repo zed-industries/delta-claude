@@ -69,6 +69,17 @@ export function isEventItem(item: WatchItem): boolean {
   return EVENT_KINDS.has(item.kind) && !!itemText(item)?.trim()
 }
 
+/**
+ * The subthread a subthread event announces was created, which a Claude session can join. A land
+ * subthread is left out: it holds a merge, not a conversation to continue.
+ */
+export function createdSubthread(item: WatchItem): string | undefined {
+  if (item.kind !== 'subthread_event') return
+  const tag = /<subthread-event\b([^>]*)>/.exec(itemText(item) ?? '')?.[1]
+  if (!tag || !/\bevent="created"/.test(tag) || /\bkind="land"/.test(tag)) return
+  return /\bthread_id="([^"]+)"/.exec(tag)?.[1]
+}
+
 /** Whether an item is drawn for the person as the plugin's own command output row. */
 export function isDrawnItem(item: WatchItem): boolean {
   return isMessageItem(item) || isEventItem(item) || item.kind === 'tool_call'

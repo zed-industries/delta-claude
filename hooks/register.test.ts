@@ -3749,7 +3749,7 @@ describe('the recording contract', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [userText('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 12, max: 13 }
+    fake.contractRange = { min: 14, max: 15 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -3786,7 +3786,7 @@ describe('the recording contract', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 12, max: 13 }
+    fake.contractRange = { min: 14, max: 15 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
@@ -3808,7 +3808,7 @@ describe('the recording contract', () => {
     const checksAtAppend: number[] = []
     fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
     // An incompatible CLI is refused before anything is appended.
-    fake.contractRange = { min: 12, max: 13 }
+    fake.contractRange = { min: 14, max: 15 }
     await $.session.start(sessionStart)
     await fake.settle()
     expect(checksAtAppend).toEqual([])

@@ -5,15 +5,16 @@
 
 import { authorColor } from '../band/band'
 import {
-  addRows, commentAction, commentAuthor, commentDisplay, commentMarkdown, commentQuote, isDrawnItem, isEventItem,
+  addRows, commentAction, commentAuthor, commentDisplay, commentMarkdown, commentQuote, createdSubthread, isDrawnItem, isEventItem,
   isThoughtItem, itemAuthor, itemDisplay, itemMarkdown, keyedComment, type PendingRow,
 } from './conversation'
 import { DrawQueue, EMPTY_ROW_TEXT, shownItemId } from './row-delivery'
-import { drawnRowKey, type HookEvent, type HookNext, ledgerKey, stateFor } from '../core/session-state'
+import { drawnRowKey, type HookEvent, type HookNext, ledgerKey, report, stateFor } from '../core/session-state'
 import type { Host } from '../core/host'
 import { personColor, personKey, toolRowParts } from '../band/status'
 import { errorText } from '../core/text'
 import { feed, watchedSession } from './watch'
+import { openSubthread } from '../setup/commands'
 
 /** Rows waiting to be drawn into Claude's transcript, one at a time. */
 const drawQueue = new DrawQueue()
@@ -273,7 +274,7 @@ export async function drawRow(
   if (id === undefined) return next(e)
   const view = feed.view
   const item = view?.items.get(id)
-  const { Box, Text, Markdown } = host.ui.resolve(e)
+  const { Box, Button, Text, Markdown } = host.ui.resolve(e)
   if (view?.wasRemoved(id)) return <Box />
   const commentId = keyedComment(id)
   if (commentId !== undefined) {
@@ -307,10 +308,19 @@ export async function drawRow(
   </Text>
   // An item with nothing left to draw, such as an agent message that only held a comment reply.
   if (!isDrawnItem(item)) return <Box />
-  if (isEventItem(item)) return <Box flexDirection="column">
-    <Text dimColor>Delta activity</Text>
-    <Markdown key="delta-event" text={itemMarkdown(item, view.thread)} />
-  </Box>
+  if (isEventItem(item)) {
+    const subthread = createdSubthread(item)
+    // A plain control set off by two spaces, as the band draws its own.
+    return <Box flexDirection="column">
+      <Box flexDirection="row">
+        <Text dimColor>{subthread ? 'Delta activity  ' : 'Delta activity'}</Text>
+        {subthread ? <Button key="delta-open-subthread" plain {...e.surface === 'terminal' ? {} : { dimColor: true }}
+          label="Open in Claude Code"
+          onPress={() => { void openSubthread(host, subthread).catch((error) => report(host, error)) }} /> : null}
+      </Box>
+      <Markdown key="delta-event" text={itemMarkdown(item, view.thread)} />
+    </Box>
+  }
   // An author keeps the color the band gives them; a person's message and their agent's are told apart by label.
   const agent = item.kind !== 'user_message'
   if (item.kind === 'tool_call') {

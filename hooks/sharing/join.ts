@@ -17,7 +17,8 @@ import {
   activeBackgroundAgents, joinPreflight, missingJoinCommands, releasesMounts,
   type SessionDirectories, sessionDirectories, sessionSurfaces, worktreeChanges,
 } from './lifecycle'
-import { samePath } from '../core/paths'
+import { isWithin, samePath } from '../core/paths'
+import { claudeConfigDir } from '../core/transcript'
 import {
   activation, type Binding, isPaused, key, load, recoveryCommand, report, requests, resumeCheckout, save,
   serial, sessions, type SessionState, stateFor, storedBinding,
@@ -31,11 +32,36 @@ import { isRetrying, isCurrentReady, startConversation, statusFields, stopConver
 import { deliverNote, rowsHeld } from '../watch/rows'
 import { releaseThreadMounts } from '../subagents/thread-runs'
 
+/**
+ * Resume `session` as a background Claude session, where the agent view lists it, after this
+ * terminal moved on from it. It keeps its binding, so it records into its thread as before.
+ */
+async function resumeInBackground(host: Host, session: string, cwd: string) {
+  try {
+    const result = await host.process.run(['claude', '--bg', ...await sameCopyArgs(host), '--resume', session],
+      { cwd, timeoutMs: 30_000 })
+    if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `claude exited with status ${result.exitCode}`)
+  } catch (error) {
+    await host.ui.log(`Delta couldn't keep the previous conversation open in the background: ${errorText(error)}. Resume it with claude --resume ${session}.`, { to: 'transcript' })
+  }
+}
+
+/**
+ * Arguments that make another Claude session load this copy of the plugin. Each copy keeps its own
+ * store, so a session given the installed copy in place of a `--plugin-dir` one finds no binding.
+ */
+async function sameCopyArgs(host: Host): Promise<string[]> {
+  const config = await claudeConfigDir(host)
+  return config && isWithin(host.plugin.root, `${config}/plugins`) ? [] : ['--plugin-dir', host.plugin.root]
+}
+
 /** A join to finish in a session; `owner` names a mount another session made for it to take over. */
 export type JoinPlan = { session: string; cwd: string; locator: string; thread: string; owner?: string }
 export type JoinRequest = {
   session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean
   contractVersion?: number; form?: CommandForm
+  /** Resume the joining session in the background once it is cleared, so its conversation stays open. */
+  keepSession?: boolean
 }
 /** How often an offered hand-off is checked; the claiming session is another process. */
 const HANDOFF_POLL_MS = 2_000
@@ -155,6 +181,7 @@ async function joinSession(host: Host, request: JoinRequest) {
       throw new Error('Claude did not create a fresh session after /clear; the old binding was not replaced')
     }
     request.fresh = fresh
+    if (request.keepSession) void resumeInBackground(host, request.session, request.cwd)
     await assertJoinSession(host, fresh, request)
     if ((await load(host, fresh)).snapshot)
       throw new Error('The new Claude session already has a binding; it was not replaced')

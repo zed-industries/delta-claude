@@ -11,6 +11,7 @@ import {
 import { CONTRACT_TIMEOUT_MS, requireContract, resolveCli, threadCreate } from '../cli/delta-cli'
 import { authenticationHost, claudeInteraction, notifyOnce, setupEnv } from './interaction'
 import { attachWorktree, beginRestoreCheckout, checkoutNeedsMount, mountCheckout } from '../sharing/checkout'
+import { adoptFork, isRecordedFork } from '../sharing/fork'
 import { beginRestore, claimHandoff, pendingHandoff, startParticipation } from '../sharing/join'
 import { hasInteractiveSurface, sessionSurfaces } from '../sharing/lifecycle'
 import { listOrganizations, organizationName } from './organizations'
@@ -93,6 +94,12 @@ export async function activate(host: Host, session: string, isCurrent = () => tr
       }
       if (parent) binding = await adoptContinuation(host, session, parent.session) ?? binding
       if (!ownsActivation()) return
+      // A conversation Claude Code forked from a recording session records into a fork of its thread.
+      if (!binding.thread) {
+        try { binding = await adoptFork(host, session, ownsActivation) ?? binding }
+        catch (error) { if (ownsActivation()) await report(host, error) }
+        if (!ownsActivation()) return
+      }
     }
     const runtime = stateFor(session)
     runtime.binding = binding
@@ -313,13 +320,13 @@ async function beginSession(host: Host, session: string) {
   }
   const binding = sessions.get(session)?.binding
   // `session.start` or a prompt may have activated the session already; activating it again would stop
-  // what that activation started, such as a setup. One that continues another session's conversation
-  // is activated again, which takes the conversation over now that its start is known.
+  // what that activation started, such as a setup. One that continues or forks another session's
+  // conversation is activated again, which records it now that its start is known.
   let activates = activation.session !== session || !binding
   if (!activates && binding && continuationCandidate(session, binding)) {
     try {
       const parent = await continuedFrom(host, session)
-      activates = parent !== undefined && parent !== 'unavailable'
+      activates = parent !== undefined && parent !== 'unavailable' || await isRecordedFork(host, session)
     } catch (error) { await report(host, error) }
   }
   if (activates) {
